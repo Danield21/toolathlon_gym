@@ -68,6 +68,16 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                     min_rows = max(1, len(gt_rows) - 2)
                     check(f"{sheet_name} has >= {min_rows} data rows", len(data_rows) >= min_rows, f"got {len(data_rows)}")
 
+                    # Categorical / enum columns where lenient substring match
+                    # would let "Confirmed (strong)" pass for "Confirmed". For
+                    # these, require exact normalized enum match.
+                    STRICT_ENUM_COLUMNS = {
+                        'validation_status': {'confirmed', 'partial', 'rejected',
+                                               'inconclusive', 'pending', 'unverified'},
+                        'outlook': {'bullish', 'bearish', 'neutral',
+                                    'positive', 'negative', 'mixed'},
+                    }
+
                     # Cell value comparison against groundtruth
                     header_map = {h: i for i, h in enumerate(headers)}
                     gt_header_map = {h: i for i, h in enumerate(gt_headers)}
@@ -92,9 +102,15 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                                 gs = str(gv).strip().lower()
                                 avs = str(av).strip().lower()
                                 if gs:
-                                    check(f"{sheet_name} R{ri+2} {gt_h} text",
-                                          gs == avs or gs in avs or avs in gs,
-                                          f"expected {gs[:50]}, got {avs[:50]}")
+                                    if gt_h in STRICT_ENUM_COLUMNS:
+                                        # Strict enum: must match exactly.
+                                        check(f"{sheet_name} R{ri+2} {gt_h} enum match",
+                                              gs == avs,
+                                              f"expected enum {gs!r}, got {avs!r}")
+                                    else:
+                                        check(f"{sheet_name} R{ri+2} {gt_h} text",
+                                              gs == avs or gs in avs or avs in gs,
+                                              f"expected {gs[:50]}, got {avs[:50]}")
 
     # Check Sector_Research_Brief.docx
     docx_path = os.path.join(agent_workspace, "Sector_Research_Brief.docx")
@@ -117,9 +133,22 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         else:
             check("Sector_Research_Brief.docx has headings", len(headings) >= 2, f"found {len(headings)} headings")
 
-    # Check Python script exists (terminal usage)
-    py_files = [f for f in os.listdir(agent_workspace) if f.endswith(".py")]
-    check("Python analysis script exists", len(py_files) >= 1, f"found: {py_files}")
+    # Check Python script exists (terminal usage) — task.md specifies sector_analyst.py
+    sa_path = os.path.join(agent_workspace, "sector_analyst.py")
+    check("sector_analyst.py exists", os.path.isfile(sa_path), f"missing: {sa_path}")
+    if os.path.isfile(sa_path):
+        with open(sa_path) as _f:
+            _src = _f.read()
+        # Must reference the two input JSON files and the output JSON
+        check("sector_analyst.py references financial_data.json",
+              "financial_data.json" in _src,
+              "missing reference to financial_data.json")
+        check("sector_analyst.py references research_findings.json",
+              "research_findings.json" in _src,
+              "missing reference to research_findings.json")
+        check("sector_analyst.py references sector_analysis.json",
+              "sector_analysis.json" in _src,
+              "missing reference to sector_analysis.json")
 
     return FAIL_COUNT == 0, f"Passed {PASS_COUNT}/{PASS_COUNT + FAIL_COUNT} checks"
 

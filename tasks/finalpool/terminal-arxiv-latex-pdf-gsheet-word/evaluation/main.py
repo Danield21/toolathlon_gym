@@ -19,6 +19,8 @@ DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+LOCAL_FAIL_COUNT = 0
+CURRENT_CATEGORY = "runtime"
 
 TARGET_IDS = {"2401.00101", "2401.00102", "2401.00103", "2401.00104"}
 NOISE_IDS = {"2401.00201", "2401.00202"}
@@ -40,12 +42,14 @@ EXPECTED_RECS = {
 
 
 def check(name, condition, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+    global PASS_COUNT, FAIL_COUNT, LOCAL_FAIL_COUNT
     if condition:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if CURRENT_CATEGORY == "local":
+            LOCAL_FAIL_COUNT += 1
         print(f"  [FAIL] {name}: {str(detail)[:200]}")
 
 
@@ -232,6 +236,8 @@ def check_gsheet():
 
 def check_word(agent_workspace):
     """Check Conference_Review_Summary.docx."""
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "local"
     print("\n=== Checking Conference_Review_Summary.docx ===")
     docx_path = os.path.join(agent_workspace, "Conference_Review_Summary.docx")
     check("Conference_Review_Summary.docx exists", os.path.isfile(docx_path))
@@ -269,6 +275,18 @@ def check_word(agent_workspace):
                   nid not in text,
                   f"Found noise paper {nid}")
 
+        # Verify each target paper has its own subsection mentioning strengths AND weaknesses
+        # We'll count how many target paper IDs appear within a paragraph that also has
+        # 'strength' or 'weakness' nearby
+        for pid in TARGET_IDS:
+            # Check the paper has a dedicated section by checking window around paper id
+            idx = text.find(pid)
+            if idx >= 0:
+                window = text[max(0, idx-500):idx+2000]
+                has_sw = ("strength" in window or "weakness" in window)
+                check(f"Paper {pid} has strengths/weaknesses discussion",
+                      has_sw, f"No strength/weakness near {pid}")
+
     except ImportError:
         check("python-docx available", False)
     except Exception as e:
@@ -277,6 +295,8 @@ def check_word(agent_workspace):
 
 def check_json_files(agent_workspace):
     """Check intermediate JSON files."""
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "runtime"
     print("\n=== Checking Intermediate JSON Files ===")
 
     # methodology_analysis.json
@@ -363,7 +383,9 @@ def main():
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
-    sys.exit(0 if accuracy >= 70 else 1)
+    print(f"Local FAIL_COUNT: {LOCAL_FAIL_COUNT}, Total FAIL_COUNT: {FAIL_COUNT}")
+    # Local (Word doc) must be clean; runtime (gsheet/JSON) may fail in GT-only mode
+    sys.exit(0 if LOCAL_FAIL_COUNT == 0 and accuracy >= 70 else 1)
 
 
 if __name__ == "__main__":

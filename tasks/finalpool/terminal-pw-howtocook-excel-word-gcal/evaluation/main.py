@@ -167,9 +167,12 @@ def main():
         args.agent_workspace, args.groundtruth_workspace,
         args.launch_time, args.res_log_file
     )
+    # Reverse validation must be included in the final verdict; otherwise its
+    # failures (negative costs, weekend meal-prep events) are silently ignored.
     check_reverse_validation(args.agent_workspace)
+    overall_ok = FAIL_COUNT == 0
     print(message)
-    sys.exit(0 if success else 1)
+    sys.exit(0 if overall_ok else 1)
 
 
 if __name__ == "__main__":

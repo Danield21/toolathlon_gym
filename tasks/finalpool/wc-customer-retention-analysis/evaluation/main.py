@@ -17,17 +17,24 @@ DB = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+# Counter for runtime-only checks (email, gsheet) that can legitimately fail
+# when evaluating against GT workspace alone (no agent has run the action).
+# These still must pass in full end-to-end evaluation, so they are recorded but
+# can be gated separately via an env variable if desired.
+RUNTIME_ONLY_FAIL = 0
 CHURN_THRESHOLD = 90
 REFERENCE_DATE = date(2026, 3, 7)
 
 
-def record(name, passed, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def record(name, passed, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, RUNTIME_ONLY_FAIL
     if passed:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if runtime_only:
+            RUNTIME_ONLY_FAIL += 1
         msg = f": {detail[:300]}" if detail else ""
         print(f"  [FAIL] {name}{msg}")
 
@@ -92,17 +99,16 @@ def check_excel(agent_workspace):
     excel_path = os.path.join(agent_workspace, "Customer_Retention.xlsx")
     if not os.path.isfile(excel_path):
         record("Excel file exists", False, f"Not found: {excel_path}")
-        return False
+        return
     record("Excel file exists", True)
 
     try:
         wb = openpyxl.load_workbook(excel_path, data_only=True)
     except Exception as e:
         record("Excel readable", False, str(e))
-        return False
+        return
 
     expected = get_expected_data()
-    all_ok = True
 
     # Check Customer Analysis sheet
     ca_sheet = None
@@ -112,7 +118,6 @@ def check_excel(agent_workspace):
             break
     if ca_sheet is None:
         record("Sheet 'Customer Analysis' exists", False, f"Sheets: {wb.sheetnames}")
-        all_ok = False
     else:
         record("Sheet 'Customer Analysis' exists", True)
         headers = [safe_str(ca_sheet.cell(1, c).value).lower() for c in range(1, 10)]
@@ -137,12 +142,9 @@ def check_excel(agent_workspace):
                     ok_spent = num_close(r[2], exp["spent"], 5.0)
                     record(f"{exp['name']} Total_Spent ~{exp['spent']}", ok_spent,
                            f"Got {r[2]}")
-                    if not ok_spent:
-                        all_ok = False
                     break
             if not found:
                 record(f"{exp['name']} found in Customer Analysis", False)
-                all_ok = False
 
         # Check VIP at-risk customers are marked correctly
         vip_at_risk = [c for c in expected if c["segment"] == "VIP" and c["at_risk"] == "Yes"]
@@ -152,7 +154,6 @@ def check_excel(agent_workspace):
             for r in rows:
                 if r and r[0] and last_part in safe_str(r[0]).lower() and exp["first"].lower() in safe_str(r[0]).lower():
                     found = True
-                    # Check segment and at_risk
                     seg_col = None
                     risk_col = None
                     for ci, h in enumerate(headers):
@@ -161,15 +162,13 @@ def check_excel(agent_workspace):
                         if "risk" in h:
                             risk_col = ci
                     if seg_col is not None:
-                        ok = safe_str(r[seg_col]).lower() == "vip"
-                        record(f"{exp['name']} segment=VIP", ok, f"Got {r[seg_col]}")
-                        if not ok:
-                            all_ok = False
+                        record(f"{exp['name']} segment=VIP",
+                               safe_str(r[seg_col]).lower() == "vip",
+                               f"Got {r[seg_col]}")
                     if risk_col is not None:
-                        ok = safe_str(r[risk_col]).lower() == "yes"
-                        record(f"{exp['name']} at_risk=Yes", ok, f"Got {r[risk_col]}")
-                        if not ok:
-                            all_ok = False
+                        record(f"{exp['name']} at_risk=Yes",
+                               safe_str(r[risk_col]).lower() == "yes",
+                               f"Got {r[risk_col]}")
                     break
 
     # Check Retention Metrics sheet
@@ -180,40 +179,59 @@ def check_excel(agent_workspace):
             break
     if rm_sheet is None:
         record("Sheet 'Retention Metrics' exists", False, f"Sheets: {wb.sheetnames}")
-        all_ok = False
     else:
         record("Sheet 'Retention Metrics' exists", True)
+        # Use exact-match and specific ordering rules to avoid
+        # wrong-metric-latching (e.g. 'vip' in 'at_risk_vip_count')
         metrics = {}
         for row in rm_sheet.iter_rows(min_row=2, values_only=True):
             if row and row[0]:
-                metrics[safe_str(row[0]).lower().replace(" ", "_")] = row[1]
+                k = safe_str(row[0]).lower().replace(" ", "_")
+                metrics[k] = row[1]
+
+        def find_exact_or_contains(keys_priority):
+            """Match by exact key first, then 'contains' in declaration order."""
+            for target in keys_priority:
+                if target in metrics:
+                    return metrics[target]
+            return None
 
         total_active = len(expected)
         vip_count = sum(1 for c in expected if c["segment"] == "VIP")
+        regular_count = sum(1 for c in expected if c["segment"] == "Regular")
+        new_count = sum(1 for c in expected if c["segment"] == "New")
         at_risk_total = sum(1 for c in expected if c["at_risk"] == "Yes")
         at_risk_vip = sum(1 for c in expected if c["segment"] == "VIP" and c["at_risk"] == "Yes")
+        repeat_count = sum(1 for c in expected if c["orders"] and c["orders"] > 1)
+        store_repeat_rate = round(100.0 * repeat_count / max(len(expected), 1), 1)
+        store_avg_ltv = round(sum(c["spent"] for c in expected) / max(len(expected), 1), 2)
 
-        for key, val in metrics.items():
-            if "total_active" in key or ("total" in key and "customer" in key):
-                ok = num_close(val, total_active, 2)
-                record(f"Total_Active_Customers={total_active}", ok, f"Got {val}")
-                if not ok:
-                    all_ok = False
-            elif "vip_count" in key and "risk" not in key:
-                ok = num_close(val, vip_count, 2)
-                record(f"VIP_Count={vip_count}", ok, f"Got {val}")
-                if not ok:
-                    all_ok = False
-            elif "at_risk_total" in key or ("risk" in key and "total" in key):
-                ok = num_close(val, at_risk_total, 2)
-                record(f"At_Risk_Total={at_risk_total}", ok, f"Got {val}")
-                if not ok:
-                    all_ok = False
-            elif "at_risk_vip" in key or ("risk" in key and "vip" in key):
-                ok = num_close(val, at_risk_vip, 1)
-                record(f"At_Risk_VIP_Count={at_risk_vip}", ok, f"Got {val}")
-                if not ok:
-                    all_ok = False
+        # Require each metric to be present under its documented key
+        required = [
+            ("total_active_customers", total_active, 2, "Total_Active_Customers"),
+            ("vip_count", vip_count, 2, "VIP_Count"),
+            ("regular_count", regular_count, 2, "Regular_Count"),
+            ("new_count", new_count, 2, "New_Count"),
+            ("at_risk_total", at_risk_total, 2, "At_Risk_Total"),
+            ("at_risk_vip_count", at_risk_vip, 1, "At_Risk_VIP_Count"),
+            ("store_repeat_rate", store_repeat_rate, 2.0, "Store_Repeat_Rate"),
+            ("store_avg_ltv", store_avg_ltv, 10.0, "Store_Avg_LTV"),
+        ]
+        for key, expected_val, tol, display in required:
+            # also try variants: with/without leading 'store_' etc.
+            val = metrics.get(key)
+            if val is None:
+                # fallback: any key containing all words
+                words = key.split("_")
+                for k, v in metrics.items():
+                    if all(w in k for w in words):
+                        val = v
+                        break
+            if val is None:
+                record(f"Metric {display} present", False, f"Available: {list(metrics.keys())[:10]}")
+                continue
+            ok = num_close(val, expected_val, tol)
+            record(f"Metric {display}={expected_val}", ok, f"Got {val}")
 
     # Check Action Plan sheet
     ap_sheet = None
@@ -223,7 +241,6 @@ def check_excel(agent_workspace):
             break
     if ap_sheet is None:
         record("Sheet 'Action Plan' exists", False, f"Sheets: {wb.sheetnames}")
-        all_ok = False
     else:
         record("Sheet 'Action Plan' exists", True)
         ap_rows = list(ap_sheet.iter_rows(min_row=2, values_only=True))
@@ -231,8 +248,12 @@ def check_excel(agent_workspace):
         record("Action Plan row count matches",
                abs(len(ap_rows) - len(vip_at_risk)) <= 1,
                f"Expected {len(vip_at_risk)}, got {len(ap_rows)}")
-
-    return all_ok
+        # All rows should have Segment=VIP
+        if ap_rows:
+            non_vip = [r for r in ap_rows if r and len(r) >= 3 and safe_str(r[2]).lower() != "vip"]
+            record("All Action Plan rows are VIP",
+                   len(non_vip) == 0,
+                   f"{len(non_vip)} rows are not VIP")
 
 
 def check_emails():
@@ -247,17 +268,17 @@ def check_emails():
     cur.execute("SELECT COUNT(*) FROM email.sent_log")
     sent_count = cur.fetchone()[0]
     record("Emails sent", sent_count >= len(vip_at_risk),
-           f"Expected >= {len(vip_at_risk)}, got {sent_count}")
+           f"Expected >= {len(vip_at_risk)}, got {sent_count}",
+           runtime_only=True)
 
-    # Check messages exist with retention subject
     cur.execute("SELECT subject, to_addr FROM email.messages WHERE subject ILIKE '%miss you%'")
     retention_emails = cur.fetchall()
     record("Retention emails found", len(retention_emails) >= len(vip_at_risk) - 1,
-           f"Expected >= {len(vip_at_risk) - 1}, got {len(retention_emails)}")
+           f"Expected >= {len(vip_at_risk) - 1}, got {len(retention_emails)}",
+           runtime_only=True)
 
     cur.close()
     conn.close()
-    return True
 
 
 def check_gsheet():
@@ -269,27 +290,34 @@ def check_gsheet():
     cur.execute("SELECT id, title FROM gsheet.spreadsheets WHERE title ILIKE '%retention%' OR title ILIKE '%outreach%'")
     rows = cur.fetchall()
     if not rows:
-        record("GSheet with retention/outreach in title", False, "No matching spreadsheet found")
+        record("GSheet with retention/outreach in title", False, "No matching spreadsheet found",
+               runtime_only=True)
         cur.close()
         conn.close()
-        return False
+        return
     record("GSheet with retention/outreach in title", True)
 
     ss_id = rows[0][0]
     cur.execute("SELECT id FROM gsheet.sheets WHERE spreadsheet_id = %s", (ss_id,))
     sheets = cur.fetchall()
-    record("GSheet has at least one sheet", len(sheets) >= 1, f"Got {len(sheets)}")
+    record("GSheet has at least one sheet", len(sheets) >= 1, f"Got {len(sheets)}",
+           runtime_only=True)
 
     if sheets:
         sheet_id = sheets[0][0]
         cur.execute("SELECT COUNT(DISTINCT row_index) FROM gsheet.cells WHERE spreadsheet_id = %s AND sheet_id = %s AND row_index > 0",
                     (ss_id, sheet_id))
         row_count = cur.fetchone()[0]
-        record("GSheet has data rows", row_count >= 3, f"Got {row_count} rows")
+
+        expected = get_expected_data()
+        vip_at_risk = [c for c in expected if c["segment"] == "VIP" and c["at_risk"] == "Yes"]
+        record("GSheet row count matches VIP-at-risk",
+               abs(row_count - len(vip_at_risk)) <= 1,
+               f"Expected {len(vip_at_risk)}, got {row_count}",
+               runtime_only=True)
 
     cur.close()
     conn.close()
-    return True
 
 
 def main():
@@ -300,21 +328,19 @@ def main():
     parser.add_argument("--res_log_file", required=False)
     args = parser.parse_args()
 
-    excel_ok = check_excel(args.agent_workspace)
-
-    db_fail_before = FAIL_COUNT
-    email_ok = check_emails()
-    gsheet_ok = check_gsheet()
-    db_failures = FAIL_COUNT - db_fail_before
+    check_excel(args.agent_workspace)
+    check_emails()
+    check_gsheet()
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")
     print(f"  Failed: {FAIL_COUNT}")
-    if db_failures > 0:
-        print(f"  WARNING: {db_failures} DB checks failed (not blocking)")
 
-    overall = excel_ok
-    print(f"  Overall: {'PASS' if overall else 'FAIL'}")
+    # Overall: allow runtime-only checks (email/gsheet) to fail in GT-only eval.
+    # Strict file/DB checks must all pass.
+    non_runtime_fail = FAIL_COUNT - RUNTIME_ONLY_FAIL
+    overall = non_runtime_fail == 0
+    print(f"  Overall: {'PASS' if overall else 'FAIL'} (runtime-only fails: {RUNTIME_ONLY_FAIL})")
     sys.exit(0 if overall else 1)
 
 

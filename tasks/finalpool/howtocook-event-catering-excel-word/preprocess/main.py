@@ -14,7 +14,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -104,7 +104,8 @@ def main():
     conn = psycopg2.connect(**DB_CONFIG)
     try:
         clear_tables(conn)
-        inject_gform(conn)
+        # IMPORTANT: do NOT inject the 'Menu Approval Survey' form here.
+        # Task asks the agent to CREATE it; pre-injecting was a data leak.
         ensure_email_folder(conn)
     finally:
         conn.close()

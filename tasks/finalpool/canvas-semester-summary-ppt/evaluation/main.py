@@ -86,21 +86,21 @@ def main():
             if len(a_row) > 1 and len(g_row) > 1:
                 if not str_match(a_row[1], g_row[1]):
                     all_errors.append(f"{key}.Course Code: {a_row[1]} vs {g_row[1]}")
-            # Col 2: Total Students
+            # Col 2: Total Students (integer count, tight tol)
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 5):
+                if not num_close(a_row[2], g_row[2], 1):
                     all_errors.append(f"{key}.Total Students: {a_row[2]} vs {g_row[2]}")
-            # Col 3: Enrollments
+            # Col 3: Enrollments (integer count, tight tol)
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 5):
+                if not num_close(a_row[3], g_row[3], 1):
                     all_errors.append(f"{key}.Enrollments: {a_row[3]} vs {g_row[3]}")
             # Col 4: Assignments
             if len(a_row) > 4 and len(g_row) > 4:
                 if not num_close(a_row[4], g_row[4], 1):
                     all_errors.append(f"{key}.Assignments: {a_row[4]} vs {g_row[4]}")
-            # Col 5: Avg Points Possible
+            # Col 5: Avg Points Possible (rounded to 1 decimal per task spec)
             if len(a_row) > 5 and len(g_row) > 5:
-                if not num_close(a_row[5], g_row[5], 2.0):
+                if not num_close(a_row[5], g_row[5], 0.5):
                     all_errors.append(f"{key}.Avg Points: {a_row[5]} vs {g_row[5]}")
 
         if not any("Course Overview" in e or "Missing course" in e for e in all_errors):
@@ -173,18 +173,43 @@ def main():
                     if shape.has_text_frame:
                         all_ppt_text += shape.text_frame.text.lower() + " "
 
-            expected_courses = ["applied analytics", "biochemistry", "creative computing",
-                                "data-driven design", "environmental economics",
-                                "foundations of finance", "global governance"]
+            expected_courses = []
+            g_co_rows = load_sheet_rows(gt_wb, "Course Overview")
+            if g_co_rows and len(g_co_rows) > 1:
+                for g_row in g_co_rows[1:]:
+                    if g_row and g_row[0]:
+                        cname = str(g_row[0]).strip().lower()
+                        short = cname.split("(")[0].strip()
+                        tokens = short.split()
+                        key2 = " ".join(tokens[:2]) if len(tokens) >= 2 else short
+                        expected_courses.append(key2)
             for course in expected_courses:
                 if course not in all_ppt_text:
                     all_errors.append(f"PPT missing course: {course}")
 
-            # Check largest/smallest mentioned in last slide
-            if "creative computing" not in last_text and "2498" not in last_text:
-                all_errors.append("Last slide should mention Creative Computing (largest by students)")
-            if "applied analytics" not in last_text and "365" not in last_text:
-                all_errors.append("Last slide should mention Applied Analytics (smallest by students)")
+            # Dynamically derive largest/smallest course by Total Students from GT
+            largest_name = smallest_name = None
+            largest_count = smallest_count = None
+            if g_co_rows and len(g_co_rows) > 1:
+                for g_row in g_co_rows[1:]:
+                    if g_row and g_row[0] is not None and len(g_row) > 2 and g_row[2] is not None:
+                        try:
+                            ts = float(g_row[2])
+                        except (TypeError, ValueError):
+                            continue
+                        cname = str(g_row[0]).strip().lower()
+                        if largest_count is None or ts > largest_count:
+                            largest_count = ts; largest_name = cname
+                        if smallest_count is None or ts < smallest_count:
+                            smallest_count = ts; smallest_name = cname
+            if largest_name:
+                short_key = " ".join(largest_name.split("(")[0].strip().split()[:2])
+                if short_key not in last_text and str(int(largest_count)) not in last_text:
+                    all_errors.append(f"Last slide should mention largest-by-students course '{short_key}' or count {int(largest_count)}")
+            if smallest_name:
+                short_key = " ".join(smallest_name.split("(")[0].strip().split()[:2])
+                if short_key not in last_text and str(int(smallest_count)) not in last_text:
+                    all_errors.append(f"Last slide should mention smallest-by-students course '{short_key}' or count {int(smallest_count)}")
 
         if not any("PPT" in e or "ppt" in e.lower() or "slide" in e.lower() for e in all_errors):
             print("    PASS")

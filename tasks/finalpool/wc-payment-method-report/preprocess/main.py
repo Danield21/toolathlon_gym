@@ -3,7 +3,7 @@ import os
 import argparse
 import psycopg2
 
-DB = {"host": os.environ.get("PGHOST", "localhost"), "port": 5432, "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
+DB = {"host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")), "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
 
 
 def main():
@@ -18,8 +18,7 @@ def main():
     cur.execute("DELETE FROM email.messages")
     cur.execute("DELETE FROM email.drafts")
     cur.execute("DELETE FROM email.attachments")
-    cur.execute("DELETE FROM email.folders")
-    cur.execute("DELETE FROM email.account_config")
+    # Keep email.folders (INBOX) and email.account_config — required by email MCP
     conn.commit()
     cur.close()
     conn.close()

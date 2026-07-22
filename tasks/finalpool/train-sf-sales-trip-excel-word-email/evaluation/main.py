@@ -98,14 +98,35 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
     if customer_sheet:
         rows = list(customer_sheet.iter_rows(values_only=True))
         data_rows = [r for r in rows[1:] if any(c for c in r)]
-        record("Customer_Priority has 5 customers", len(data_rows) >= 5,
+        record("Customer_Priority has exactly 5 customers", len(data_rows) == 5,
                f"Found {len(data_rows)} rows")
 
-        # Check top customer is Ethan Brown
+        # Strict: row 1 must be the rank-1 customer (Ethan Brown)
+        first_row_text = " ".join(str(c) for c in (data_rows[0] if data_rows else ())).lower()
+        record("Rank-1 customer is Ethan Brown",
+               "ethan" in first_row_text and "brown" in first_row_text,
+               f"Row 1: {data_rows[0] if data_rows else None}")
+
+        # Validate Priority_Rank column equals 1..5
+        try:
+            ranks = [r[0] for r in data_rows]
+            ranks_ok = ranks == [1, 2, 3, 4, 5]
+        except Exception:
+            ranks_ok = False
+        record("Priority_Rank column is 1..5 in order", ranks_ok, f"Ranks: {ranks if data_rows else None}")
+
+        # All 5 expected names should be present
         all_text = " ".join(str(c) for row in rows for c in row if c).lower()
-        record("Top customer Ethan Brown is present", "ethan" in all_text and "brown" in all_text,
-               "No Ethan Brown found")
-        record("Customers include Noah Garcia", "noah" in all_text, "No Noah Garcia found")
+        for name in ("ethan", "noah", "isabella", "harper", "mason"):
+            record(f"Customer '{name}' present", name in all_text, f"Missing in: {all_text[:200]}")
+
+        # Validate sort order — Total_Amount descending
+        try:
+            totals = [float(r[5]) for r in data_rows if r[5] is not None]
+            sorted_ok = totals == sorted(totals, reverse=True)
+        except Exception:
+            sorted_ok = False
+        record("Total_Amount sorted descending", sorted_ok, f"Totals: {totals if data_rows else None}")
 
     # --- Groundtruth XLSX value comparison ---
     gt_path = os.path.join(groundtruth_workspace, "Sales_Trip_Plan.xlsx")
@@ -124,18 +145,26 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
             a_rows = [r for r in a_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
             record(f"GT '{gt_sname}' row count", len(a_rows) == len(gt_rows),
                    f"Expected {len(gt_rows)}, got {len(a_rows)}")
-            for ri in range(min(3, len(gt_rows))):
-                if ri >= len(a_rows): break
+            # Iterate ALL GT rows (not just first 3)
+            for ri in range(len(gt_rows)):
+                if ri >= len(a_rows):
+                    record(f"GT '{gt_sname}' row {ri+1} present", False,
+                           f"agent missing row {ri+1}")
+                    continue
                 ok = True
+                bad_col = None
                 for ci in range(min(len(gt_rows[ri]), len(a_rows[ri]))):
                     gv, av = gt_rows[ri][ci], a_rows[ri][ci]
                     if gv is None: continue
                     if isinstance(gv, (int, float)):
-                        if not num_close(av, gv, max(abs(gv)*0.1, 1.0)): ok = False; break
+                        # Tighter tol: 1% (or 1.0 floor) instead of 10%
+                        if not num_close(av, gv, max(abs(gv)*0.01, 1.0)):
+                            ok = False; bad_col = ci; break
                     else:
-                        if not str_match(av, gv): ok = False; break
+                        if not str_match(av, gv):
+                            ok = False; bad_col = ci; break
                 record(f"GT '{gt_sname}' row {ri+1} values", ok,
-                       f"gt={gt_rows[ri][:4]}, agent={a_rows[ri][:4] if ri < len(a_rows) else 'missing'}")
+                       f"gt={gt_rows[ri][:4]}, agent={a_rows[ri][:4] if ri < len(a_rows) else 'missing'} bad_col={bad_col}")
         gt_wb.close()
 
 
@@ -178,35 +207,39 @@ def check_email():
     cur = conn.cursor()
 
     try:
+        # Strict: must be sent to sales-manager@company.com AND have exact subject
         cur.execute("""
             SELECT subject, to_addr, body_text
             FROM email.messages
-            WHERE subject ILIKE '%trip%' OR subject ILIKE '%shanghai%'
-            OR subject ILIKE '%confirmed%'
+            WHERE to_addr::text ILIKE '%sales-manager@company.com%'
         """)
-        emails = cur.fetchall()
-        # Also check by recipient
-        cur.execute("""
-            SELECT subject, to_addr, body_text
-            FROM email.messages
-            WHERE to_addr::text ILIKE '%sales-manager%'
-        """)
-        emails2 = cur.fetchall()
-        all_emails = emails + emails2
-        record("Email sent to sales-manager@company.com", len(all_emails) >= 1,
-               f"Found {len(all_emails)} matching emails")
+        recipient_emails = cur.fetchall()
+        record("Email sent to sales-manager@company.com",
+               len(recipient_emails) >= 1,
+               f"Found {len(recipient_emails)} emails to sales-manager@company.com")
 
-        if all_emails:
-            subject, to_addr, body = all_emails[0]
-            subject_lower = (subject or "").lower()
-            record("Email subject mentions trip or confirmed",
-                   "trip" in subject_lower or "shanghai" in subject_lower or "confirmed" in subject_lower,
-                   f"Subject: {subject}")
+        # Find one with exact subject "Sales Trip Confirmed - 2026-03-10"
+        target_email = None
+        for subject, to_addr, body in recipient_emails:
+            if (subject or "").strip() == "Sales Trip Confirmed - 2026-03-10":
+                target_email = (subject, to_addr, body)
+                break
+        record("Email subject is exactly 'Sales Trip Confirmed - 2026-03-10'",
+               target_email is not None,
+               f"Subjects found: {[e[0] for e in recipient_emails]}")
+
+        if target_email:
+            subject, to_addr, body = target_email
             body_lower = (body or "").lower()
             record("Email body mentions G1 train", "g1" in body_lower, "No G1 in email body")
-            record("Email body mentions top customers",
-                   "ethan" in body_lower or "brown" in body_lower,
-                   "No customer names in email body")
+            record("Email body mentions Ethan Brown (rank-1 customer)",
+                   "ethan" in body_lower and "brown" in body_lower,
+                   "Missing rank-1 customer name in email body")
+            # Body must mention travel date (2026-03-10) - flexible format
+            has_date = ("2026-03-10" in body_lower or "march 10" in body_lower
+                        or "mar 10" in body_lower or "10 march" in body_lower or "10-mar" in body_lower)
+            record("Email body mentions travel date 2026-03-10", has_date,
+                   f"Body snippet: {body_lower[:200]}")
     except Exception as e:
         record("Email check", False, str(e))
     finally:
@@ -244,11 +277,11 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:
-        print("FAIL")
+        print(f"FAIL: {FAIL_COUNT} check(s) failed")
         sys.exit(1)
 
 

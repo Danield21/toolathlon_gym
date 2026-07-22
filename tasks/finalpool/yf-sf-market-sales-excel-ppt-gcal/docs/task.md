@@ -1,4 +1,4 @@
-I need to analyze the correlation between stock market performance and our sales data. Pull historical stock price data for major market indicators and individual stocks. Also pull our internal sales data from the company data warehouse with monthly revenue and order trends.
+I need to analyze the correlation between stock market performance and our sales data. Pull historical stock price data for the following five tracked tickers: AMZN, GOOGL, JNJ, JPM, and XOM. Also pull our internal sales data from the company data warehouse with monthly revenue and order trends.
 
 Use the terminal to create and run a Python script called market_sales_correlator.py in the workspace that reads market_data.json and sales_data.json (create both first), calculates monthly trends, correlation coefficients between market indices and sales performance, and outputs correlation_analysis.json.
 

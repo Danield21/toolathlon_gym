@@ -82,8 +82,8 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         ws = wb[top_key]
         rows = list(ws.iter_rows(values_only=True))
         data_rows = [r for r in rows[1:] if any(c for c in r)] if rows else []
-        record("Top_Videos sheet has >= 6 data rows", len(data_rows) >= 6,
-               f"Found {len(data_rows)} data rows")
+        record("Top_Videos sheet has 8 data rows", len(data_rows) == 8,
+               f"Found {len(data_rows)} data rows, expected 8")
         if rows:
             headers = [str(c).strip().lower() if c else "" for c in rows[0]]
             has_engagement = any("engagement" in h or "rate" in h for h in headers)
@@ -102,10 +102,14 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         ws2 = wb[eng_key]
         rows2 = list(ws2.iter_rows(values_only=True))
         data_rows2 = [r for r in rows2[1:] if any(c for c in r)] if rows2 else []
-        record("Engagement_Analysis sheet has >= 3 rows", len(data_rows2) >= 3,
-               f"Found {len(data_rows2)} data rows")
+        record("Engagement_Analysis sheet has >= 4 rows", len(data_rows2) >= 4,
+               f"Found {len(data_rows2)} data rows, expected at least 4")
 
     # --- Groundtruth XLSX value comparison ---
+    # Match rows by Video_ID (Top_Videos) or Topic (Engagement_Analysis) rather
+    # than by positional index — agents may legitimately sort with different
+    # tie-breakers. Skip subjective columns (Topic_Tags) since the agent and GT
+    # may pick different tags for multi-topic videos.
     gt_path = os.path.join(groundtruth_workspace, "Community_Report.xlsx")
     if os.path.isfile(gt_path):
         import openpyxl as opx
@@ -124,22 +128,73 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
                 if a_ws is None:
                     record(f"GT sheet '{gt_sname}' exists in agent xlsx", False, f"Available: {a_wb.sheetnames}")
                     continue
+                gt_headers = [str(c.value).strip().lower() if c.value else "" for c in next(gt_ws.iter_rows(max_row=1))]
+                a_headers = [str(c.value).strip().lower() if c.value else "" for c in next(a_ws.iter_rows(max_row=1))]
                 gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
                 a_rows = [r for r in a_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
                 record(f"GT '{gt_sname}' row count", len(a_rows) == len(gt_rows),
                        f"Expected {len(gt_rows)}, got {len(a_rows)}")
-                for ri in range(min(3, len(gt_rows))):
-                    if ri >= len(a_rows): break
+                # Determine PK column for stable row matching
+                pk_candidates = ["video_id", "topic"]
+                pk_col = None
+                for cand in pk_candidates:
+                    if cand in gt_headers and cand in a_headers:
+                        pk_col = cand
+                        break
+                if pk_col is None:
+                    # No stable key — skip per-row comparison gracefully
+                    record(f"GT '{gt_sname}' has stable PK column", False,
+                           f"No video_id / topic header found: {gt_headers}")
+                    continue
+                gt_pk_idx = gt_headers.index(pk_col)
+                a_pk_idx = a_headers.index(pk_col)
+                # Skip subjective columns (Topic_Tags) when comparing values
+                skip_headers = {"topic_tags", "topic tags"}
+                # Build agent lookup keyed on PK (lowercased trimmed)
+                a_lookup = {}
+                for r in a_rows:
+                    if r and len(r) > a_pk_idx and r[a_pk_idx] is not None:
+                        a_lookup[str(r[a_pk_idx]).strip().lower()] = r
+                for gt_row in gt_rows:
+                    if not gt_row or len(gt_row) <= gt_pk_idx or gt_row[gt_pk_idx] is None:
+                        continue
+                    pk_val = str(gt_row[gt_pk_idx]).strip().lower()
+                    a_row = a_lookup.get(pk_val)
+                    found = a_row is not None
+                    record(f"GT '{gt_sname}' pk={pk_val} present", found)
+                    if not found:
+                        continue
                     ok = True
-                    for ci in range(min(len(gt_rows[ri]), len(a_rows[ri]))):
-                        gv, av = gt_rows[ri][ci], a_rows[ri][ci]
-                        if gv is None: continue
+                    fail_detail = ""
+                    for ci, gh in enumerate(gt_headers):
+                        if ci >= len(gt_row):
+                            continue
+                        gv = gt_row[ci]
+                        if gv is None or gh in skip_headers:
+                            continue
+                        # Locate agent column by header name
+                        if gh not in a_headers:
+                            continue
+                        a_ci = a_headers.index(gh)
+                        if a_ci >= len(a_row):
+                            continue
+                        av = a_row[a_ci]
                         if isinstance(gv, (int, float)):
-                            if not num_close(av, gv, max(abs(gv)*0.1, 1.0)): ok = False; break
+                            # Engagement_Rate / averages: 5% relative or 0.1 abs
+                            if "rate" in gh or "engagement" in gh:
+                                tol = max(abs(gv) * 0.05, 0.1)
+                            else:
+                                tol = max(abs(gv) * 0.01, 0.5)
+                            if not num_close(av, gv, tol):
+                                ok = False
+                                fail_detail = f"col '{gh}': gt={gv}, agent={av}"
+                                break
                         else:
-                            if not str_match(av, gv): ok = False; break
-                    record(f"GT '{gt_sname}' row {ri+1} values", ok,
-                           f"gt={gt_rows[ri][:4]}, agent={a_rows[ri][:4] if ri < len(a_rows) else 'missing'}")
+                            if not str_match(av, gv):
+                                ok = False
+                                fail_detail = f"col '{gh}': gt={gv!r}, agent={av!r}"
+                                break
+                    record(f"GT '{gt_sname}' pk={pk_val} values", ok, fail_detail)
             a_wb.close()
         gt_wb.close()
 
@@ -151,26 +206,44 @@ def check_gform():
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT f.id, f.title FROM gform.forms f
-                WHERE f.title ILIKE '%Survey%'
-                   OR f.title ILIKE '%Fireship%'
-                   OR f.title ILIKE '%Community%'
+                WHERE f.title ILIKE '%Fireship Community Preference Survey%'
+                   OR (f.title ILIKE '%Fireship%' AND f.title ILIKE '%Community%' AND f.title ILIKE '%Survey%')
             """)
             forms = cur.fetchall()
             if not forms:
-                record("GForm with 'Survey', 'Fireship', or 'Community' in title exists", False,
+                record("GForm 'Fireship Community Preference Survey' exists", False,
                        "No matching form found")
-                record("GForm has >= 4 questions", False, "Form missing")
+                record("GForm has 5 questions", False, "Form missing")
                 conn.close()
                 return
-            record("GForm with 'Survey', 'Fireship', or 'Community' in title exists", True,
+            record("GForm 'Fireship Community Preference Survey' exists", True,
                    f"Found: {[f[1] for f in forms]}")
 
             form_id = forms[0][0]
             cur.execute("""
-                SELECT COUNT(*) FROM gform.questions WHERE form_id = %s
+                SELECT title FROM gform.questions WHERE form_id = %s ORDER BY id
             """, (form_id,))
-            q_count = cur.fetchone()[0]
-            record("GForm has >= 4 questions", q_count >= 4, f"Found {q_count} questions")
+            q_titles = [r[0] for r in cur.fetchall()]
+            record("GForm has 5 questions", len(q_titles) == 5,
+                   f"Found {len(q_titles)} questions, expected 5")
+
+            # Validate question wording — each required question must be present.
+            # Use distinctive keyword pairs to tolerate phrasing variation.
+            required_keywords = [
+                ("topic", "interest"),       # Q1: Which Fireship topic interests you most?
+                ("often", "watch"),          # Q2: How often do you watch Fireship?
+                ("format", "prefer"),        # Q3: What format do you prefer?
+                ("role",),                   # Q4: Your current role
+                ("topic", "next"),           # Q5: What topic should Fireship cover next?
+            ]
+            joined = " || ".join((q or "").lower() for q in q_titles)
+            for kw_set in required_keywords:
+                ok = any(all(kw in (q or "").lower() for kw in kw_set) for q in q_titles)
+                record(
+                    f"GForm has question matching keywords {kw_set}",
+                    ok,
+                    f"Question titles: {q_titles}",
+                )
         conn.close()
     except Exception as e:
         record("GForm check", False, str(e))
@@ -182,16 +255,41 @@ def check_gcal():
         conn = psycopg2.connect(**DB_CONFIG)
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT COUNT(*) FROM gcal.events
+                SELECT summary, start_datetime, end_datetime FROM gcal.events
                 WHERE (summary ILIKE '%Community%' OR summary ILIKE '%Standup%')
                   AND start_datetime >= '2026-04-01'
                   AND start_datetime < '2026-05-01'
                   AND summary NOT ILIKE '%Q&A%'
+                ORDER BY start_datetime
             """)
-            count = cur.fetchone()[0]
+            events = cur.fetchall()
         conn.close()
         record("GCal has new Community/Standup event in April 2026 (not Q&A noise)",
-               count > 0, f"Found {count} events")
+               len(events) > 0, f"Found {len(events)} events")
+
+        # Find an event matching exact title 'Community Standup' on 2026-04-01 18:00-19:00.
+        target_evt = None
+        for s, sd, ed in events:
+            sl = (s or "").lower()
+            if "community" in sl and "standup" in sl:
+                if sd and sd.date().isoformat() == "2026-04-01":
+                    target_evt = (s, sd, ed)
+                    break
+        record(
+            "GCal 'Community Standup' on 2026-04-01 exists",
+            target_evt is not None,
+            f"Candidates: {[(e[0], e[1]) for e in events]}",
+        )
+        if target_evt:
+            s, sd, ed = target_evt
+            time_ok = sd.hour == 18 and sd.minute == 0
+            if ed is not None:
+                time_ok = time_ok and (ed.hour == 19 and ed.minute == 0)
+            record(
+                "Community Standup time is 18:00-19:00",
+                time_ok,
+                f"start={sd}, end={ed}",
+            )
     except Exception as e:
         record("GCal check", False, str(e))
 
@@ -202,22 +300,31 @@ def check_email():
         conn = psycopg2.connect(**DB_CONFIG)
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT COUNT(*) FROM email.messages
+                SELECT subject, body_text FROM email.messages
                 WHERE to_addr::text ILIKE '%community@devclub.io%'
                   AND from_addr != 'community@devclub.io'
+                ORDER BY id DESC
             """)
-            count = cur.fetchone()[0]
-            if count == 0:
-                try:
-                    cur.execute("""
-                        SELECT COUNT(*) FROM email.sent_log
-                        WHERE to_addr ILIKE '%community@devclub.io%'
-                    """)
-                    count = cur.fetchone()[0]
-                except Exception:
-                    pass
+            rows = cur.fetchall()
         conn.close()
-        record("Email sent to community@devclub.io", count > 0, f"Found {count}")
+        record("Email sent to community@devclub.io", len(rows) > 0, f"Found {len(rows)}")
+        if rows:
+            # Subject must reference engagement / monthly report
+            subj_ok = False
+            for s, _ in rows:
+                sl = (s or "").lower()
+                if "engagement" in sl or ("monthly" in sl and "report" in sl):
+                    subj_ok = True; break
+            record("Email subject references engagement/monthly report", subj_ok,
+                   f"Subjects: {[r[0] for r in rows]}")
+            # Body must mention survey AND standup explicitly
+            body_ok = False
+            for _, b in rows:
+                bl = (b or "").lower()
+                if ("survey" in bl) and ("standup" in bl):
+                    body_ok = True; break
+            record("Email body mentions survey + standup", body_ok,
+                   f"First body excerpt: {(rows[0][1] or '')[:200]}")
     except Exception as e:
         record("Email check", False, str(e))
 

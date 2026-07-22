@@ -2,7 +2,7 @@
   "needed_mcp_servers": [
     "fetch",
     "terminal",
-    "snowflake",
+    "canvas",
     "excel",
     "google_calendar",
     "filesystem"

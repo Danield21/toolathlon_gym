@@ -84,22 +84,30 @@ def check_excel(agent_workspace, groundtruth_workspace):
                       name in agent_names,
                       f"Found: {agent_names}")
 
-            # Check numeric values with tolerance
+            # Check sort order (alphabetical by Course_Name)
+            agent_names_lower = [n.lower() for n in agent_names if n]
+            check("Course Comparison sorted alphabetically",
+                  agent_names_lower == sorted(agent_names_lower),
+                  f"Order: {agent_names}")
+
+            # Check numeric values with tolerance — tightened to 0.2 (1-decimal rounding)
             gt_dict = {str(r[0]).strip(): r for r in gt_rows}
             for row in rows:
                 name = str(row[0]).strip() if row[0] else ""
                 if name in gt_dict:
                     gt_row = gt_dict[name]
-                    # Check mean scores (columns 1,2) with tolerance 0.5
                     for col_idx, col_name in [(1, "Fall_2013_Mean"), (2, "Fall_2014_Mean"),
-                                               (3, "Score_Difference")]:
+                                               (3, "Score_Difference"),
+                                               (4, "Fall_2013_Pass_Rate"),
+                                               (5, "Fall_2014_Pass_Rate"),
+                                               (6, "Pass_Rate_Change")]:
                         if row[col_idx] is not None and gt_row[col_idx] is not None:
                             diff = abs(float(row[col_idx]) - float(gt_row[col_idx]))
                             check(f"{name} {col_name} within tolerance",
-                                  diff <= 1.0,
+                                  diff <= 0.2,
                                   f"Agent={row[col_idx]}, GT={gt_row[col_idx]}, diff={diff:.2f}")
 
-                    # Check equity status
+                    # Check equity status (exact match)
                     if row[7] is not None:
                         check(f"{name} Equity_Status matches",
                               str(row[7]).strip() == str(gt_row[7]).strip(),
@@ -134,12 +142,19 @@ def check_excel(agent_workspace, groundtruth_workspace):
                       int(rows["Courses_Action_Required"]) == 1,
                       f"Got {rows['Courses_Action_Required']}")
 
-            for key in ["Overall_Avg_2013", "Overall_Avg_2014"]:
+            for key in ["Overall_Avg_2013", "Overall_Avg_2014", "Overall_Change"]:
                 if key in rows and key in gt_rows:
                     diff = abs(float(rows[key]) - float(gt_rows[key]))
                     check(f"Summary {key} within tolerance",
-                          diff <= 1.0,
+                          diff <= 0.2,
                           f"Agent={rows[key]}, GT={gt_rows[key]}")
+
+            # Validate Acceptable / Concerning / Action_Required counts (deterministic Canvas data)
+            for key, expected in [("Courses_Acceptable", 5), ("Courses_Concerning", 0)]:
+                if key in rows:
+                    check(f"Summary {key} = {expected}",
+                          int(rows[key]) == expected,
+                          f"Got {rows[key]}")
 
     except ImportError:
         check("openpyxl available", False, "openpyxl not installed")
@@ -201,50 +216,56 @@ def check_word(agent_workspace):
 def check_calendar():
     print("\n=== Checking Google Calendar ===")
     try:
+        from datetime import datetime, date
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
+        cur.execute("SET TIME ZONE 'UTC'")
 
-        # Check for grade equity review meetings
+        # Restrict to the target week (March 16-20, 2026 inclusive) using start_datetime range
         cur.execute("""
-            SELECT summary, description, start_datetime, end_datetime
+            SELECT summary, description,
+                   start_datetime AT TIME ZONE 'UTC',
+                   end_datetime AT TIME ZONE 'UTC'
             FROM gcal.events
-            WHERE LOWER(summary) LIKE '%%equity%%'
-               OR LOWER(summary) LIKE '%%grade%%review%%'
-               OR LOWER(summary) LIKE '%%biochemistry%%'
+            WHERE start_datetime >= '2026-03-16 00:00:00+00'
+              AND start_datetime <= '2026-03-20 23:59:59+00'
+              AND (LOWER(summary) LIKE '%%biochemistry%%bioinformatics%%grade%%equity%%review%%'
+                   OR LOWER(summary) LIKE '%%biochemistry & bioinformatics grade equity review%%'
+                   OR (LOWER(summary) LIKE '%%biochemistry%%' AND LOWER(summary) LIKE '%%grade equity review%%'))
         """)
         events = cur.fetchall()
-        check("At least 1 grade equity review meeting scheduled",
+        check("Action Required course meeting scheduled in target week",
               len(events) >= 1,
-              f"Found {len(events)} matching events")
+              f"Found {len(events)} events for Biochemistry & Bioinformatics Grade Equity Review in week of March 16-20, 2026")
 
         if events:
-            # Check events are in the week of March 16-20, 2026
-            in_target_week = [e for e in events
-                              if e[2] and '2026-03-1' in str(e[2]) or '2026-03-20' in str(e[2])]
-            check("Meeting(s) scheduled in week of March 16-20, 2026",
-                  len(in_target_week) >= 1,
-                  f"{len(in_target_week)} events in target week out of {len(events)} total. "
-                  f"Dates: {[str(e[2]) for e in events]}")
+            # Validate exact title pattern: "<Course Name> Grade Equity Review"
+            target_title = "biochemistry & bioinformatics grade equity review"
+            exact_match = [e for e in events if (e[0] or "").strip().lower() == target_title]
+            check(f"Meeting title is exactly '{target_title}'",
+                  len(exact_match) >= 1,
+                  f"Titles: {[e[0] for e in events]}")
 
-            # Check event mentions Biochemistry (the action required course)
-            event_texts = " ".join(
-                (str(e[0]) + " " + str(e[1] or "")).lower() for e in events
-            )
-            check("Meeting mentions 'Biochemistry' or relevant course",
-                  "biochemistry" in event_texts or "bioinformatics" in event_texts,
-                  f"Event text: {event_texts[:300]}")
+            # Validate description contains equity details: action required AND (score difference OR equity status)
+            for e in events:
+                desc = (e[1] or "").lower()
+                has_action = "action required" in desc
+                has_detail = ("score" in desc and "difference" in desc) or ("equity status" in desc)
+                check(f"Meeting '{e[0]}' description has equity details",
+                      has_action and has_detail,
+                      f"Description: {desc[:300]}")
+                break  # at least one
 
-            # Check duration is approximately 45 minutes
+            # Check duration is exactly 45 minutes
             for e in events:
                 if e[2] and e[3]:
-                    from datetime import datetime
                     start = e[2] if isinstance(e[2], datetime) else datetime.fromisoformat(str(e[2]))
                     end = e[3] if isinstance(e[3], datetime) else datetime.fromisoformat(str(e[3]))
                     duration_min = (end - start).total_seconds() / 60
-                    check(f"Meeting '{e[0]}' duration ~45 minutes",
-                          30 <= duration_min <= 60,
+                    check(f"Meeting '{e[0]}' duration is 45 minutes",
+                          abs(duration_min - 45) <= 1,
                           f"Duration: {duration_min} minutes")
-                    break  # Check at least one
+                    break
 
         cur.close()
         conn.close()

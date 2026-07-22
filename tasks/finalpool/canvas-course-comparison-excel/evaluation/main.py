@@ -104,24 +104,24 @@ def main():
                     if not str_match(a_row[1], g_row[1]):
                         file_errors.append(f"{g_row[0]}: code {a_row[1]} vs {g_row[1]}")
 
-                # Student_Count (col 2)
+                # Student_Count (col 2) - exact integer match
                 if len(a_row) > 2 and len(g_row) > 2:
-                    if not num_close(a_row[2], g_row[2], 5):
+                    if not num_close(a_row[2], g_row[2], 0):
                         file_errors.append(f"{g_row[0]}: students {a_row[2]} vs {g_row[2]}")
 
-                # Avg_Final_Score (col 3)
+                # Avg_Final_Score (col 3) - 1-decimal precision
                 if len(a_row) > 3 and len(g_row) > 3:
-                    if not num_close(a_row[3], g_row[3], 1.0):
+                    if not num_close(a_row[3], g_row[3], 0.5):
                         file_errors.append(f"{g_row[0]}: avg_score {a_row[3]} vs {g_row[3]}")
 
-                # Assignment_Count (col 4)
+                # Assignment_Count (col 4) - exact integer match
                 if len(a_row) > 4 and len(g_row) > 4:
-                    if not num_close(a_row[4], g_row[4], 1):
+                    if not num_close(a_row[4], g_row[4], 0):
                         file_errors.append(f"{g_row[0]}: assignments {a_row[4]} vs {g_row[4]}")
 
-                # Quiz_Count (col 5)
+                # Quiz_Count (col 5) - exact integer match
                 if len(a_row) > 5 and len(g_row) > 5:
-                    if not num_close(a_row[5], g_row[5], 1):
+                    if not num_close(a_row[5], g_row[5], 0):
                         file_errors.append(f"{g_row[0]}: quizzes {a_row[5]} vs {g_row[5]}")
 
         # Check Summary sheet
@@ -155,13 +155,16 @@ def main():
                     a_val = a_row[1]
                     try:
                         fa, fb = float(a_val), float(g_val)
-                        if abs(fa - fb) > 5:
+                        # Tighter tolerance: counts must be exact, fractional values 0.5
+                        tol = 0 if float(fb).is_integer() else 0.5
+                        if abs(fa - fb) > tol:
                             file_errors.append(f"Summary {key}: {a_val} vs {g_val}")
                     except (TypeError, ValueError):
-                        if not str_contains(str(a_val), str(g_val)[:20]):
+                        # String values must match the full GT name (case-insensitive)
+                        if not str_match(str(a_val).strip(), str(g_val).strip()):
                             file_errors.append(f"Summary {key}: '{a_val}' vs '{g_val}'")
 
-    # Check email sent (DB check)
+    # Check email sent (DB check) - BLOCKING
     print("  Checking email...")
     try:
         conn = psycopg2.connect(**DB)
@@ -169,29 +172,43 @@ def main():
         cur.execute("""
             SELECT subject, to_addr, body_text FROM email.messages
             WHERE to_addr::text ILIKE '%academic-affairs@university.edu%'
-               OR subject ILIKE '%Fall 2013%'
-            LIMIT 5
+              AND (subject ILIKE '%Fall 2013%'
+                   OR subject ILIKE '%Course Comparison%'
+                   OR subject ILIKE '%course comparison%')
         """)
         email_rows = cur.fetchall()
         if not email_rows:
-            cur.execute("SELECT COUNT(*) FROM email.messages")
-            total = cur.fetchone()[0]
-            db_errors.append(f"No email to academic-affairs@university.edu found (total: {total})")
+            db_errors.append(
+                "No email to academic-affairs@university.edu with Fall 2013/Course Comparison subject"
+            )
+        else:
+            # Validate body mentions courses
+            row = email_rows[0]
+            body = str(row[2] or "").lower()
+            covered = sum(
+                1 for code in ["aaa-2013j", "bbb-2013j", "ddd-2013j", "eee-2013j", "fff-2013j", "ggg-2013j"]
+                if code in body
+            )
+            if covered < 3:
+                db_errors.append(
+                    f"Email body mentions only {covered}/6 course codes; expected at least 3"
+                )
         cur.close()
         conn.close()
     except Exception as e:
         db_errors.append(f"Email check error: {e}")
 
-    # Final result
+    # Final result - DB errors now BLOCKING
     print(f"\n=== SUMMARY ===")
     print(f"  File errors: {len(file_errors)}")
-    print(f"  DB errors:   {len(db_errors)} (not blocking)")
+    print(f"  DB errors:   {len(db_errors)} (BLOCKING)")
     if db_errors:
         for e in db_errors[:15]:
             print(f"    [DB] {e}")
     if file_errors:
         for e in file_errors[:15]:
             print(f"    [FILE] {e}")
+    if file_errors or db_errors:
         print(f"  Overall: FAIL")
         sys.exit(1)
     else:

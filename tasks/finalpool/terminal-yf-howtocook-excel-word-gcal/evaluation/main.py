@@ -270,8 +270,12 @@ def check_word(agent_workspace):
         check("Contains 'wellness' reference", "wellness" in text)
         check("Contains cost/commodity reference",
               "cost" in text and ("commodity" in text or "gold" in text or "index" in text))
-        check("Contains recipe names",
-              any(r in text for r in ["吐司", "荷包蛋", "南瓜", "腊肠"]))
+        # Require multiple recipe references to reduce false positives
+        recipe_names = ["吐司", "荷包蛋", "南瓜", "腊肠", "鸡蛋", "西红柿", "黄瓜", "白菜", "土豆"]
+        recipe_found = sum(1 for r in recipe_names if r in text)
+        check("Contains >=5 recipe names",
+              recipe_found >= 5,
+              f"Found {recipe_found} of {len(recipe_names)} recipe keywords")
         check("Contains event/workshop reference",
               "workshop" in text or "event" in text or "session" in text)
         check("Contains budget reference",
@@ -407,7 +411,9 @@ def main():
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
-    sys.exit(0 if accuracy >= 70 else 1)
+    # Tightened: require all checks to pass. 70% threshold lets wrong
+    # event dates/topics pass at 92-98% accuracy.
+    sys.exit(0 if FAIL_COUNT == 0 else 1)
 
 
 if __name__ == "__main__":

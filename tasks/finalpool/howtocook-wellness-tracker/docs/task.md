@@ -2,7 +2,7 @@ I am a health coach creating a wellness program for a client. I need to evaluate
 
 Start by visiting the wellness portal at http://localhost:30235 to learn about daily wellness targets. The main page shows targets for sleep, water intake, exercise, vegetable servings, and maximum sugar intake. Then visit http://localhost:30235/nutrition.html for detailed food group recommendations per meal including recommended servings for grains, protein, vegetables, and fruits.
 
-Next, browse the recipe database and select at least eight recipes from at least three different categories. For each recipe, analyze its ingredients to estimate how many vegetable servings it provides and how much sugar it might contain. Score each recipe on a wellness scale from 1 to 10 where higher scores mean more vegetable servings, lower sugar content, and better alignment with the food group recommendations from the wellness portal.
+Next, browse the recipe collection available through the cooking-recipe service and select at least eight recipes from at least three different categories. For each recipe, analyze its ingredients to estimate how many vegetable servings it provides and how much sugar it might contain. Score each recipe on a wellness scale from 1 to 10 where higher scores mean more vegetable servings, lower sugar content, and better alignment with the food group recommendations from the wellness portal.
 
 Review the wellness goals file and tracking template in the workspace for the client's specific goals and the desired tracking format.
 

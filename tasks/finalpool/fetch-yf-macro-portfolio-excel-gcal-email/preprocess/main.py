@@ -13,7 +13,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -32,6 +32,50 @@ def clear_db(cur):
     except Exception:
         pass
     print("[preprocess] DB cleared.")
+
+
+def inject_noise(cur):
+    """Inject noise gcal events and email messages to test filtering capability."""
+    print("[preprocess] Injecting noise events/emails...")
+    # Noise gcal events (different dates/topics, should NOT be removed)
+    noise_events = [
+        ("noise-evt-1", "Weekly Team Standup", "Regular team sync, no portfolio business.",
+         "2026-03-25 09:00:00+00", "2026-03-25 09:30:00+00"),
+        ("noise-evt-2", "Compliance Training 2026", "Annual training for all staff.",
+         "2026-03-28 13:00:00+00", "2026-03-28 14:30:00+00"),
+        ("noise-evt-3", "Client Dinner - Acme Corp", "Hosting Acme CFO, unrelated to holdings.",
+         "2026-04-02 19:00:00+00", "2026-04-02 21:00:00+00"),
+        ("noise-evt-4", "Office IT Maintenance", "Server reboot, no meetings this window.",
+         "2026-03-31 22:00:00+00", "2026-03-31 23:00:00+00"),
+    ]
+    for ev in noise_events:
+        cur.execute(
+            """INSERT INTO gcal.events (id, summary, description, start_datetime, end_datetime, status)
+               VALUES (%s, %s, %s, %s, %s, 'confirmed')""",
+            ev,
+        )
+    # Noise emails in INBOX (different recipients/subjects, should NOT be sent again or removed)
+    cur.execute("SELECT id FROM email.folders WHERE name='INBOX' OR name='Inbox' ORDER BY id LIMIT 1")
+    row = cur.fetchone()
+    inbox_id = row[0] if row else None
+    if inbox_id is not None:
+        noise_emails = [
+            ("noise-msg-1", "Newsletter: Weekly Market Digest", "newsletter@marketdigest.com",
+             '["subscriber@firm.com"]', "Generic market commentary, unrelated to our five holdings."),
+            ("noise-msg-2", "Reminder: Expense Reports Due", "hr@firm.com",
+             '["staff@firm.com"]', "Please submit Q1 expense reports by Friday."),
+            ("noise-msg-3", "HR: Benefits Enrollment Window", "benefits@firm.com",
+             '["staff@firm.com"]', "Open enrollment runs through end of month."),
+            ("noise-msg-4", "Vendor Update: Bloomberg Terminal", "support@bloomberg.com",
+             '["it@firm.com"]', "Scheduled maintenance notice."),
+        ]
+        for (mid, subj, frm, to_j, body) in noise_emails:
+            cur.execute(
+                """INSERT INTO email.messages (folder_id, message_id, subject, from_addr, to_addr, date, body_text, is_read)
+                   VALUES (%s, %s, %s, %s, %s::jsonb, NOW(), %s, false)""",
+                (inbox_id, mid, subj, frm, to_j, body),
+            )
+    print("[preprocess] Noise injected (4 gcal + 4 emails).")
 
 
 async def setup_mock_server():
@@ -78,6 +122,7 @@ async def main():
     cur = conn.cursor()
     try:
         clear_db(cur)
+        inject_noise(cur)
         conn.commit()
     except Exception as e:
         conn.rollback()

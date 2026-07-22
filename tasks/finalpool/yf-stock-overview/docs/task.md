@@ -4,4 +4,4 @@ Create an Excel file called YF_Stock_Overview.xlsx with two sheets. The "Stock O
 
 The "Summary" sheet should have Total_Stocks, Total_Market_Cap, Largest_Company name, and Largest_Market_Cap.
 
-Also create a Google Sheet titled "Stock Watch Dashboard" with a "Stocks" sheet containing the same overview data.
+Also create a cloud spreadsheet titled "Stock Watch Dashboard" with a "Stocks" sheet containing the same overview data.

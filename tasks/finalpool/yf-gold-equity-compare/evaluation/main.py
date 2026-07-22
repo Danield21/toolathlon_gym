@@ -3,6 +3,7 @@ import argparse
 import os
 import sys
 import openpyxl
+import psycopg2
 
 
 def num_close(a, b, tol=1.0):
@@ -14,6 +15,49 @@ def num_close(a, b, tol=1.0):
         return abs(float(a) - float(b)) <= tol
     except (TypeError, ValueError):
         return str(a).strip().lower() == str(b).strip().lower()
+
+
+def num_close_rel(a, b, rel=0.05, abs_tol=0.5):
+    if a is None or b is None:
+        return False
+    try:
+        gf = float(b)
+        return abs(float(a) - gf) <= max(abs_tol, abs(gf) * rel)
+    except (TypeError, ValueError):
+        return False
+
+
+def check_email():
+    """Check email sent to portfolio@investment.com with correct subject and content."""
+    errors = []
+    try:
+        conn = psycopg2.connect(
+            host=os.environ.get("PGHOST", "localhost"), port=5432,
+            dbname="toolathlon_gym", user="eigent", password="camel"
+        )
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT subject, to_addr, body_text FROM email.messages
+            WHERE subject ILIKE '%gold vs equity%'
+               OR (to_addr ILIKE '%portfolio@investment.com%' AND subject ILIKE '%gold%')
+            ORDER BY id DESC
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        if not rows:
+            errors.append("No email with subject 'Gold vs Equity Comparison' found")
+            return errors
+        r = rows[0]
+        subj, to_addr, body = r[0], r[1], r[2]
+        if not (to_addr and "portfolio@investment.com" in str(to_addr).lower()):
+            errors.append(f"Email recipient should be portfolio@investment.com, got {to_addr}")
+        body_lower = str(body or "").lower()
+        if not any(s in body_lower for s in ["wid", "narrow", "range", "googl", "^dji"]):
+            errors.append("Email body should mention widest/narrowest range or specific symbols")
+    except Exception as e:
+        errors.append(f"Error checking email: {e}")
+    return errors
 
 
 def str_match(a, b):
@@ -83,16 +127,28 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 10.0):
-                    errors.append(f"{key}.Avg_Price: {a_row[1]} vs {g_row[1]} (tol=10.0)")
+                # Avg_Price: relative tol 1% with 0.5 abs floor (handles low-price assets)
+                if not num_close_rel(a_row[1], g_row[1], rel=0.01, abs_tol=0.5):
+                    errors.append(f"{key}.Avg_Price: {a_row[1]} vs {g_row[1]} (rel=1%, abs=0.5)")
 
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 2.0):
-                    errors.append(f"{key}.Price_Range_Pct: {a_row[2]} vs {g_row[2]} (tol=2.0)")
+                # Price_Range_Pct: tighter tol 0.5pp absolute
+                if not num_close(a_row[2], g_row[2], 0.5):
+                    errors.append(f"{key}.Price_Range_Pct: {a_row[2]} vs {g_row[2]} (tol=0.5)")
 
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 5):
-                    errors.append(f"{key}.Data_Points: {a_row[3]} vs {g_row[3]} (tol=5)")
+                # Data_Points: tight tol (read-only DB), allow +/-2 for date-cutoff interpretation
+                if not num_close(a_row[3], g_row[3], 2):
+                    errors.append(f"{key}.Data_Points: {a_row[3]} vs {g_row[3]} (tol=2)")
+        # Verify Symbol-sort order (ascending by symbol)
+        try:
+            agent_syms = [str(r[0]).strip() for r in a_data if r and r[0] is not None]
+            sorted_syms = sorted(agent_syms, key=lambda s: s.lower())
+            if agent_syms != sorted_syms:
+                errors.append(f"Asset Comparison rows not sorted by Symbol: {agent_syms} expected {sorted_syms}")
+        except Exception:
+            pass
+
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -140,7 +196,16 @@ def main():
         else:
             print(f"    PASS")
 
-    
+    # Check Email
+    print(f"  Checking Email...")
+    email_errors = check_email()
+    if email_errors:
+        all_errors.extend(email_errors)
+        for e in email_errors[:5]:
+            print(f"      {e}")
+    else:
+        print(f"    PASS")
+
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

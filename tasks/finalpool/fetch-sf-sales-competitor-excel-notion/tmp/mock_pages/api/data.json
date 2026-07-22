@@ -1,34 +1,27 @@
 {
   "benchmarks": [
     {
-      "department": "Engineering",
-      "industry_avg": 66816
+      "region": "Asia Pacific",
+      "market_size_m": 439
     },
     {
-      "department": "Finance",
-      "industry_avg": 79324
+      "region": "Europe",
+      "market_size_m": 339
     },
     {
-      "department": "HR",
-      "industry_avg": 67899
+      "region": "Latin America",
+      "market_size_m": 453
     },
     {
-      "department": "Operations",
-      "industry_avg": 72812
+      "region": "Middle East",
+      "market_size_m": 421
     },
     {
-      "department": "R&D",
-      "industry_avg": 74771
-    },
-    {
-      "department": "Sales",
-      "industry_avg": 77904
-    },
-    {
-      "department": "Support",
-      "industry_avg": 61709
+      "region": "North America",
+      "market_size_m": 463
     }
   ],
-  "source": "HR Analytics API",
-  "date": "2026-03-01"
+  "source": "Sales Region Benchmarks API",
+  "date": "2026-03-01",
+  "notes": "Market_Size_M is regional addressable market in millions USD."
 }

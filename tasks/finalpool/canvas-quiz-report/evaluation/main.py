@@ -69,6 +69,12 @@ def main():
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
         
+        # Validate sort order matches groundtruth (Course_Code asc, then Avg_Score desc)
+        agent_order = [(str(r[0]).strip() if r and r[0] else "", str(r[1]).strip() if r and r[1] else "") for r in a_data]
+        gt_order = [(str(r[0]).strip() if r and r[0] else "", str(r[1]).strip() if r and r[1] else "") for r in g_data]
+        if agent_order[:min(5, len(gt_order))] != gt_order[:min(5, len(gt_order))]:
+            errors.append(f"Sort order mismatch. Expected first 5: {gt_order[:5]}, got: {agent_order[:5]}")
+
         a_lookup = {}
         for row in a_data:
             if row and row[1] is not None:
@@ -81,7 +87,7 @@ def main():
             if a_row is None:
                 errors.append(f"Missing row: {g_row[1]}")
                 continue
-            
+
             if len(a_row) > 2 and len(g_row) > 2:
                 if not num_close(a_row[2], g_row[2], 1.0):
                     errors.append(f"{key}.Points_Possible: {a_row[2]} vs {g_row[2]} (tol=1.0)")
@@ -134,8 +140,18 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 5.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=5.0)")
+                # If groundtruth value is string (e.g., quiz title), do string match
+                try:
+                    float(g_row[1])
+                    is_numeric = True
+                except (TypeError, ValueError):
+                    is_numeric = False
+                if is_numeric:
+                    if not num_close(a_row[1], g_row[1], 5.0):
+                        errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=5.0)")
+                else:
+                    if not str_match(a_row[1], g_row[1]):
+                        errors.append(f"{key}.Value: '{a_row[1]}' vs '{g_row[1]}' (string)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")

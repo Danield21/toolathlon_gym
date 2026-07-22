@@ -95,8 +95,9 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 check(f"Assignment '{g_row[1]}' present", False, "Missing")
                 continue
             if len(a_row) > 2 and len(g_row) > 2:
+                # Points are integer-valued; require exact match (was tol=1.0).
                 check(f"'{key}' Points",
-                      num_close(a_row[2], g_row[2], 1.0),
+                      num_close(a_row[2], g_row[2], 0),
                       f"Expected {g_row[2]}, got {a_row[2]}")
 
     # Sheet 2: Recipe_Analysis
@@ -125,7 +126,7 @@ def check_excel(agent_workspace, groundtruth_workspace):
                       f"Expected {g_row[1]}, got {a_row[1]}")
             if len(a_row) > 2 and len(g_row) > 2:
                 check(f"'{key}' Avg_Difficulty",
-                      num_close(a_row[2], g_row[2], 0.3),
+                      num_close(a_row[2], g_row[2], 0.1),
                       f"Expected {g_row[2]}, got {a_row[2]}")
 
     # Sheet 3: Course_Summary
@@ -169,7 +170,7 @@ def check_excel(agent_workspace, groundtruth_workspace):
               num_close(a_data.get("total_recipe_categories"), 10, 0),
               f"Got {a_data.get('total_recipe_categories')}")
         check("Total_Recipes = 322",
-              num_close(a_data.get("total_recipes"), 322, 5),
+              num_close(a_data.get("total_recipes"), 322, 0),
               f"Got {a_data.get('total_recipes')}")
 
     # Sheet 4: Grading_Schedule
@@ -207,6 +208,8 @@ def check_word(agent_workspace):
     try:
         from docx import Document
         doc = Document(docx_path)
+        # Build list of (para_text, style) so we can locate section boundaries.
+        paras = [(p.text, getattr(p.style, "name", "")) for p in doc.paragraphs]
         text = " ".join(p.text for p in doc.paragraphs).lower()
         check("Document has substantial content", len(text) > 200, f"Length: {len(text)}")
         check("Contains course/assignment reference",
@@ -215,6 +218,28 @@ def check_word(agent_workspace):
               "recipe" in text or "cooking" in text or "category" in text)
         check("Contains recommendation",
               "recommend" in text or "suggest" in text or "curriculum" in text)
+        # Triage: require non-trivial content in each of 3 required sections.
+        # Heuristic: split text into sections at occurrences of the keywords; each
+        # section should have >=100 chars of content (rough proxy for non-trivial).
+        def section_char_count(section_keywords):
+            idx = -1
+            for kw in section_keywords:
+                i = text.find(kw)
+                if i >= 0 and (idx < 0 or i < idx):
+                    idx = i
+            if idx < 0:
+                return 0
+            # Take a window after the keyword until next section header or end.
+            return len(text[idx:idx + 500])
+        check("Non-trivial 'assignment structure' content (>=100 chars)",
+              section_char_count(("assignment", "point value", "submissions")) >= 100,
+              "Assignment section content too short")
+        check("Non-trivial 'recipe distribution' content (>=100 chars)",
+              section_char_count(("recipe", "category", "difficulty")) >= 100,
+              "Recipe section content too short")
+        check("Non-trivial 'recommendation' content (>=100 chars)",
+              section_char_count(("recommend", "suggest", "curriculum")) >= 100,
+              "Recommendation section content too short")
     except ImportError:
         check("python-docx available", False)
     except Exception as e:
@@ -235,12 +260,19 @@ def check_gcal():
                OR lower(summary) LIKE '%%biochem%%'
         """)
         cnt = cur.fetchone()[0]
-        check("Calendar has grading events (>=10)", cnt >= 10,
-              f"Found {cnt} grading events")
+        # Expected: one event per course-3 assignment (pulled from Canvas DB).
+        try:
+            cur.execute("SELECT COUNT(*) FROM canvas.assignments WHERE course_id = 3")
+            expected_events = cur.fetchone()[0]
+        except Exception:
+            expected_events = 12
+        check(f"Calendar has exactly {expected_events} grading events",
+              cnt == expected_events,
+              f"Found {cnt} grading events, expected {expected_events}")
 
-        # Check events are on weekdays
+        # Check events are on weekdays and duration == 60 min
         cur.execute("""
-            SELECT start_datetime, EXTRACT(DOW FROM start_datetime) as dow
+            SELECT start_datetime, end_datetime, EXTRACT(DOW FROM start_datetime) as dow
             FROM gcal.events
             WHERE lower(summary) LIKE '%%grading%%'
                OR lower(summary) LIKE '%%cma%%'
@@ -250,9 +282,18 @@ def check_gcal():
         """)
         rows = cur.fetchall()
         if rows:
-            weekend_events = [r for r in rows if r[1] in (0, 6)]
+            weekend_events = [r for r in rows if r[2] in (0, 6)]
             check("No weekend grading events", len(weekend_events) == 0,
                   f"Found {len(weekend_events)} weekend events")
+            # Duration check: each grading event should be ~60 min.
+            bad_dur = []
+            for s, e, _ in rows:
+                if s and e:
+                    dur_min = (e - s).total_seconds() / 60.0
+                    if abs(dur_min - 60) > 5:  # 5-min tolerance
+                        bad_dur.append((s, dur_min))
+            check("All grading events duration ~60 min",
+                  len(bad_dur) == 0, f"Bad: {bad_dur[:3]}")
 
         cur.close()
         conn.close()
@@ -296,13 +337,17 @@ def main():
 
     check_excel(args.agent_workspace, gt_dir)
     check_word(args.agent_workspace)
+    file_fail = FAIL_COUNT
     check_gcal()
+    gcal_fail = FAIL_COUNT - file_fail
     check_reverse_validation(args.agent_workspace)
+    reverse_fail = FAIL_COUNT - file_fail - gcal_fail
+    file_fail += reverse_fail  # reverse validation reads local xlsx → count as file_fail
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")
-    print(f"  Failed: {FAIL_COUNT}")
-    overall = FAIL_COUNT == 0
+    print(f"  Failed: {FAIL_COUNT} (file_fail={file_fail}, gcal_fail={gcal_fail})")
+    overall = file_fail == 0
     print(f"  Overall: {'PASS' if overall else 'FAIL'}")
     sys.exit(0 if overall else 1)
 

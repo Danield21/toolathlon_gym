@@ -78,24 +78,48 @@ def check_excel(workspace, groundtruth_workspace="."):
 
     cal_col = find_col(header, ["Est_Calories", "Est Calories", "Estimated_Calories", "Calories"])
     if cal_col is not None:
-        for r in data[:8]:
+        # Validate ALL rows have a calories value in plausible per-meal range
+        valid_count = 0
+        invalid = []
+        for r in data:
             if cal_col < len(r) and r[cal_col] is not None:
                 try:
                     cal = float(r[cal_col])
-                    record(f"Calories {cal} in range", 50 <= cal <= 3000,
-                           f"Got {cal} for {r[0]}")
-                    break  # Just check first valid one
+                    if 50 <= cal <= 3000:
+                        valid_count += 1
+                    else:
+                        invalid.append((r[0], cal))
                 except (TypeError, ValueError):
-                    pass
+                    invalid.append((r[0], r[cal_col]))
+        record(f"All {len(data)} rows have valid calorie values (50-3000)",
+               valid_count == len(data),
+               f"{len(invalid)} invalid: {invalid[:3]}")
+    else:
+        record("Est_Calories column exists", False, f"Header: {header}")
 
     meets_col = find_col(header, ["Meets_Guidelines", "Meets Guidelines", "Guidelines"])
     if meets_col is not None:
-        vals = set()
+        # Validate every row has a Yes or No value
+        valid_yn = 0
+        invalid = []
         for r in data:
             if meets_col < len(r) and r[meets_col] is not None:
-                vals.add(str(r[meets_col]).strip().lower())
-        has_yes_no = "yes" in vals or "no" in vals
-        record("Meets_Guidelines has Yes/No values", has_yes_no, f"Values: {vals}")
+                v = str(r[meets_col]).strip().lower()
+                if v in ("yes", "no"):
+                    valid_yn += 1
+                else:
+                    invalid.append((r[0], v))
+            else:
+                invalid.append((r[0], None))
+        record(f"All {len(data)} rows have Yes/No in Meets_Guidelines",
+               valid_yn == len(data),
+               f"{len(invalid)} invalid: {invalid[:3]}")
+
+        # Cross-check: must have BOTH Yes and No
+        all_vals = {str(r[meets_col]).strip().lower() for r in data if meets_col < len(r) and r[meets_col]}
+        record("Meets_Guidelines includes both Yes and No values",
+               "yes" in all_vals and "no" in all_vals,
+               f"vals={all_vals}")
     else:
         record("Meets_Guidelines column exists", False, f"Header: {header}")
 
@@ -106,8 +130,15 @@ def check_excel(workspace, groundtruth_workspace="."):
     else:
         record("Sheet 'Meal Plan Suggestions' exists", True)
         data2 = [r for r in mp_rows[1:] if r and r[0] is not None]
-        record("Meal Plan has >= 9 rows (3 days x 3 meals)", len(data2) >= 9,
+        record("Meal Plan has == 9 rows (3 days x 3 meals)", len(data2) == 9,
                f"Found {len(data2)}")
+        # All 3 days x 3 meals pairs covered
+        mp_pairs = set()
+        for r in data2:
+            if len(r) >= 2 and r[0] and r[1]:
+                mp_pairs.add((str(r[0]).strip().lower(), str(r[1]).strip().lower()))
+        record(f"Meal Plan has 9 unique Day/Meal pairs",
+               len(mp_pairs) == 9, f"got {len(mp_pairs)}")
 
     # Summary
     sum_rows = load_sheet_rows(wb, "Summary")
@@ -120,14 +151,60 @@ def check_excel(workspace, groundtruth_workspace="."):
             if row and row[0]:
                 metrics[str(row[0]).strip().lower().replace(" ", "_")] = row[1] if len(row) > 1 else None
 
+        # Required summary keys
+        for required in ["total_recipes_analyzed", "recipes_meeting_guidelines",
+                         "average_calories", "highest_calorie_recipe", "lowest_calorie_recipe"]:
+            record(f"Summary has '{required}'",
+                   required in metrics,
+                   f"Keys: {list(metrics.keys())}")
+
         tp_key = next((k for k in metrics if "total" in k and "recip" in k and "analyz" in k), None)
         if tp_key:
             try:
-                record("Total_Recipes >= 8", float(metrics[tp_key]) >= 8, f"Got {metrics[tp_key]}")
+                record("Total_Recipes_Analyzed >= 8",
+                       float(metrics[tp_key]) >= 8, f"Got {metrics[tp_key]}")
             except (TypeError, ValueError):
-                record("Total_Recipes is numeric", False)
-        else:
-            record("Total_Recipes_Analyzed metric exists", False, f"Keys: {list(metrics.keys())}")
+                record("Total_Recipes_Analyzed is numeric", False)
+
+        # Recipes_Meeting_Guidelines must equal count of "Yes" rows in Recipe Analysis
+        rmg_key = next((k for k in metrics if "recip" in k and "meet" in k), None)
+        if rmg_key and meets_col is not None:
+            try:
+                rmg_val = int(float(metrics[rmg_key]))
+                yes_count = sum(1 for r in data if meets_col < len(r) and str(r[meets_col]).strip().lower() == "yes")
+                record(f"Recipes_Meeting_Guidelines == count of Yes rows ({yes_count})",
+                       rmg_val == yes_count, f"reported {rmg_val}, actual yes={yes_count}")
+            except (TypeError, ValueError):
+                pass
+
+        # Highest_Calorie_Recipe must be the row with the largest calories
+        hc_key = next((k for k in metrics if "highest" in k and "calor" in k), None)
+        if hc_key and cal_col is not None:
+            try:
+                expected = max(
+                    (r for r in data if cal_col < len(r) and r[cal_col] is not None),
+                    key=lambda r: float(r[cal_col])
+                )
+                expected_name = str(expected[0]).strip().lower()
+                reported = str(metrics[hc_key]).strip().lower()
+                record(f"Highest_Calorie_Recipe == '{expected[0]}'",
+                       reported == expected_name, f"reported '{metrics[hc_key]}'")
+            except (TypeError, ValueError, StopIteration):
+                pass
+
+        lc_key = next((k for k in metrics if "lowest" in k and "calor" in k), None)
+        if lc_key and cal_col is not None:
+            try:
+                expected = min(
+                    (r for r in data if cal_col < len(r) and r[cal_col] is not None),
+                    key=lambda r: float(r[cal_col])
+                )
+                expected_name = str(expected[0]).strip().lower()
+                reported = str(metrics[lc_key]).strip().lower()
+                record(f"Lowest_Calorie_Recipe == '{expected[0]}'",
+                       reported == expected_name, f"reported '{metrics[lc_key]}'")
+            except (TypeError, ValueError, StopIteration):
+                pass
 
     # --- Groundtruth XLSX comparison ---
     gt_path = os.path.join(groundtruth_workspace, "Nutrition_Benchmark.xlsx")
@@ -146,18 +223,9 @@ def check_excel(workspace, groundtruth_workspace="."):
             a_rows = [r for r in a_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
             record(f"GT '{gt_sname}' row count", len(a_rows) == len(gt_rows),
                    f"Expected {len(gt_rows)}, got {len(a_rows)}")
-            for ri in range(min(3, len(gt_rows))):
-                if ri >= len(a_rows): break
-                ok = True
-                for ci in range(min(len(gt_rows[ri]), len(a_rows[ri]) if ri < len(a_rows) else 0)):
-                    gv, av = gt_rows[ri][ci], a_rows[ri][ci]
-                    if gv is None: continue
-                    if isinstance(gv, (int, float)):
-                        if not num_close(av, gv, max(abs(gv)*0.1, 1.0)): ok = False; break
-                    else:
-                        if not str_match(av, gv): ok = False; break
-                record(f"GT '{gt_sname}' row {ri+1} values", ok,
-                       f"gt={gt_rows[ri][:4]}, agent={a_rows[ri][:4] if ri < len(a_rows) else 'missing'}")
+            # Recipe names are dynamic (from HowToCook MCP), so we only validate types/ranges.
+            # The Summary sheet metric *values* are validated above against derived totals,
+            # which provides cross-sheet consistency.
         gt_wb.close()
 
     return True
@@ -176,10 +244,17 @@ def check_word(workspace):
         doc = Document(path)
         text = "\n".join(p.text for p in doc.paragraphs).lower()
 
-        record("Report has substantial content", len(text) > 300, f"Only {len(text)} chars")
+        # At least 4 paragraphs of substantive content per task.md
+        substantive_paras = [p for p in doc.paragraphs if p.text and len(p.text.strip()) > 50]
+        record("Report has at least 4 substantive paragraphs",
+               len(substantive_paras) >= 4, f"got {len(substantive_paras)} substantive paras")
+        record("Report has substantial content (>500 chars)", len(text) > 500, f"Only {len(text)} chars")
         record("Mentions nutrition/calories", "calori" in text or "nutrition" in text)
         record("Mentions benchmark/guideline", "benchmark" in text or "guideline" in text)
         record("Mentions meal plan", "meal" in text and "plan" in text)
+        # Specific content per task.md
+        record("Mentions sodium (specifically called out in task)",
+               "sodium" in text)
         return True
     except Exception as e:
         record("Word readable", False, str(e))

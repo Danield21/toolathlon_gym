@@ -23,15 +23,19 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+LOCAL_FAIL_COUNT = 0
+CURRENT_CATEGORY = "runtime"
 
 
 def check(name, condition, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+    global PASS_COUNT, FAIL_COUNT, LOCAL_FAIL_COUNT
     if condition:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if CURRENT_CATEGORY == "local":
+            LOCAL_FAIL_COUNT += 1
         print(f"  [FAIL] {name}: {str(detail)[:200]}")
 
 
@@ -43,6 +47,8 @@ def num_close(a, b, tol=2.0):
 
 
 def check_excel(workspace):
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "local"
     print("\n=== Check 1: Nutrition_Program_Analysis.xlsx ===")
     path = os.path.join(workspace, "Nutrition_Program_Analysis.xlsx")
     if not os.path.exists(path):
@@ -74,7 +80,7 @@ def check_excel(workspace):
         ws2 = wb[sheets[rs_idx]]
         rows2 = list(ws2.iter_rows(values_only=True))
         data2 = [r for r in rows2[1:] if any(c for c in r)]
-        check("Research_Summary has 4+ papers", len(data2) >= 4, f"Found {len(data2)}")
+        check("Research_Summary has exactly 4 papers", len(data2) == 4, f"Found {len(data2)}")
         if rows2:
             headers2 = [str(c).lower() if c else "" for c in rows2[0]]
             check("Has confidence_level column", any("confidence" in h for h in headers2), f"Headers: {headers2}")
@@ -84,11 +90,21 @@ def check_excel(workspace):
 
     # Weekly_Menu
     wm_idx = next((i for i, s in enumerate(sheets_lower) if "weekly" in s or "menu" in s), 2)
+    # Build recipe->category map from Recipe_Database for consecutive-category check
+    recipe_cats = {}
+    if rd_idx < len(sheets):
+        ws1b = wb[sheets[rd_idx]]
+        rows1b = list(ws1b.iter_rows(values_only=True))
+        if rows1b:
+            for r in rows1b[1:]:
+                if r and r[0]:
+                    recipe_cats[str(r[0]).strip().lower()] = str(r[1]).strip().lower() if len(r) > 1 and r[1] else ""
+
     if wm_idx < len(sheets):
         ws3 = wb[sheets[wm_idx]]
         rows3 = list(ws3.iter_rows(values_only=True))
         data3 = [r for r in rows3[1:] if any(c for c in r)]
-        check("Weekly_Menu has 5 days", len(data3) >= 5, f"Found {len(data3)}")
+        check("Weekly_Menu has exactly 5 days", len(data3) == 5, f"Found {len(data3)}")
         all_text3 = " ".join(str(c) for r in rows3 for c in r if c).lower()
         check("Menu includes Monday", "monday" in all_text3)
         check("Menu includes Friday", "friday" in all_text3)
@@ -98,6 +114,17 @@ def check_excel(workspace):
                   any("compliance" in h or "dietary" in h for h in headers3), f"Headers: {headers3}")
             check("Has est_calories column",
                   any("calori" in h for h in headers3), f"Headers: {headers3}")
+            # Check no two consecutive days same lunch category
+            lunch_idx = next((i for i, h in enumerate(headers3) if "lunch" in h), -1)
+            if lunch_idx >= 0 and data3:
+                cat_seq = []
+                for r in data3:
+                    rn = str(r[lunch_idx]).strip().lower() if r[lunch_idx] else ""
+                    cat_seq.append(recipe_cats.get(rn, ""))
+                consec = sum(1 for i in range(1, len(cat_seq))
+                             if cat_seq[i] and cat_seq[i] == cat_seq[i-1])
+                check("No two consecutive days same lunch category", consec == 0,
+                      f"{consec} consecutive pairs; seq={cat_seq}")
 
     # Program_Budget
     pb_idx = next((i for i, s in enumerate(sheets_lower) if "budget" in s), 3)
@@ -125,6 +152,8 @@ def check_excel(workspace):
 
 
 def check_word(workspace):
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "local"
     print("\n=== Check 2: Nutrition_Program_Proposal.docx ===")
     path = os.path.join(workspace, "Nutrition_Program_Proposal.docx")
     if not os.path.exists(path):
@@ -148,6 +177,8 @@ def check_word(workspace):
 
 
 def check_gform():
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "runtime"
     print("\n=== Check 3: Google Form Survey ===")
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
@@ -187,6 +218,8 @@ def check_gform():
 
 
 def check_scripts(workspace):
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "local"  # scripts are local files in agent_workspace
     print("\n=== Check 4: Python scripts ===")
     for script in ["categorize_recipes.py", "analyze_research.py", "build_menus.py", "validate_menus.py"]:
         path = os.path.join(workspace, script)
@@ -194,6 +227,8 @@ def check_scripts(workspace):
 
 
 def check_json_outputs(workspace):
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "local"  # json outputs are local files in agent_workspace
     print("\n=== Check 5: JSON output files ===")
     for fname in ["categorized_recipes.json", "research_findings.json", "evidence_based_menus.json"]:
         path = os.path.join(workspace, fname)
@@ -222,6 +257,8 @@ def check_json_outputs(workspace):
 
 def check_reverse_validation(workspace):
     """Check that noise scholarly papers are NOT present in Excel output."""
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "local"
     print("\n=== Reverse Validation ===")
 
     # Noise paper titles that should NOT appear in the Research_Summary sheet
@@ -291,7 +328,10 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    sys.exit(0 if accuracy >= 70 else 1)
+    print(f"Local FAIL_COUNT: {LOCAL_FAIL_COUNT}, Total FAIL_COUNT: {FAIL_COUNT}")
+    # Strict: local checks (Excel/Word/scripts/json) must be clean.
+    # Only gform (runtime) may fail in GT mode since it requires agent-created form.
+    sys.exit(0 if LOCAL_FAIL_COUNT == 0 else 1)
 
 
 if __name__ == "__main__":

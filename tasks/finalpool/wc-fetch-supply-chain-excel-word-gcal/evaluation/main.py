@@ -125,9 +125,21 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
     try:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT summary, start_datetime FROM gcal.events WHERE summary ILIKE '%supply%'")
-        event_row = cur.fetchone()
-        check("Calendar event with correct summary", event_row is not None, "no matching event found")
+        # Require event on 2026-03-19 9:00-10:30
+        cur.execute("""SELECT summary, start_datetime, end_datetime, description FROM gcal.events
+                       WHERE summary ILIKE '%supply%' AND start_datetime::date = '2026-03-19'""")
+        rows = cur.fetchall()
+        check("Supply Chain Review Meeting on 2026-03-19", len(rows) >= 1, "no event on 2026-03-19")
+        if rows:
+            time_ok = False
+            for r in rows:
+                try:
+                    if r[1].hour == 9 and r[2].hour == 10 and r[2].minute == 30:
+                        time_ok = True
+                        break
+                except Exception:
+                    pass
+            check("Meeting at 09:00-10:30", time_ok, f"Times: {[(r[1],r[2]) for r in rows]}")
         # Reverse verification: noise events should not match task keyword
         cur.execute("SELECT COUNT(*) FROM gcal.events WHERE summary ILIKE '%standup%' OR summary ILIKE '%lunch%'")
         noise_events = cur.fetchone()[0]

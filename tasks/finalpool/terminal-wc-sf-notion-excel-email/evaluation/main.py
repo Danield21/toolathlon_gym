@@ -207,8 +207,10 @@ def check_excel(workspace, gt):
     if it_idx < len(sheets):
         ws_it = wb[sheets[it_idx]]
         rows_it = list(ws_it.iter_rows(min_row=2, values_only=True))
-        check("Issue_Type_Breakdown has 7 rows", len(rows_it) == 7,
-              f"Found {len(rows_it)} rows")
+        expected_it_rows = len(gt["issue_data"])
+        check(f"Issue_Type_Breakdown has {expected_it_rows} rows",
+              len(rows_it) == expected_it_rows,
+              f"Found {len(rows_it)} rows, expected {expected_it_rows}")
 
         if rows_it:
             all_text_it = " ".join(str(c) for r in rows_it for c in r if c).lower()
@@ -257,12 +259,18 @@ def check_excel(workspace, gt):
                       num_close(summary_dict[sat_key], gt["overall_sat"], tol=0.1),
                       f"Got {summary_dict[sat_key]}, expected {gt['overall_sat']}")
 
-            # Highest Risk Category
+            # Highest Risk Category - dynamically derive from problem_list
             cat_key = next((k for k in summary_dict if "category" in k or "risk" in k), None)
             if cat_key:
-                check("Highest Risk Category is Electronics",
-                      str(summary_dict[cat_key]).lower() == "electronics",
-                      f"Got {summary_dict[cat_key]}")
+                # Sum severity per category in problem_list
+                from collections import defaultdict
+                cat_severity = defaultdict(int)
+                for (pid, name, cat, rc, lrc, sev) in gt["problem_list"]:
+                    cat_severity[cat] += sev
+                expected_top_cat = max(cat_severity, key=cat_severity.get) if cat_severity else "Electronics"
+                check(f"Highest Risk Category is {expected_top_cat}",
+                      str(summary_dict[cat_key]).strip().lower() == expected_top_cat.lower(),
+                      f"Got {summary_dict[cat_key]}, expected {expected_top_cat}")
 
 
 def check_notion(gt):
@@ -336,9 +344,13 @@ def check_emails(gt):
 
     if support_emails:
         body = (support_emails[0][2] or "").lower()
+        sat_val = gt["overall_sat"]
+        sat_str_1 = f"{sat_val:.1f}"
+        sat_str_2 = f"{sat_val:.2f}"
+        has_sat_num = sat_str_1 in body or sat_str_2 in body
         check("Support email mentions satisfaction",
-              "satisfaction" in body or "3.2" in body,
-              f"Body snippet: {body[:150]}")
+              "satisfaction" in body or has_sat_num,
+              f"Body snippet: {body[:150]} (expected ~{sat_val})")
 
     # Check product team email
     cur.execute("""
@@ -450,7 +462,8 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    sys.exit(0 if accuracy >= 70 else 1)
+    # Tightened from 70% to 85% to prevent bad-case bypass (which passed at 78%) while allowing runtime-only service checks to fail in GT test
+    sys.exit(0 if accuracy >= 85 else 1)
 
 
 if __name__ == "__main__":

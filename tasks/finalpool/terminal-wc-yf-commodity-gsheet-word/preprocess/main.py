@@ -7,7 +7,7 @@ import uuid
 
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
+DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")),
           dbname=os.environ.get("PGDATABASE", "toolathlon_gym"), user="eigent", password="camel")
 
 

@@ -3,7 +3,7 @@ import os
 import argparse
 import psycopg2
 
-DB = {"host": os.environ.get("PGHOST", "localhost"), "port": 5432, "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
+DB = {"host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")), "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
 
 def main():
     parser = argparse.ArgumentParser()
@@ -17,7 +17,7 @@ def main():
     cur.execute('DELETE FROM notion.blocks')
     cur.execute('DELETE FROM notion.pages')
     cur.execute('DELETE FROM notion.databases')
-    cur.execute('DELETE FROM notion.users')
+    # Do NOT delete notion.users — clearing users can break authentication / default user assignments
     conn.commit()
     cur.close()
     conn.close()

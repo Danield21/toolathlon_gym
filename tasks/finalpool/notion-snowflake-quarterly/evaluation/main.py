@@ -30,14 +30,64 @@ DB_CONFIG = {
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
-# Known targets
-TARGETS = {
+# Fallback targets (used only if Notion page parse fails)
+TARGETS_FALLBACK = {
     "Asia Pacific": 80000,
     "Europe": 85000,
     "Latin America": 75000,
     "Middle East": 85000,
     "North America": 80000,
 }
+
+
+def load_targets_from_notion():
+    """Parse the 'Q4 2024 Sales Targets' Notion page blocks to extract targets.
+
+    Falls back to TARGETS_FALLBACK if the page cannot be located or parsed.
+    """
+    import re
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT id FROM notion.pages
+               WHERE properties::text ILIKE %s AND archived = false AND in_trash = false
+               LIMIT 1""",
+            ("%Q4 2024 Sales Targets%",),
+        )
+        row = cur.fetchone()
+        if not row:
+            cur.close()
+            conn.close()
+            return dict(TARGETS_FALLBACK)
+        page_id = row[0]
+        cur.execute(
+            """SELECT block_data::text FROM notion.blocks
+               WHERE parent_id = %s AND archived = false""",
+            (page_id,),
+        )
+        blocks_text = " ".join(r[0] or "" for r in cur.fetchall())
+        cur.close()
+        conn.close()
+
+        parsed = {}
+        for region in TARGETS_FALLBACK:
+            pattern = re.escape(region) + r"[^0-9\-]*\$?\s*([0-9][0-9,\.]*)"
+            m = re.search(pattern, blocks_text, flags=re.IGNORECASE)
+            if m:
+                val_str = m.group(1).replace(",", "")
+                try:
+                    parsed[region] = float(val_str)
+                except ValueError:
+                    pass
+        if len(parsed) == len(TARGETS_FALLBACK):
+            return parsed
+    except Exception as e:
+        print(f"[eval] load_targets_from_notion fallback due to: {e}")
+    return dict(TARGETS_FALLBACK)
+
+
+TARGETS = load_targets_from_notion()
 
 
 def record(name, passed, detail=""):
@@ -316,6 +366,20 @@ def check_gsheet(expected_data):
         record(f"GSheet: {region}.Actual", actual_found,
                f"Expected ~{actual} in {numeric_vals}")
         if not actual_found:
+            all_ok = False
+
+        # Check Variance value appears in the row
+        variance_found = any(num_close(nv, variance, max(abs(variance)*0.05, 5.0)) for nv in numeric_vals)
+        record(f"GSheet: {region}.Variance", variance_found,
+               f"Expected ~{variance} in {numeric_vals}")
+        if not variance_found:
+            all_ok = False
+
+        # Check Achievement_Pct value appears in the row
+        achievement_found = any(num_close(nv, achievement, 1.0) for nv in numeric_vals)
+        record(f"GSheet: {region}.Achievement_Pct", achievement_found,
+               f"Expected ~{achievement} in {numeric_vals}")
+        if not achievement_found:
             all_ok = False
 
     return all_ok

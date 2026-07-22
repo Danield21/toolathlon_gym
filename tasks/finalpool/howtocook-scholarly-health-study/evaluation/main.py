@@ -54,11 +54,16 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
     all_ok = True
 
     # --- Sheet 1: Recipe Nutrition ---
+    # Tighten: require exact sheet name first (case-insensitive), only fallback to substring if missing
     rn_sheet = None
     for name in wb.sheetnames:
-        if "recipe" in name.lower() and "nutrition" in name.lower():
-            rn_sheet = name
-            break
+        if name.strip().lower() == "recipe nutrition":
+            rn_sheet = name; break
+    if not rn_sheet:
+        for name in wb.sheetnames:
+            if "recipe" in name.lower() and "nutrition" in name.lower():
+                rn_sheet = name
+                break
     if not rn_sheet:
         for name in wb.sheetnames:
             if "recipe" in name.lower() or "nutrition" in name.lower():
@@ -68,6 +73,8 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         record("Sheet 'Recipe Nutrition' exists", False, f"Sheets: {wb.sheetnames}")
         all_ok = False
     else:
+        exact_match = rn_sheet.strip().lower() == "recipe nutrition"
+        record("Sheet 'Recipe Nutrition' exists (exact)", exact_match, f"Got '{rn_sheet}'")
         record("Sheet 'Recipe Nutrition' exists", True)
         ws = wb[rn_sheet]
         rows = list(ws.iter_rows(values_only=True))
@@ -96,9 +103,13 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
     # --- Sheet 2: Research Summary ---
     rs_sheet = None
     for name in wb.sheetnames:
-        if "research" in name.lower() and "summary" in name.lower():
-            rs_sheet = name
-            break
+        if name.strip().lower() == "research summary":
+            rs_sheet = name; break
+    if not rs_sheet:
+        for name in wb.sheetnames:
+            if "research" in name.lower() and "summary" in name.lower():
+                rs_sheet = name
+                break
     if not rs_sheet:
         for name in wb.sheetnames:
             if "research" in name.lower() or "summary" in name.lower():
@@ -108,14 +119,17 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         record("Sheet 'Research Summary' exists", False, f"Sheets: {wb.sheetnames}")
         all_ok = False
     else:
+        exact_match = rs_sheet.strip().lower() == "research summary"
+        record("Sheet 'Research Summary' exists (exact)", exact_match, f"Got '{rs_sheet}'")
         record("Sheet 'Research Summary' exists", True)
         ws = wb[rs_sheet]
         rows = list(ws.iter_rows(values_only=True))
         data_rows = rows[1:] if len(rows) > 1 else []
 
-        has_3_rows = len(data_rows) >= 3
-        record(f"Research Summary has >= 3 rows ({len(data_rows)} found)", has_3_rows)
-        if not has_3_rows:
+        # Task requires exactly 4 papers (3 target + 1 noise excluded, or 4 total per task.md)
+        has_4_rows = len(data_rows) == 4
+        record(f"Research Summary has exactly 4 rows ({len(data_rows)} found)", has_4_rows)
+        if not has_4_rows:
             all_ok = False
 
         # Check that rows have non-empty titles and authors
@@ -170,9 +184,13 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
     # --- Sheet 3: Combined Analysis ---
     ca_sheet = None
     for name in wb.sheetnames:
-        if "combined" in name.lower() and "analysis" in name.lower():
-            ca_sheet = name
-            break
+        if name.strip().lower() == "combined analysis":
+            ca_sheet = name; break
+    if not ca_sheet:
+        for name in wb.sheetnames:
+            if "combined" in name.lower() and "analysis" in name.lower():
+                ca_sheet = name
+                break
     if not ca_sheet:
         for name in wb.sheetnames:
             if "combined" in name.lower() or "analysis" in name.lower():
@@ -182,6 +200,8 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         record("Sheet 'Combined Analysis' exists", False, f"Sheets: {wb.sheetnames}")
         all_ok = False
     else:
+        exact_match = ca_sheet.strip().lower() == "combined analysis"
+        record("Sheet 'Combined Analysis' exists (exact)", exact_match, f"Got '{ca_sheet}'")
         record("Sheet 'Combined Analysis' exists", True)
         ws = wb[ca_sheet]
         rows = list(ws.iter_rows(values_only=True))
@@ -211,8 +231,11 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
             a_rows = [r for r in a_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
             record(f"GT '{gt_sname}' row count", len(a_rows) == len(gt_rows),
                    f"Expected {len(gt_rows)}, got {len(a_rows)}")
-            for ri in range(min(3, len(gt_rows))):
-                if ri >= len(a_rows): break
+            # Iterate ALL GT rows, not just first 3
+            for ri in range(len(gt_rows)):
+                if ri >= len(a_rows):
+                    record(f"GT '{gt_sname}' row {ri+1} exists", False, "Agent row missing")
+                    continue
                 ok = True
                 for ci in range(min(len(gt_rows[ri]), len(a_rows[ri]) if ri < len(a_rows) else 0)):
                     gv, av = gt_rows[ri][ci], a_rows[ri][ci]
@@ -256,12 +279,20 @@ def check_word(agent_workspace):
         )
         record("Document contains title keywords", has_title)
 
+        # Collect heading text to distinguish heading from body substring
+        heading_texts_lower = [
+            p.text.strip().lower() for p in doc.paragraphs
+            if p.style and p.style.name and p.style.name.startswith("Heading")
+        ]
         sections_ok = True
         for section in ["introduction", "recipe analysis", "literature review", "conclusions"]:
-            # Check both as heading text and within body content
-            found = section in text_lower
-            record(f"Document has '{section}' section", found)
-            if not found:
+            # Heading match preferred; substring fallback for tolerance
+            in_heading = any(section == ht or ht.startswith(section) for ht in heading_texts_lower)
+            in_body = section in text_lower
+            found = in_heading or in_body
+            record(f"Document has '{section}' section (heading)", in_heading,
+                   f"Headings: {heading_texts_lower}")
+            if not in_heading and not found:
                 sections_ok = False
 
         return has_length and has_title and sections_ok
@@ -296,7 +327,8 @@ def main():
     print(f"  Excel:   {'PASS' if excel_ok else 'FAIL'}")
     print(f"  Word:    {'PASS' if word_ok else 'FAIL'}")
 
-    overall = excel_ok and word_ok
+    # Use FAIL_COUNT as authoritative: any recorded FAIL propagates to overall
+    overall = excel_ok and word_ok and FAIL_COUNT == 0
     print(f"  Overall: {'PASS' if overall else 'FAIL'}")
 
     sys.exit(0 if overall else 1)

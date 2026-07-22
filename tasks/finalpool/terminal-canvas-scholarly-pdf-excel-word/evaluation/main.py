@@ -1,6 +1,7 @@
 """Evaluation for terminal-canvas-scholarly-pdf-excel-word."""
 import argparse
 import os
+import re
 import sys
 
 import openpyxl
@@ -12,16 +13,20 @@ DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+BLOCKING_FAIL_COUNT = 0
 
 
-def check(name, condition, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def check(name, condition, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, BLOCKING_FAIL_COUNT
     if condition:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
-        print(f"  [FAIL] {name}: {str(detail)[:300]}")
+        if not runtime_only:
+            BLOCKING_FAIL_COUNT += 1
+        suffix = " (runtime-only)" if runtime_only else ""
+        print(f"  [FAIL] {name}{suffix}: {str(detail)[:300]}")
 
 
 def num_close(a, b, tol=1.0):
@@ -80,6 +85,8 @@ def check_excel(agent_ws, gt_dir):
             if r and len(r) >= 4 and r[2]:
                 a_lookup[str(r[2]).strip().lower()] = r
 
+        date_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+        bad_date_count = 0
         for g_row in g_rows:
             if not g_row or not g_row[2]:
                 continue
@@ -96,6 +103,29 @@ def check_excel(agent_ws, gt_dir):
             check(f"'{g_row[2]}' Points",
                   num_close(a_row[3], g_row[3], 1),
                   f"Expected {g_row[3]}, got {a_row[3]}")
+            # Check Due_Date format YYYY-MM-DD or blank (col idx 4)
+            if len(a_row) > 4:
+                due = a_row[4]
+                if due is None or (isinstance(due, str) and due.strip() == ""):
+                    pass  # blank allowed
+                elif isinstance(due, str) and date_re.match(due.strip()):
+                    pass
+                else:
+                    bad_date_count += 1
+        check("Course_Assignments Due_Date format is YYYY-MM-DD or blank",
+              bad_date_count == 0,
+              f"{bad_date_count} rows with wrong format")
+
+        # Verify sort: Course_ID asc, then Points asc
+        try:
+            actual_keys = [(int(r[0] or 0), float(r[3] or 0)) for r in a_rows
+                           if r and r[0] is not None]
+            expected_keys = sorted(actual_keys)
+            check("Course_Assignments sorted by Course_ID,Points asc",
+                  actual_keys == expected_keys,
+                  f"First 5: {actual_keys[:5]}")
+        except Exception as e:
+            check("Course_Assignments sort check", False, str(e))
 
     # Sheet 2: Related_Papers
     print("  Checking Related_Papers...")
@@ -106,6 +136,17 @@ def check_excel(agent_ws, gt_dir):
         data_rows = [r for r in a_rows2 if r and r[0]]
         check("Related_Papers has >= 4 papers", len(data_rows) >= 4, f"Got {len(data_rows)}")
 
+        # Sort by Relevance_Score descending
+        try:
+            scores_rp = [float(r[3]) for r in data_rows
+                         if r and len(r) >= 4 and r[3] is not None]
+            if scores_rp:
+                check("Related_Papers sorted by Relevance_Score desc",
+                      scores_rp == sorted(scores_rp, reverse=True),
+                      f"Scores: {scores_rp}")
+        except Exception as e:
+            check("Related_Papers sort check", False, str(e))
+
         # Check that relevance scores are in range
         for r in data_rows:
             if r and len(r) >= 4 and r[3] is not None:
@@ -115,6 +156,21 @@ def check_excel(agent_ws, gt_dir):
                     break
         else:
             check("All relevance scores in 1-10 range", True)
+
+        # Check that noise papers (marine biology, archaeological survey, quantum
+        # entanglement) from preprocess do not appear in Related_Papers
+        noise_keywords = ["marine biology", "archaeological survey", "quantum entanglement"]
+        found_noise = []
+        for r in data_rows:
+            if r and r[0]:
+                title_lower = str(r[0]).strip().lower()
+                for nk in noise_keywords:
+                    if nk in title_lower:
+                        found_noise.append(r[0])
+                        break
+        check("No noise (unrelated) papers in Related_Papers",
+              len(found_noise) == 0,
+              f"Noise papers: {found_noise}")
 
     # Sheet 3: Alignment_Matrix
     print("  Checking Alignment_Matrix...")
@@ -168,6 +224,9 @@ def check_word(agent_ws):
         from docx import Document
         doc = Document(docx_path)
         text = " ".join(p.text for p in doc.paragraphs).lower()
+        # Collect heading text
+        headings_lower = [p.text.strip().lower() for p in doc.paragraphs
+                          if p.style and p.style.name and p.style.name.startswith("Heading")]
         check("Document has substantial content", len(text) > 500, f"Length: {len(text)}")
         check("Contains curriculum/alignment reference",
               "curriculum" in text or "alignment" in text or "review" in text,
@@ -181,6 +240,23 @@ def check_word(agent_ws):
         check("Contains recommendation",
               "recommend" in text or "suggestion" in text or "improve" in text,
               "Missing recommendations")
+
+        # Require each of the 5 task-specified sections (heading or body)
+        # task.md: executive summary, course description, papers summary,
+        #          alignment analysis, conclusion/recommendations
+        sections_needed = {
+            "executive summary": ["executive summary", "summary"],
+            "course/assignments": ["course", "assignment"],
+            "papers summary":     ["paper", "literature"],
+            "alignment analysis": ["alignment"],
+            "conclusion":          ["conclusion", "recommend"],
+        }
+        heading_text_joined = " ".join(headings_lower)
+        for sec, kws in sections_needed.items():
+            # Prefer heading match; substring fallback counts
+            in_heading = any(any(kw in h for kw in kws) for h in headings_lower)
+            check(f"Word has '{sec}' section (heading)", in_heading,
+                  f"Headings: {headings_lower}")
     except ImportError:
         check("python-docx available", False, "Cannot verify Word content")
     except Exception as e:
@@ -236,10 +312,25 @@ def main():
     check_word(args.agent_workspace)
     check_reverse_validation(args.agent_workspace)
 
+    # Artifact-existence checks (runtime_only: missing in GT self-test).
+    artifacts = ["alignment_scorer.py", "assignments_data.json",
+                 "papers_data.json", "alignment_matrix.json"]
+    print("\n=== Checking task artifacts ===")
+    try:
+        gt_canon = os.path.realpath(gt_dir)
+        ag_canon = os.path.realpath(args.agent_workspace)
+    except Exception:
+        gt_canon, ag_canon = gt_dir, args.agent_workspace
+    is_gt_self_test = (gt_canon == ag_canon)
+    for a in artifacts:
+        p = os.path.join(args.agent_workspace, a)
+        check(f"Artifact '{a}' exists", os.path.isfile(p), p,
+              runtime_only=is_gt_self_test)
+
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")
-    print(f"  Failed: {FAIL_COUNT}")
-    overall = FAIL_COUNT == 0
+    print(f"  Failed: {FAIL_COUNT} (blocking_fail={BLOCKING_FAIL_COUNT})")
+    overall = BLOCKING_FAIL_COUNT == 0
     print(f"  Overall: {'PASS' if overall else 'FAIL'}")
     sys.exit(0 if overall else 1)
 

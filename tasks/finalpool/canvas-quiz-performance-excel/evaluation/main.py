@@ -83,19 +83,19 @@ def check_excel(agent_workspace, groundtruth_workspace):
                     break
             if matched:
                 check(f"Quiz '{title}' Total_Submissions",
-                      num_close(matched[1], subs, 5),
+                      num_close(matched[1], subs, 0),
                       f"Expected {subs}, got {matched[1]}")
                 check(f"Quiz '{title}' Avg_Score",
-                      num_close(matched[2], avg, 1.0),
+                      num_close(matched[2], avg, 0.05),
                       f"Expected {avg}, got {matched[2]}")
                 check(f"Quiz '{title}' Min_Score",
-                      num_close(matched[3], mn, 1.0),
+                      num_close(matched[3], mn, 0.5),
                       f"Expected {mn}, got {matched[3]}")
                 check(f"Quiz '{title}' Max_Score",
-                      num_close(matched[4], mx, 1.0),
+                      num_close(matched[4], mx, 0.5),
                       f"Expected {mx}, got {matched[4]}")
                 check(f"Quiz '{title}' Pass_Rate",
-                      num_close(matched[5], pr, 1.0),
+                      num_close(matched[5], pr, 0.05),
                       f"Expected {pr}, got {matched[5]}")
             else:
                 check(f"Quiz '{title}' found", False)
@@ -137,9 +137,39 @@ def check_excel(agent_workspace, groundtruth_workspace):
     return True
 
 
-def check_emails():
+def check_emails(gt_dir=None):
     """Check that summary email was sent."""
+    import re
     print("\n=== Checking Emails ===")
+
+    # Derive expected highest/lowest quiz titles + total quizzes from GT
+    expected_total_quizzes = None
+    expected_highest = None
+    expected_lowest = None
+    if gt_dir:
+        gt_file = os.path.join(gt_dir, "Quiz_Performance.xlsx")
+        if os.path.isfile(gt_file):
+            try:
+                gt_wb = openpyxl.load_workbook(gt_file, data_only=True)
+                for sn in gt_wb.sheetnames:
+                    if sn.strip().lower() == "summary":
+                        for row in gt_wb[sn].iter_rows(min_row=2, values_only=True):
+                            if not row or not row[0]:
+                                continue
+                            k = str(row[0]).strip().lower()
+                            v = row[1]
+                            if k == "total_quizzes":
+                                try:
+                                    expected_total_quizzes = int(v)
+                                except (TypeError, ValueError):
+                                    pass
+                            elif k == "highest_avg_quiz":
+                                expected_highest = str(v).strip() if v else None
+                            elif k == "lowest_avg_quiz":
+                                expected_lowest = str(v).strip() if v else None
+                        break
+            except Exception:
+                pass
 
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
@@ -175,17 +205,35 @@ def check_emails():
 
     if result:
         subj, from_addr, to_addr, body = result
-        has_quiz_subject = "quiz" in (subj or "").lower() and "performance" in (subj or "").lower()
-        check("Email subject contains 'Quiz Performance'", has_quiz_subject,
-              f"Subject: {(subj or '')[:100]}")
+        # Tightened: require full subject string (case-insensitive)
+        expected_subj = "quiz performance summary - biochemistry and bioinformatics (fall 2013)"
+        actual_subj = (subj or "").strip().lower()
+        check("Email subject is exactly 'Quiz Performance Summary - Biochemistry and Bioinformatics (Fall 2013)'",
+              actual_subj == expected_subj,
+              f"Subject: {(subj or '')[:120]}")
+
+        # Tightened: require from_addr is quiz-analytics@university.example.com
+        from_lower = str(from_addr or "").strip().lower()
+        check("Email from quiz-analytics@university.example.com",
+              "quiz-analytics@university.example.com" in from_lower,
+              f"from_addr: {from_addr}")
 
         body_lower = (body or "").lower()
-        check("Email body mentions quiz count", "5" in body_lower or "five" in body_lower,
-              "Expected mention of 5 quizzes")
-        check("Email body mentions CMA 15003 (highest)",
-              "cma 15003" in body_lower or "15003" in body_lower)
-        check("Email body mentions CMA 15007 (lowest)",
-              "cma 15007" in body_lower or "15007" in body_lower)
+        # Tightened: require labelled total quiz count, e.g. 'Total_Quizzes: 5' or '5 quizzes'
+        if expected_total_quizzes is not None:
+            num = expected_total_quizzes
+            patt = re.compile(rf"(?:total[_\s\-]*quizzes?|quizzes?\s*total)[^0-9]{{0,40}}\b{num}\b|\b{num}\s+quiz", re.I)
+            check(f"Email body mentions labelled quiz count ({num})",
+                  bool(patt.search(body_lower)),
+                  "Expected labelled mention of total quizzes")
+
+        # Tightened: require full highest/lowest quiz titles from GT (not hardcoded)
+        if expected_highest:
+            check(f"Email body mentions highest-avg quiz '{expected_highest}'",
+                  expected_highest.lower() in body_lower)
+        if expected_lowest:
+            check(f"Email body mentions lowest-avg quiz '{expected_lowest}'",
+                  expected_lowest.lower() in body_lower)
 
     return True
 
@@ -206,6 +254,10 @@ def main():
     print("=" * 70)
 
     check_excel(args.agent_workspace, gt_dir)
+    try:
+        check_emails(gt_dir)
+    except Exception as e:
+        check("check_emails ran without DB error", False, str(e))
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

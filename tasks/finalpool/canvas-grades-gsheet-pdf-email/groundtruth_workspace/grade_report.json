@@ -1,0 +1,78 @@
+{
+  "courses": [
+    {
+      "name": "Advanced Data Science",
+      "A_Count": 7,
+      "B_Count": 17,
+      "C_Count": 19,
+      "D_Count": 8,
+      "F_Count": 4,
+      "Total_Students": 55,
+      "Pass_Rate_Pct": 78.2,
+      "Course_Avg": 76.1
+    },
+    {
+      "name": "Cloud Computing",
+      "A_Count": 13,
+      "B_Count": 20,
+      "C_Count": 14,
+      "D_Count": 6,
+      "F_Count": 3,
+      "Total_Students": 56,
+      "Pass_Rate_Pct": 83.9,
+      "Course_Avg": 79.7
+    },
+    {
+      "name": "Computer Networks",
+      "A_Count": 7,
+      "B_Count": 12,
+      "C_Count": 17,
+      "D_Count": 11,
+      "F_Count": 7,
+      "Total_Students": 54,
+      "Pass_Rate_Pct": 66.7,
+      "Course_Avg": 73.7
+    },
+    {
+      "name": "Database Systems",
+      "A_Count": 18,
+      "B_Count": 16,
+      "C_Count": 12,
+      "D_Count": 5,
+      "F_Count": 4,
+      "Total_Students": 55,
+      "Pass_Rate_Pct": 83.6,
+      "Course_Avg": 80.6
+    },
+    {
+      "name": "Introduction to Programming",
+      "A_Count": 27,
+      "B_Count": 17,
+      "C_Count": 18,
+      "D_Count": 4,
+      "F_Count": 3,
+      "Total_Students": 69,
+      "Pass_Rate_Pct": 89.9,
+      "Course_Avg": 81.6
+    },
+    {
+      "name": "Machine Learning",
+      "A_Count": 4,
+      "B_Count": 14,
+      "C_Count": 15,
+      "D_Count": 11,
+      "F_Count": 11,
+      "Total_Students": 55,
+      "Pass_Rate_Pct": 60.0,
+      "Course_Avg": 68.1
+    }
+  ],
+  "summary": {
+    "Total_Courses": 6,
+    "Total_Students": 344,
+    "Overall_Pass_Rate": 77.6,
+    "Overall_Avg_Grade": 76.8,
+    "Highest_Avg_Course": "Introduction to Programming",
+    "Lowest_Avg_Course": "Machine Learning"
+  }
+}

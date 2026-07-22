@@ -92,6 +92,14 @@ def main():
                 # Actual (col 2)
                 if not num_close(a_row[2], g_row[2], 100):
                     all_errors.append(f"{g_row[0]} Actual: {a_row[2]} vs {g_row[2]}")
+                # Variance (col 3)
+                if len(a_row) > 3 and len(g_row) > 3 and g_row[3] is not None:
+                    if not num_close(a_row[3], g_row[3], 100):
+                        all_errors.append(f"{g_row[0]} Variance: {a_row[3]} vs {g_row[3]}")
+                # Variance_Pct (col 4) - 1 decimal place -> tol=0.2
+                if len(a_row) > 4 and len(g_row) > 4 and g_row[4] is not None:
+                    if not num_close(a_row[4], g_row[4], 0.2):
+                        all_errors.append(f"{g_row[0]} Variance_Pct: {a_row[4]} vs {g_row[4]}")
             print("    Done.")
 
         # Check Summary sheet
@@ -126,25 +134,32 @@ def main():
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
+        # Strict: MUST be on 2026-03-31 14:00-15:30
         cur.execute("""
-            SELECT COUNT(*) FROM gcal.events
+            SELECT summary, start_datetime, end_datetime FROM gcal.events
             WHERE (LOWER(summary) LIKE '%forecast%' OR LOWER(summary) LIKE '%quarterly%')
             AND start_datetime::date = '2026-03-31'
         """)
-        count = cur.fetchone()[0]
-        if count == 0:
-            # Broaden search
-            cur.execute("""
-                SELECT COUNT(*) FROM gcal.events
-                WHERE LOWER(summary) LIKE '%forecast%' OR LOWER(summary) LIKE '%quarterly%'
-            """)
-            broad_count = cur.fetchone()[0]
-            if broad_count == 0:
-                all_errors.append("No GCal event for Quarterly Forecast Review found")
-            else:
-                print(f"    GCal event found (not on 2026-03-31, but {broad_count} matching events)")
+        rows = cur.fetchall()
+        if not rows:
+            all_errors.append("No Quarterly Forecast Review event on 2026-03-31")
         else:
-            print(f"    GCal event on 2026-03-31 found ({count} events)")
+            # Verify 14:00 - 15:30 window
+            time_ok = False
+            for r in rows:
+                try:
+                    sh = r[1].hour
+                    eh = r[2].hour
+                    em = r[2].minute
+                    if sh == 14 and eh == 15 and em == 30:
+                        time_ok = True
+                        break
+                except Exception:
+                    pass
+            if not time_ok:
+                all_errors.append("Quarterly Forecast Review not at 14:00-15:30")
+            else:
+                print(f"    GCal event on 2026-03-31 14:00-15:30 found")
         cur.close()
         conn.close()
     except Exception as e:

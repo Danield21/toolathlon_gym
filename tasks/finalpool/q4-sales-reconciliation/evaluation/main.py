@@ -136,13 +136,75 @@ def check_executive_summary(agent_workspace):
     try:
         from docx import Document
         doc = Document(docx_path)
-        full_text = " ".join([p.text for p in doc.paragraphs]).lower()
+        full_text = " ".join([p.text for p in doc.paragraphs])
+        full_lower = full_text.lower()
 
-        if "asia pacific" not in full_text:
-            errors.append("Executive summary missing 'Asia Pacific'")
+        # Dynamic region check: fetch distinct regions from DB and require the
+        # executive summary to mention each one. Falls back to a 'must include
+        # top-2 revenue regions' rule if DB query fails.
+        regions_from_db = []
+        try:
+            import psycopg2 as _pg
+            _c = _pg.connect(
+                host=os.environ.get("PGHOST", "localhost"), port=5432,
+                dbname="toolathlon_gym", user="eigent", password="camel"
+            )
+            _cur = _c.cursor()
+            _cur.execute('''
+                SELECT c."REGION", SUM(o."TOTAL_AMOUNT"::numeric) AS rev
+                FROM sf_data."SALES_DW__PUBLIC__ORDERS" o
+                JOIN sf_data."SALES_DW__PUBLIC__CUSTOMERS" c
+                  ON o."CUSTOMER_ID" = c."CUSTOMER_ID"
+                WHERE o."ORDER_DATE" >= '2025-10-01' AND o."ORDER_DATE" < '2026-01-01'
+                  AND o."STATUS" = 'Delivered'
+                GROUP BY c."REGION"
+                ORDER BY rev DESC
+            ''')
+            regions_from_db = [r[0] for r in _cur.fetchall()]
+            _cur.close(); _c.close()
+        except Exception:
+            regions_from_db = []
 
-        # Check that some revenue figure is mentioned (total ~291425)
-        # Just check the doc isn't empty
+        if regions_from_db:
+            # Require ALL regions to be mentioned (exceeding/falling short requires listing)
+            missing = [r for r in regions_from_db if r.lower() not in full_lower]
+            if missing:
+                errors.append(
+                    f"Executive summary missing region(s): {missing}")
+        elif "asia pacific" not in full_lower:
+            errors.append("Executive summary missing 'Asia Pacific' (fallback)")
+
+        # Check that some revenue figure is mentioned - try to query DB for actual total revenue
+        expected_total = None
+        try:
+            import psycopg2
+            conn = psycopg2.connect(
+                host=os.environ.get("PGHOST", "localhost"), port=5432,
+                dbname="toolathlon_gym", user="eigent", password="camel"
+            )
+            cur = conn.cursor()
+            cur.execute('''
+                SELECT SUM("TOTAL_AMOUNT"::numeric) FROM sf_data."SALES_DW__PUBLIC__ORDERS"
+                WHERE "ORDER_DATE" >= '2025-10-01' AND "ORDER_DATE" < '2026-01-01'
+                  AND "STATUS" = 'Delivered'
+            ''')
+            res = cur.fetchone()
+            if res and res[0] is not None:
+                expected_total = float(res[0])
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+        if expected_total is not None:
+            total_int = int(expected_total)
+            total_with_comma = f"{total_int:,}"
+            total_str = str(total_int)
+            total_str_short = str(total_int)[:5]  # leading digits
+            has_total = (total_str in full_text or total_with_comma in full_text or total_str_short in full_text)
+            if not has_total:
+                errors.append(f"Executive summary missing total revenue ~{total_int}")
+
         if len(full_text.strip()) < 50:
             errors.append("Executive summary is too short (less than 50 chars)")
 

@@ -266,44 +266,24 @@ def check_excel_db(agent_workspace, expected):
                 except (ValueError, TypeError):
                     pass
 
-        # Spot-check out-of-stock products
+        # Validate ALL row statuses (not just a subset)
+        status_mismatches = []
+        gap_mismatches = []
         for pid, gt_row in gt_by_id.items():
-            if gt_row[7] == "Out of Stock":
-                agent_row = agent_by_id.get(pid)
-                if agent_row:
-                    check(f"Product {pid} status is 'Out of Stock'",
-                          str_match(agent_row[7], "Out of Stock"),
-                          f"Expected 'Out of Stock', got '{agent_row[7]}'")
-                    check(f"Product {pid} Stock_Gap",
-                          num_close(agent_row[6], gt_row[6], 1),
-                          f"Expected {gt_row[6]}, got {agent_row[6]}")
-                else:
-                    check(f"Product {pid} found in agent output", False)
-
-        # Check a few Critical products
-        critical_checked = 0
-        for pid, gt_row in gt_by_id.items():
-            if gt_row[7] == "Critical" and critical_checked < 3:
-                agent_row = agent_by_id.get(pid)
-                if agent_row:
-                    check(f"Product {pid} status is 'Critical'",
-                          str_match(agent_row[7], "Critical"),
-                          f"Expected 'Critical', got '{agent_row[7]}'")
-                critical_checked += 1
-
-        # Check a few OK products
-        ok_checked = 0
-        for pid, gt_row in gt_by_id.items():
-            if gt_row[7] == "OK" and ok_checked < 2:
-                agent_row = agent_by_id.get(pid)
-                if agent_row:
-                    check(f"Product {pid} status is 'OK'",
-                          str_match(agent_row[7], "OK"),
-                          f"Expected 'OK', got '{agent_row[7]}'")
-                    check(f"Product {pid} Stock_Gap is 0",
-                          num_close(agent_row[6], 0, 0),
-                          f"Expected 0, got {agent_row[6]}")
-                ok_checked += 1
+            agent_row = agent_by_id.get(pid)
+            if agent_row is None:
+                status_mismatches.append(f"Product {pid} missing")
+                continue
+            if not str_match(agent_row[7], gt_row[7]):
+                status_mismatches.append(f"P{pid}: expected {gt_row[7]}, got {agent_row[7]}")
+            if not num_close(agent_row[6], gt_row[6], 1):
+                gap_mismatches.append(f"P{pid}: expected gap {gt_row[6]}, got {agent_row[6]}")
+        check(f"All {len(gt_by_id)} product statuses match",
+              len(status_mismatches) == 0,
+              f"First mismatches: {status_mismatches[:3]}")
+        check(f"All {len(gt_by_id)} Stock_Gap values match",
+              len(gap_mismatches) == 0,
+              f"First mismatches: {gap_mismatches[:3]}")
 
         # Check sort order
         if len(agent_rows) >= 2:
@@ -332,26 +312,29 @@ def check_excel_db(agent_workspace, expected):
                 except (ValueError, TypeError):
                     pass
 
-        checked = 0
+        # Validate Suggested_Price for ALL rows (tol 0.5 or 0.5% proportional)
+        sp_mismatches = []
+        mult_mismatches = []
+        direction_mismatches = []
         for gt_row in rep:
-            if checked >= 8:
-                break
             pid = gt_row[0]
             agent_row = agent_by_id.get(pid)
-            if agent_row:
-                # Cost_Multiplier (col 4)
-                check(f"Product {pid} Cost_Multiplier",
-                      num_close(agent_row[4], gt_row[4], 0.01),
-                      f"Expected {gt_row[4]}, got {agent_row[4]}")
-                # Suggested_Price (col 5)
-                check(f"Product {pid} Suggested_Price",
-                      num_close(agent_row[5], gt_row[5], 1.0),
-                      f"Expected {gt_row[5]}, got {agent_row[5]}")
-                # Change_Direction (col 7)
-                check(f"Product {pid} Change_Direction",
-                      str_match(agent_row[7], gt_row[7]),
-                      f"Expected '{gt_row[7]}', got '{agent_row[7]}'")
-                checked += 1
+            if agent_row is None:
+                continue
+            if not num_close(agent_row[4], gt_row[4], 0.01):
+                mult_mismatches.append(f"P{pid}")
+            # Price-proportional tolerance: max(0.5, 0.5% of expected)
+            sp_tol = max(0.5, float(gt_row[5]) * 0.005)
+            if not num_close(agent_row[5], gt_row[5], sp_tol):
+                sp_mismatches.append(f"P{pid}: {agent_row[5]} vs {gt_row[5]}")
+            if not str_match(agent_row[7], gt_row[7]):
+                direction_mismatches.append(f"P{pid}")
+        check(f"All Cost_Multiplier values match",
+              len(mult_mismatches) == 0, f"Mismatches: {mult_mismatches[:5]}")
+        check(f"All Suggested_Price values within tol",
+              len(sp_mismatches) == 0, f"Mismatches: {sp_mismatches[:5]}")
+        check(f"All Change_Direction values match",
+              len(direction_mismatches) == 0, f"Mismatches: {direction_mismatches[:5]}")
 
         if len(agent_rows) >= 2:
             check("Repricing sorted by Product_ID ascending",

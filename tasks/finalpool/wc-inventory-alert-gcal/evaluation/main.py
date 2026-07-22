@@ -62,15 +62,63 @@ def check_text_file(agent_workspace, groundtruth_workspace):
     record("Line count matches (5)", len(agent_lines) == len(gt_lines),
            f"Expected {len(gt_lines)}, got {len(agent_lines)}")
 
-    # Check each product ID appears
+    # Check each product ID appears as the FIRST field (split by ' - ')
     matched = 0
-    for pid in OOS_PRODUCT_IDS:
-        found = any(str(pid) in l.split(" - ")[0] for l in agent_lines)
-        record(f"Report: product {pid} listed", found, f"ID {pid} not found")
-        if found:
-            matched += 1
+    sku_matched = 0
+    cat_matched = 0
+    for i, pid in enumerate(OOS_PRODUCT_IDS):
+        # Find agent line where first ' - '-split field equals str(pid)
+        line_for_pid = None
+        for l in agent_lines:
+            parts = l.split(" - ")
+            if parts and parts[0].strip() == str(pid):
+                line_for_pid = l
+                break
+        record(f"Report: product {pid} listed (first field exact)",
+               line_for_pid is not None,
+               f"ID {pid} not found as first field. Agent first fields: {[l.split(' - ')[0].strip() for l in agent_lines]}")
+        if line_for_pid is None:
+            continue
+        matched += 1
 
-    return matched == len(OOS_PRODUCT_IDS)
+        # Compare SKU (3rd field) and Category (4th field) against GT
+        gt_line = next((g for g in gt_lines if g.split(" - ")[0].strip() == str(pid)), None)
+        if gt_line is None:
+            continue
+        a_parts = [p.strip() for p in line_for_pid.split(" - ")]
+        g_parts = [p.strip() for p in gt_line.split(" - ")]
+        # Length should match (4 fields: ID, Name, SKU, Category)
+        if len(a_parts) >= 3 and len(g_parts) >= 3:
+            if a_parts[2] == g_parts[2]:
+                sku_matched += 1
+            else:
+                record(f"Report: product {pid} SKU matches GT", False,
+                       f"Got '{a_parts[2]}', expected '{g_parts[2]}'")
+        if len(a_parts) >= 4 and len(g_parts) >= 4:
+            if a_parts[3].lower() == g_parts[3].lower():
+                cat_matched += 1
+            else:
+                record(f"Report: product {pid} Category matches GT", False,
+                       f"Got '{a_parts[3]}', expected '{g_parts[3]}'")
+
+    record(f"Report: SKU matches for all products",
+           sku_matched == len(OOS_PRODUCT_IDS),
+           f"Matched {sku_matched}/{len(OOS_PRODUCT_IDS)}")
+    record(f"Report: Category matches for all products",
+           cat_matched == len(OOS_PRODUCT_IDS),
+           f"Matched {cat_matched}/{len(OOS_PRODUCT_IDS)}")
+
+    # Verify sort order ascending by ID
+    try:
+        ids_in_order = [int(l.split(" - ")[0].strip()) for l in agent_lines]
+        record("Report: rows sorted by product ID ascending",
+               ids_in_order == sorted(ids_in_order),
+               f"Got order: {ids_in_order}")
+    except (ValueError, IndexError):
+        record("Report: rows sorted by product ID ascending", False,
+               "Could not parse IDs from first field")
+
+    return matched == len(OOS_PRODUCT_IDS) and sku_matched == len(OOS_PRODUCT_IDS) and cat_matched == len(OOS_PRODUCT_IDS)
 
 
 # ============================================================================
@@ -80,6 +128,7 @@ def check_text_file(agent_workspace, groundtruth_workspace):
 def check_gcal():
     print("\n=== Checking Google Calendar ===")
 
+    import re as _re
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
@@ -94,13 +143,11 @@ def check_gcal():
 
     print(f"[check_gcal] Found {len(events)} calendar events.")
 
-    record("At least 5 calendar events created", len(events) >= 5,
-           f"Found {len(events)}")
-
     # Check events have "Restock:" in title
     restock_events = [e for e in events if "restock" in (e[0] or "").lower()]
-    record("At least 5 restock events", len(restock_events) >= 5,
-           f"Found {len(restock_events)} with 'Restock' in title")
+    # Tighten: exactly 5 restock events
+    record("Exactly 5 'Restock:' events created", len(restock_events) == 5,
+           f"Found {len(restock_events)} restock events: {[e[0] for e in restock_events]}")
 
     # Check date is March 10, 2026
     march_10_events = []
@@ -108,19 +155,37 @@ def check_gcal():
         if start_dt:
             date_str = start_dt.strftime("%Y-%m-%d")
             if date_str == "2026-03-10":
-                march_10_events.append(summary)
+                march_10_events.append((summary, description, start_dt))
 
-    record("Restock events on 2026-03-10", len(march_10_events) >= 5,
-           f"Found {len(march_10_events)} on March 10")
+    record("All 5 restock events on 2026-03-10",
+           len(march_10_events) == 5 and len(restock_events) == 5,
+           f"Found {len(march_10_events)} on March 10 (out of {len(restock_events)} restock)")
 
-    # Check descriptions mention product IDs
+    # Check descriptions mention each product ID via regex word-boundary
+    all_ok = True
     for pid in OOS_PRODUCT_IDS:
-        pid_str = str(pid)
-        found = any(pid_str in (e[1] or "") for e in restock_events)
-        record(f"gcal: event mentions product {pid}",
-               found, f"Product {pid} not in any event description")
+        # Match "Product ID: 20" or "Product ID: 20." or "ID: 20\b" patterns
+        pattern = _re.compile(r"(?:product\s*id|id)[:\s]*" + str(pid) + r"\b", _re.IGNORECASE)
+        matched = [e for e in restock_events if pattern.search(e[1] or "")]
+        record(f"gcal: event description references 'Product ID: {pid}'",
+               len(matched) >= 1,
+               f"Product {pid} not in any event description (regex match)")
+        if not matched:
+            all_ok = False
+            continue
+        # Description must include 'SKU:' and 'Category:' and indicate out of stock
+        e = matched[0]
+        desc = (e[1] or "").lower()
+        sku_ok = "sku:" in desc
+        cat_ok = "category:" in desc
+        oos_ok = "out of stock" in desc
+        record(f"  gcal {pid} description has SKU/Category/Out-of-stock fields",
+               sku_ok and cat_ok and oos_ok,
+               f"sku={sku_ok}, cat={cat_ok}, oos={oos_ok}; sample: {desc[:200]}")
+        if not (sku_ok and cat_ok and oos_ok):
+            all_ok = False
 
-    return True
+    return len(restock_events) == 5 and len(march_10_events) == 5 and all_ok
 
 
 # ============================================================================
@@ -130,6 +195,7 @@ def check_gcal():
 def check_emails():
     print("\n=== Checking Emails ===")
 
+    import re as _re
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
@@ -145,36 +211,52 @@ def check_emails():
     record("At least 1 email sent", len(all_emails) >= 1, f"Found {len(all_emails)}")
 
     found = False
+    all_ok = True
     for subject, from_addr, to_addr, body_text in all_emails:
         subject_lower = (subject or "").lower()
-        if "out of stock" in subject_lower or "stock alert" in subject_lower:
+        # Subject must include 'out of stock alert' AND 'march 2026'
+        if "out of stock alert" in subject_lower and ("march 2026" in subject_lower or "march" in subject_lower):
             found = True
 
             from_str = str(from_addr or "").lower()
+            ok_from = "purchasing@ourstore.com" in from_str
             record("email: from purchasing@ourstore.com",
-                   "purchasing@ourstore.com" in from_str,
-                   f"From: {from_addr}")
+                   ok_from, f"From: {from_addr}")
+            if not ok_from:
+                all_ok = False
 
             to_str = str(to_addr or "").lower()
+            ok_to = "warehouse@ourstore.com" in to_str
             record("email: to warehouse@ourstore.com",
-                   "warehouse@ourstore.com" in to_str,
-                   f"To: {to_addr}")
+                   ok_to, f"To: {to_addr}")
+            if not ok_to:
+                all_ok = False
 
-            body_lower = (body_text or "").lower()
+            body = body_text or ""
             for pid in OOS_PRODUCT_IDS:
-                record(f"email: body mentions product {pid}",
-                       str(pid) in (body_text or ""),
-                       f"Product {pid} not in email body")
+                # Match "ID 20:" or "ID 20." pattern (word-boundary), per task body format
+                pattern = _re.compile(r"\bid\s*" + str(pid) + r"[:\s]", _re.IGNORECASE)
+                ok_pid = pattern.search(body) is not None
+                record(f"email: body mentions 'ID {pid}:' format",
+                       ok_pid,
+                       f"Pattern not found. Body sample: {body[:300]}")
+                if not ok_pid:
+                    all_ok = False
 
-            record("email: body mentions total count 5",
-                   "5" in (body_text or ""),
-                   "Total count not found")
+            # Total count line
+            ok_total = _re.search(r"total\s+out[\s\-]+of[\s\-]+stock\s+products\s*:\s*5\b",
+                                  body, _re.IGNORECASE) is not None
+            record("email: body has 'Total out-of-stock products: 5'",
+                   ok_total,
+                   f"Body sample: {body[:300]}")
+            if not ok_total:
+                all_ok = False
             break
 
-    record("email: stock alert email found", found,
-           "No email with 'out of stock' in subject")
+    record("email: 'Out of Stock Alert - March 2026' email found", found,
+           f"No email with required subject. Subjects: {[(e[0] or '') for e in all_emails][:5]}")
 
-    return found
+    return found and all_ok
 
 
 # ============================================================================

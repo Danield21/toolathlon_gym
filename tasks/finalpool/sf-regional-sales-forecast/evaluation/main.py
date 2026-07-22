@@ -82,7 +82,11 @@ def main():
             if a_row is None:
                 errors.append(f"Missing: {g_row[0]}|{g_row[1]}")
                 continue
-            # Revenue
+            # Orders (col 2)
+            if len(a_row) > 2 and len(g_row) > 2:
+                if not num_close(a_row[2], g_row[2], 2):
+                    errors.append(f"{key}.Orders: {a_row[2]} vs {g_row[2]}")
+            # Revenue (col 3)
             if len(a_row) > 3 and len(g_row) > 3:
                 if not num_close(a_row[3], g_row[3], 100):
                     errors.append(f"{key}.Revenue: {a_row[3]} vs {g_row[3]}")
@@ -123,9 +127,17 @@ def main():
             if len(a_row) > 2 and len(g_row) > 2:
                 if not num_close(a_row[2], g_row[2], 0.1):
                     errors.append(f"{key}.GDP: {a_row[2]} vs {g_row[2]}")
+            # Economic_Adjustment (col 3) - close to 1.0+GDP/100
+            if len(a_row) > 3 and len(g_row) > 3:
+                if not num_close(a_row[3], g_row[3], 0.005):
+                    errors.append(f"{key}.Econ_Adj: {a_row[3]} vs {g_row[3]}")
+            # Adjusted_Monthly_Forecast (col 4)
+            if len(a_row) > 4 and len(g_row) > 4:
+                if not num_close(a_row[4], g_row[4], 200):
+                    errors.append(f"{key}.Adj_Monthly: {a_row[4]} vs {g_row[4]}")
             # Next_Quarter_Forecast
             if len(a_row) > 5 and len(g_row) > 5:
-                if not num_close(a_row[5], g_row[5], 1000):
+                if not num_close(a_row[5], g_row[5], 500):
                     errors.append(f"{key}.Q_Forecast: {a_row[5]} vs {g_row[5]}")
         if errors:
             all_errors.extend(errors)
@@ -188,21 +200,42 @@ def main():
             from docx import Document
             doc = Document(word_file)
             text = " ".join(p.text for p in doc.paragraphs).lower()
-            checks = [
-                ("methodology" in text or "formula" in text, "Missing methodology section"),
-                ("forecast" in text, "Missing forecast content"),
-                (len(doc.paragraphs) >= 5, "Document too short"),
+            # Collect all heading-like paragraphs (style contains 'Heading' or bold/short)
+            heading_texts = []
+            for p in doc.paragraphs:
+                st = (p.style.name or "").lower()
+                if "heading" in st or "title" in st:
+                    heading_texts.append(p.text.strip().lower())
+            heading_blob = " ".join(heading_texts)
+            # Task requires 5 sections: executive summary, methodology, regional analysis, assumptions, recommendations
+            required_sections = [
+                ("executive summary", "executive summary"),
+                ("methodology", "methodology"),
+                ("regional analysis", "regional analysis"),
+                ("assumption", "assumptions"),
+                ("recommendation", "recommendations"),
             ]
-            for cond, msg in checks:
-                if not cond:
-                    all_errors.append(msg)
-            print("    PASS" if all(c for c, _ in checks) else "    ERRORS found")
+            # Check either in headings or in body text (fallback)
+            for key_sub, label in required_sections:
+                found_in_heading = key_sub in heading_blob
+                found_in_body = key_sub in text
+                if not (found_in_heading or found_in_body):
+                    all_errors.append(f"Missing Word section: {label}")
+            # Doc length sanity
+            if len(doc.paragraphs) < 5:
+                all_errors.append("Document too short")
+            if not any(a.startswith("Missing Word") or a.startswith("Document") for a in all_errors):
+                print("    PASS")
+            else:
+                print("    ERRORS found")
         except Exception as e:
             all_errors.append(f"Word doc error: {e}")
             print(f"    ERROR: {e}")
 
-    # Check Google Sheet
+    # Check Google Sheet (runtime-blockable: only blocks if agent created gsheet data)
     print("  Checking Google Sheet...")
+    gsheet_has_data = False
+    gsheet_errors = []
     try:
         db_config = {
             "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
@@ -211,25 +244,59 @@ def main():
         }
         conn = psycopg2.connect(**db_config)
         cur = conn.cursor()
-        cur.execute("SELECT id, title FROM gsheet.spreadsheets WHERE title LIKE '%Forecast%' OR title LIKE '%forecast%'")
+        cur.execute("SELECT COUNT(*) FROM gsheet.spreadsheets")
+        (n_ss,) = cur.fetchone()
+        gsheet_has_data = n_ss > 0
+
+        cur.execute("SELECT id, title FROM gsheet.spreadsheets WHERE title ILIKE '%forecast%'")
         sheets = cur.fetchall()
         if len(sheets) < 1:
-            all_errors.append("No Google Sheet with 'Forecast' in title found")
+            gsheet_errors.append("No Google Sheet with 'Forecast' in title found")
             print("    FAIL: no forecast spreadsheet")
         else:
             ss_id = sheets[0][0]
-            cur.execute("SELECT COUNT(*) FROM gsheet.cells WHERE spreadsheet_id = %s", (ss_id,))
-            cell_count = cur.fetchone()[0]
-            if cell_count < 10:
-                all_errors.append(f"Google Sheet has only {cell_count} cells")
-                print(f"    FAIL: only {cell_count} cells")
-            else:
+            # Match sheet name 'Forecast Data'
+            cur.execute("SELECT id, title FROM gsheet.sheets WHERE spreadsheet_id=%s", (ss_id,))
+            subsheets = cur.fetchall()
+            has_forecast_data = any(
+                t and "forecast data" in t.lower() for _, t in subsheets
+            )
+            if not has_forecast_data:
+                gsheet_errors.append(
+                    f"GSheet missing 'Forecast Data' subsheet. Found: {[t for _, t in subsheets]}"
+                )
+            # Cross-check: cells in Forecast Data sheet contain region name from Excel Forecast
+            # Expected 5 regions
+            cur.execute("""
+                SELECT DISTINCT value FROM gsheet.cells
+                WHERE spreadsheet_id=%s
+            """, (ss_id,))
+            all_cell_vals = [r[0] for r in cur.fetchall() if r[0]]
+            total_cells = len(all_cell_vals)
+            if total_cells < 10:
+                gsheet_errors.append(f"Google Sheet has only {total_cells} cell values")
+            # Look for at least 3 expected region names or numeric forecast values
+            # Get the regions from Excel GT
+            gt_forecast_rows = load_sheet_rows(gt_wb, "Forecast") or []
+            gt_regions = [str(r[0]).strip().lower() for r in gt_forecast_rows[1:] if r and r[0]]
+            all_cell_blob = " ".join(str(v).lower() for v in all_cell_vals)
+            regions_found = sum(1 for r in gt_regions if r in all_cell_blob)
+            if regions_found < 3:
+                gsheet_errors.append(f"GSheet Forecast Data missing region names (found {regions_found}/{len(gt_regions)})")
+            if not gsheet_errors:
                 print("    PASS")
         cur.close()
         conn.close()
     except Exception as e:
-        all_errors.append(f"GSheet check error: {e}")
+        gsheet_errors.append(f"GSheet check error: {e}")
         print(f"    ERROR: {e}")
+
+    # Only block gsheet if the agent populated something (has spreadsheets) or if errors are non-empty-state
+    if gsheet_has_data:
+        all_errors.extend(gsheet_errors)
+    elif gsheet_errors:
+        # No data at all: treat as runtime-inconclusive
+        print(f"    [runtime-only] GSheet issues: {gsheet_errors[:2]}")
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

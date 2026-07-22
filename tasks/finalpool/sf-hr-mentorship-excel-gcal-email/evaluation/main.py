@@ -93,15 +93,42 @@ def check_excel(agent_workspace, groundtruth_workspace):
             key = str(g_row[0]).strip().lower()
             if key in a_lookup:
                 mentor_names_present += 1
-        check("At least 8 mentor names match", mentor_names_present >= 8,
+        check("At least 9 mentor names match", mentor_names_present >= 9,
               f"Matched {mentor_names_present}/10")
-        if mentor_names_present < 8:
+        if mentor_names_present < 9:
             all_ok = False
 
-        # Check column count
+        # Check column count - require all 6 (was >= 5)
         if a_rows:
-            check("Pairs has 6 columns", len([v for v in a_rows[0] if v is not None]) >= 5,
-                  f"Got {len([v for v in a_rows[0] if v is not None])}")
+            ncols = len([v for v in a_rows[0] if v is not None])
+            check("Pairs has 6 columns", ncols == 6, f"Got {ncols}")
+            if ncols != 6:
+                all_ok = False
+
+        # Verify per-row that mentor department/rating, mentee department/experience match GT
+        # for matched mentor names
+        match_field_errors = []
+        a_by_mentor = a_lookup
+        for g_row in g_rows:
+            if not g_row or not g_row[0]:
+                continue
+            key = str(g_row[0]).strip().lower()
+            a_row = a_by_mentor.get(key)
+            if a_row is None:
+                continue
+            if not str_match(a_row[1], g_row[1]):
+                match_field_errors.append(f"{key} Mentor_Department: '{a_row[1]}' vs '{g_row[1]}'")
+            if not num_close(a_row[2], g_row[2], 0.05):
+                match_field_errors.append(f"{key} Mentor_Rating: {a_row[2]} vs {g_row[2]}")
+            # Mentee_Experience - tighten per-row tol to 0.1 (matches summary tol)
+            if len(a_row) > 5 and len(g_row) > 5 and not num_close(a_row[5], g_row[5], 0.1):
+                match_field_errors.append(f"{key} Mentee_Experience: {a_row[5]} vs {g_row[5]}")
+        # Allow at most 1 mismatch (was 2) — single tie-break swap.
+        check("Per-row mentor/mentee fields match GT (at most 1 mismatch)",
+              len(match_field_errors) <= 1,
+              f"Errors: {match_field_errors[:5]}")
+        if len(match_field_errors) > 1:
+            all_ok = False
 
     # Check Program_Summary sheet
     agent_summary = get_sheet(agent_wb, "Program_Summary")
@@ -126,9 +153,11 @@ def check_excel(agent_workspace, groundtruth_workspace):
         amr = a_summary.get("avg_mentor_rating")
         check("Avg_Mentor_Rating close to 5.0", num_close(amr, 5.0, 0.1), f"Got {amr}")
 
-        # Avg_Mentee_Experience
+        # Avg_Mentee_Experience - tighten tol from 0.5 to 0.1
         ame = a_summary.get("avg_mentee_experience")
-        check("Avg_Mentee_Experience close to 0.1", num_close(ame, 0.1, 0.5), f"Got {ame}")
+        check("Avg_Mentee_Experience close to 0.1", num_close(ame, 0.1, 0.1), f"Got {ame}")
+        if not num_close(ame, 0.1, 0.1):
+            all_ok = False
 
     return all_ok
 
@@ -137,7 +166,7 @@ def check_gcal(launch_time_str):
     print("\n=== Checking Google Calendar ===")
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
-    cur.execute("SELECT summary, description, start_datetime FROM gcal.events ORDER BY start_datetime")
+    cur.execute("SELECT summary, description, start_datetime, end_datetime FROM gcal.events ORDER BY start_datetime")
     events = cur.fetchall()
     cur.close()
     conn.close()
@@ -150,18 +179,35 @@ def check_gcal(launch_time_str):
     check("Mentorship Kickoff Meeting event exists", len(kickoff_events) >= 1,
           f"Events: {[e[0] for e in events]}")
 
+    if kickoff_events:
+        ev = kickoff_events[0]
+        # Description must mention 'mentorship'
+        desc = (ev[1] or "").lower()
+        check("Kickoff event description mentions mentorship",
+              "mentorship" in desc or "mentor" in desc,
+              f"Description: {desc[:200]}")
+        # Duration ~ 1 hour
+        if ev[2] and ev[3]:
+            try:
+                dur_min = (ev[3] - ev[2]).total_seconds() / 60.0
+                check("Kickoff event duration is 1 hour (60 min)",
+                      abs(dur_min - 60) <= 5, f"Got {dur_min:.1f} min")
+            except Exception:
+                pass
+
     if launch_time_str and kickoff_events:
         try:
             launch_dt = datetime.fromisoformat(launch_time_str)
             expected_dt = launch_dt + timedelta(days=7)
-            for ev in kickoff_events:
-                if ev[2]:
-                    ev_dt = ev[2]
-                    if hasattr(ev_dt, 'date'):
-                        diff = abs((ev_dt.replace(tzinfo=None) - expected_dt).total_seconds())
-                        check("Kickoff meeting 7 days from launch", diff <= 86400 * 2,
-                              f"Expected around {expected_dt}, got {ev_dt}")
-                        break
+            ev = kickoff_events[0]
+            if ev[2]:
+                ev_dt = ev[2]
+                if hasattr(ev_dt, 'date'):
+                    diff = abs((ev_dt.replace(tzinfo=None) - expected_dt).total_seconds())
+                    # Tighten from 2 days to 1 hour
+                    check("Kickoff meeting exactly 7 days from launch (within 1 hour)",
+                          diff <= 3600,
+                          f"Expected around {expected_dt}, got {ev_dt} (diff {diff:.0f} sec)")
         except Exception as e:
             print(f"  [INFO] Could not verify date: {e}")
 
@@ -173,12 +219,21 @@ def check_email():
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
     cur.execute("""
-        SELECT subject, from_addr, to_addr
+        SELECT subject, from_addr, to_addr, body_text
         FROM email.messages
-        WHERE subject ILIKE '%mentorship%'
+        WHERE subject ILIKE '%mentorship program launch%'
         ORDER BY date DESC
     """)
     emails = cur.fetchall()
+    if not emails:
+        # Fallback: any 'mentorship' subject (still validated below by exact match check)
+        cur.execute("""
+            SELECT subject, from_addr, to_addr, body_text
+            FROM email.messages
+            WHERE subject ILIKE '%mentorship%'
+            ORDER BY date DESC
+        """)
+        emails = cur.fetchall()
     cur.close()
     conn.close()
 
@@ -187,6 +242,12 @@ def check_email():
 
     if emails:
         e = emails[0]
+        subj = (e[0] or "").lower()
+        # Subject must contain "Mentorship Program Launch" (case-insensitive)
+        check("Subject contains 'Mentorship Program Launch'",
+              "mentorship program launch" in subj or
+              ("mentorship" in subj and "program" in subj and "launch" in subj),
+              f"Subject: '{e[0]}'")
         # Check recipient
         to_str = str(e[2])
         check("Email sent to program@hr.example.com",
@@ -196,6 +257,14 @@ def check_email():
         check("Email from hr@company.example.com",
               "hr@company.example.com" in (e[1] or "").lower(),
               f"from_addr: {e[1]}")
+        # Body should mention total pairs - require '10' to appear adjacent to
+        # 'pair'/'pairs'/'mentor' (avoids matching dates/years).
+        body = (e[3] or "").lower()
+        import re as _re
+        scoped_ok = bool(_re.search(r"\b10\s*(pair|pairs|mentor)", body))
+        check("Email body mentions total pairs scoped to '10 pair(s)/mentor'",
+              scoped_ok,
+              f"Body sample: {body[:200]}")
 
     return len(emails) >= 1
 

@@ -72,9 +72,10 @@ def check_excel(agent_workspace):
         data_rows = [r for r in rows[1:] if any(c for c in r)]
         record("Outbound has 3 attendee rows", len(data_rows) == 3, f"Found {len(data_rows)}")
 
+        import re
         all_text = " ".join(str(c) for r in rows for c in r if c).upper()
-        has_g235 = "G235" in all_text
-        has_g168 = "G168" in all_text
+        has_g235 = bool(re.search(r"\bG235\b", all_text))
+        has_g168 = bool(re.search(r"\bG168\b", all_text))
         record("Outbound has G235 (Beijing→Qufu)", has_g235, "G235 not found")
         record("Outbound has G168 (Shanghai→Qufu)", has_g168, "G168 not found")
 
@@ -102,9 +103,10 @@ def check_excel(agent_workspace):
         data_rows_r = [r for r in rows_r[1:] if any(c for c in r)]
         record("Return has 3 attendee rows", len(data_rows_r) == 3, f"Found {len(data_rows_r)}")
 
+        import re as _re2
         all_text_r = " ".join(str(c) for r in rows_r for c in r if c).upper()
-        has_g236 = "G236" in all_text_r
-        has_g167 = "G167" in all_text_r
+        has_g236 = bool(_re2.search(r"\bG236\b", all_text_r))
+        has_g167 = bool(_re2.search(r"\bG167\b", all_text_r))
         record("Return has G236 (Qufu→Beijing)", has_g236, "G236 not found")
         record("Return has G167 (Qufu→Shanghai)", has_g167, "G167 not found")
 

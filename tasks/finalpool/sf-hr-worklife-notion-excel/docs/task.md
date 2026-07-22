@@ -6,6 +6,6 @@ The first sheet should be called "Department Analysis" with five columns: Depart
 
 The second sheet should be called "Findings" with two columns: Metric and Value. Include rows for Total_Employees (sum of all employees), Overall_Avg_WLB (weighted average across all departments rounded to 2 decimals), Overall_Avg_Job_Satisfaction (weighted average rounded to 2 decimals), Best_WLB_Department (department with the highest average WLB), Best_JS_Department (department with highest average job satisfaction), and Departments_Analyzed (count of departments).
 
-After creating the Excel file, create a Notion page called "HR Wellbeing Dashboard" with content blocks that summarize the key findings from the analysis. The page should mention the overall average work-life balance and job satisfaction scores and highlight which departments perform best on each metric.
+After creating the Excel file, create a knowledge base page called "HR Wellbeing Dashboard" with content blocks that summarize the key findings from the analysis. The page should mention the overall average work-life balance and job satisfaction scores and highlight which departments perform best on each metric. When multiple departments are tied at the rounded score, you may report any one of them.
 
 Finally, send an email to hr_director@company.com with a subject that references the wellbeing analysis and a body that summarizes the top-level findings across departments.

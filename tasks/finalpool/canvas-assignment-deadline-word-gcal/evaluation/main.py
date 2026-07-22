@@ -185,25 +185,40 @@ def check_word(agent_workspace):
 
         record("Word doc has content", len(all_text.strip()) >= 100,
                f"Content length: {len(all_text.strip())}")
-        record("Word doc heading mentions Finance or FFF",
-               any(term in (all_text + headings_text) for term in
-                   ["finance", "fff", "foundations", "assignment"]),
-               "Missing Finance/FFF content in doc")
+        # Heading must reference 'Foundations of Finance' AND 'Fall 2013' to
+        # avoid passing on a generic 'Assignment' heading.
+        head_combined = headings_text + " " + all_text
+        record("Word doc heading 'Assignment Schedule for Foundations of Finance Fall 2013'",
+               (("foundations of finance" in head_combined or "fff" in head_combined)
+                and ("fall 2013" in head_combined or "2013j" in head_combined)
+                and "assignment schedule" in head_combined),
+               f"Heading text: {headings_text[:200]}")
 
         tables = doc.tables
         record("Word doc has at least 1 table", len(tables) >= 1,
                f"Found {len(tables)} tables")
 
-        # Check table has assignment data
+        # Check table has assignment data and at least 13 rows + header.
         if tables:
+            tbl = tables[0]
+            n_rows = len(tbl.rows)
+            n_cols = len(tbl.columns) if n_rows else 0
             table_text = " ".join(
                 cell.text.lower()
-                for row in tables[0].rows
+                for row in tbl.rows
                 for cell in row.cells
             )
             record("Table has TMA assignments",
                    "tma" in table_text,
                    f"Table text: {table_text[:200]}")
+            # Task: each assignment listed (13 in GT) + header row -> >=14 rows.
+            record("Table has >= 14 rows (header + 13 assignments)",
+                   n_rows >= 14,
+                   f"rows={n_rows}")
+            # Task says columns: name, due date, points (3 cols, but allow >=3).
+            record("Table has >= 3 columns",
+                   n_cols >= 3,
+                   f"cols={n_cols}")
 
         return True
 
@@ -237,21 +252,97 @@ def check_gcal():
 
     print(f"[check_gcal] Found {len(events)} calendar events.")
 
-    # Expect events with "Assignment Due:" in title
+    # Expect events with "Assignment Due:" in title.
+    # Determine GT count from groundtruth excel: count rows with non-null due date.
+    gt_due_count = 0
+    try:
+        import openpyxl
+        gt_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "groundtruth_workspace", "Assignment_Deadlines_FFF2013J.xlsx",
+        )
+        if os.path.isfile(gt_path):
+            gwb = openpyxl.load_workbook(gt_path, data_only=True)
+            for sn in gwb.sheetnames:
+                if sn.strip().lower() == "all assignments":
+                    ws = gwb[sn]
+                    rows = list(ws.iter_rows(min_row=2, values_only=True))
+                    for r in rows:
+                        # Due_Date is col index 2 (0-based: name, points, due_date).
+                        if len(r) > 2 and r[2] is not None and str(r[2]).strip() not in {"", "TBD"}:
+                            gt_due_count += 1
+                    break
+    except Exception:
+        gt_due_count = 0
+    if gt_due_count <= 0:
+        # Fallback to the documented expectation.
+        gt_due_count = 13
+
     assignment_events = [e for e in events
-                         if e[0] and ("assignment" in e[0].lower() or
-                                      "due" in e[0].lower() or
-                                      "tma" in e[0].lower() or
-                                      "cma" in e[0].lower())]
-    record("Assignment reminder events created",
-           len(assignment_events) >= 5,
-           f"Found {len(assignment_events)} assignment events (expected >=5 for 13 assignments with due dates)")
+                         if e[0] and ("assignment due" in e[0].lower()
+                                      or "tma" in e[0].lower()
+                                      or "cma" in e[0].lower())]
+    record(
+        f"Assignment reminder events created (>= {gt_due_count})",
+        len(assignment_events) >= gt_due_count,
+        f"Found {len(assignment_events)} assignment events; expected >= {gt_due_count}",
+    )
 
-    record("At least 1 calendar event created",
-           len(events) >= 1,
-           f"Found {len(events)}")
+    # Validate at least one event respects the '7 days before due date at 8am ET'
+    # constraint. 8am ET = 12:00 UTC (EST UTC-5: 13:00 / EDT UTC-4: 12:00).
+    # Build set of expected reminder dates from GT due dates minus 7 days.
+    from datetime import datetime, timedelta
 
-    return len(assignment_events) >= 5
+    gt_due_dates = []
+    try:
+        import openpyxl
+        gt_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "groundtruth_workspace", "Assignment_Deadlines_FFF2013J.xlsx",
+        )
+        if os.path.isfile(gt_path):
+            gwb = openpyxl.load_workbook(gt_path, data_only=True)
+            for sn in gwb.sheetnames:
+                if sn.strip().lower() == "all assignments":
+                    ws = gwb[sn]
+                    for r in ws.iter_rows(min_row=2, values_only=True):
+                        if len(r) > 2 and r[2]:
+                            try:
+                                if isinstance(r[2], str):
+                                    d = datetime.strptime(r[2], "%Y-%m-%d").date()
+                                else:
+                                    d = r[2].date() if hasattr(r[2], "date") else r[2]
+                                gt_due_dates.append(d)
+                            except Exception:
+                                pass
+                    break
+    except Exception:
+        pass
+
+    expected_reminder_dates = {d - timedelta(days=7) for d in gt_due_dates}
+    valid_reminder_events = 0
+    for summary, start_dt, end_dt in assignment_events:
+        if start_dt is None:
+            continue
+        # start_dt is a datetime (or string)
+        try:
+            if isinstance(start_dt, str):
+                sd = datetime.fromisoformat(start_dt.replace("Z", "+00:00"))
+            else:
+                sd = start_dt
+            event_date = sd.date() if hasattr(sd, "date") else None
+            event_hour = sd.hour if hasattr(sd, "hour") else None
+        except Exception:
+            continue
+        if event_date in expected_reminder_dates and event_hour in {12, 13}:
+            valid_reminder_events += 1
+    record(
+        "At least 1 reminder event scheduled 7 days before a due date at 8am ET (12:00/13:00 UTC)",
+        valid_reminder_events >= 1,
+        f"Found {valid_reminder_events} matching reminder events",
+    )
+
+    return len(assignment_events) >= gt_due_count and valid_reminder_events >= 1
 
 
 # ============================================================================
@@ -279,14 +370,13 @@ def check_emails():
     for subject, from_addr, to_addr, body_text in all_emails:
         to_str = str(to_addr or "").lower()
         subject_lower = (subject or "").lower()
-        if ("fff2013j.students@university.edu" in to_str or
-                "deadline" in subject_lower or "assignment" in subject_lower):
+        # Recipient must strictly match; both subject and recipient required (AND).
+        if ("fff2013j.students@university.edu" in to_str
+                and ("foundations of finance" in subject_lower
+                     or ("assignment" in subject_lower and "deadline" in subject_lower)
+                     or ("assignment" in subject_lower and "reminder" in subject_lower))):
             found_email = True
-            record("Email to fff2013j.students@university.edu found", True)
-
-            record("Email subject mentions assignment or deadline",
-                   "assignment" in subject_lower or "deadline" in subject_lower,
-                   f"Subject: {subject}")
+            record("Email to fff2013j.students@university.edu with correct subject", True)
 
             body_lower = (body_text or "").lower()
             record("Email body lists assignments",
@@ -295,7 +385,7 @@ def check_emails():
             break
 
     if not found_email:
-        record("Assignment deadline email found", False,
+        record("Assignment deadline email to fff2013j.students@university.edu", False,
                f"Emails: {[(e[0], str(e[2])[:60]) for e in all_emails[:3]]}")
 
     return found_email
@@ -321,7 +411,11 @@ def main():
     gcal_ok = check_gcal()
     email_ok = check_emails()
 
-    all_passed = excel_ok and word_ok and gcal_ok and email_ok
+    # Aggregate gate must include FAIL_COUNT==0 so per-row record() failures
+    # (e.g. wrong Points_Possible) propagate to overall PASS/FAIL.
+    all_passed = (
+        excel_ok and word_ok and gcal_ok and email_ok and FAIL_COUNT == 0
+    )
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

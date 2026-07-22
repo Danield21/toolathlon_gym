@@ -4,7 +4,8 @@
     "howtocook",
     "excel",
     "notion",
-    "google_calendar"
+    "google_calendar",
+    "emails"
   ],
   "needed_local_tools": [
     "claim_done",

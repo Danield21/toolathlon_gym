@@ -1,4 +1,12 @@
 {
   "version": "1.0",
-  "description": "portfolio-diversification-analysis-engine"
+  "description": "portfolio-diversification-analysis-engine",
+  "risk_free_rate_pct": 4.5,
+  "time_horizon_years": 5,
+  "constraints": {
+    "long_only": true,
+    "max_single_sector_pct": 25,
+    "min_holdings": 8
+  },
+  "scenarios": ["conservative", "moderate", "aggressive_growth"]
 }

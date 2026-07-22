@@ -1,0 +1,25 @@
+{
+  "key_methods": [
+    {"paper_id": "2301.00001", "method": "chain-of-thought"},
+    {"paper_id": "2301.00001", "method": "tree of thoughts"},
+    {"paper_id": "2302.00002", "method": "few-shot prompting"},
+    {"paper_id": "2302.00002", "method": "instruction tuning"},
+    {"paper_id": "2303.00003", "method": "retrieval augmented"},
+    {"paper_id": "2303.00003", "method": "in-context learning"},
+    {"paper_id": "2304.00004", "method": "chain-of-thought"},
+    {"paper_id": "2305.00005", "method": "in-context learning"}
+  ],
+  "citation_network": {
+    "2302.00002": ["2301.00001"],
+    "2303.00003": ["2301.00001"],
+    "2304.00004": ["2301.00001"],
+    "2305.00005": ["2303.00003"]
+  },
+  "relevance_scores": {
+    "2301.00001": 2.0,
+    "2302.00002": 1.5,
+    "2303.00003": 1.2,
+    "2304.00004": 0.9,
+    "2305.00005": 0.75
+  }
+}

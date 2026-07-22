@@ -110,8 +110,11 @@ def check_gform():
             options = q1_config.get("options", [])
             options_lower = [str(o).lower() for o in options]
             has_excellent = any("excellent" in o for o in options_lower)
+            has_good = any("good" in o for o in options_lower)
+            has_average = any("average" in o for o in options_lower)
             has_poor = any("poor" in o for o in options_lower)
-            record("Q1 has Excellent and Poor options", has_excellent and has_poor,
+            record("Q1 has all 4 options (Excellent/Good/Average/Poor)",
+                   has_excellent and has_good and has_average and has_poor,
                    f"Options: {options}")
 
         if len(questions) >= 2:
@@ -130,9 +133,10 @@ def check_gform():
             options3 = q3_config.get("options", [])
             options3_lower = [str(o).lower() for o in options3]
             has_yes = any("yes" in o for o in options3_lower)
+            has_no = any(o.strip() == "no" or o.strip().startswith("no") for o in options3_lower)
             has_maybe = any("maybe" in o for o in options3_lower)
             record("Q3 is 'Would you recommend?' with Yes/No/Maybe options",
-                   ("recommend" in q3_title) and has_yes and has_maybe,
+                   ("recommend" in q3_title) and has_yes and has_no and has_maybe,
                    f"Q3: {questions[2][0]}, options: {options3}")
 
     cur.close()
@@ -201,7 +205,8 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    # Tightened from 70% to 90% (task.md has strict requirements like "exactly 3 questions")
+    if accuracy >= 90:
         print("PASS")
         sys.exit(0)
     else:

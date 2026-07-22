@@ -125,18 +125,72 @@ def check_excel(agent_workspace):
         all_ok = False
     else:
         record("Sheet 'Product Reviews' exists", True)
-        rows = list(pr_sheet.iter_rows(min_row=2, values_only=True))
-        record("Product Reviews has 20 rows", len(rows) == 20, f"Got {len(rows)}")
+        rows = [r for r in pr_sheet.iter_rows(min_row=2, values_only=True) if r and any(c is not None for c in r)]
+        rows_ok = len(rows) == 20
+        record("Product Reviews has exactly 20 rows", rows_ok, f"Got {len(rows)}")
+        if not rows_ok:
+            all_ok = False
 
-        # Check first few products match
+        # Validate every product in agent's top-20 is in expected top-20 (set match, order-independent for now)
         if rows and expected["top_products"]:
-            first_product = str(rows[0][0]) if rows[0] and rows[0][0] else ""
-            expected_first = expected["top_products"][0][0]
-            # Just check that product name is among top products
-            top_names = [p[0].lower()[:30] for p in expected["top_products"]]
-            record("First product is among top-reviewed",
-                   first_product.lower()[:30] in top_names or len(rows) == 20,
-                   f"Got: {first_product[:50]}")
+            expected_top_names = {p[0].strip().lower() for p in expected["top_products"]}
+            agent_names = [str(r[0]).strip().lower() if r and r[0] is not None else "" for r in rows]
+            non_matching = [n for n in agent_names if n not in expected_top_names]
+            record("All agent product names are in expected top-20",
+                   len(non_matching) == 0,
+                   f"Non-matching: {non_matching[:5]}")
+            if non_matching:
+                all_ok = False
+
+            # Validate sort order: Review_Count descending, then product name ascending
+            sort_violations = []
+            for i in range(len(rows) - 1):
+                if not rows[i] or not rows[i+1]:
+                    continue
+                rc_a = rows[i][1] if len(rows[i]) > 1 else None
+                rc_b = rows[i+1][1] if len(rows[i+1]) > 1 else None
+                name_a = str(rows[i][0] or "").strip()
+                name_b = str(rows[i+1][0] or "").strip()
+                try:
+                    rc_a_f = float(rc_a) if rc_a is not None else None
+                    rc_b_f = float(rc_b) if rc_b is not None else None
+                except (TypeError, ValueError):
+                    rc_a_f = rc_b_f = None
+                if rc_a_f is not None and rc_b_f is not None:
+                    if rc_a_f < rc_b_f:
+                        sort_violations.append(f"row {i}: rc {rc_a_f} < {rc_b_f}")
+                    elif rc_a_f == rc_b_f and name_a > name_b:
+                        sort_violations.append(f"row {i}: tie at rc={rc_a_f}, '{name_a}' > '{name_b}'")
+            record("Product Reviews sort: Review_Count desc, name asc",
+                   len(sort_violations) == 0,
+                   f"Violations: {sort_violations[:3]}")
+            if sort_violations:
+                all_ok = False
+
+            # Validate per-row review_count, avg_rating, five_star, one_star match expected
+            expected_by_name = {p[0].strip().lower(): p for p in expected["top_products"]}
+            mismatch_count = 0
+            for r in rows:
+                if not r or r[0] is None:
+                    continue
+                name_key = str(r[0]).strip().lower()
+                exp = expected_by_name.get(name_key)
+                if exp is None:
+                    continue
+                exp_rc, exp_avg, exp_five, exp_one = exp[1], float(exp[2]), exp[3], exp[4]
+                if len(r) > 1 and r[1] is not None and not num_close(r[1], exp_rc, 0):
+                    mismatch_count += 1
+                if len(r) > 2 and r[2] is not None and not num_close(r[2], exp_avg, 0.05):
+                    mismatch_count += 1
+                if len(r) > 3 and r[3] is not None and not num_close(r[3], exp_five, 0):
+                    mismatch_count += 1
+                if len(r) > 4 and r[4] is not None and not num_close(r[4], exp_one, 0):
+                    mismatch_count += 1
+            record("Product Reviews per-row metrics match expected",
+                   mismatch_count == 0,
+                   f"{mismatch_count} cell mismatches")
+            if mismatch_count:
+                all_ok = False
 
     # Check Rating Distribution sheet
     rd_sheet = None
@@ -184,19 +238,52 @@ def check_excel(agent_workspace):
             if row and row[0]:
                 summary[str(row[0]).strip().lower()] = row[1]
 
+        # Validate all required metrics: Total_Reviews, Avg_Rating, Most_Reviewed_Product, Highest_Rated_Product
+        total_reviews_found = False
+        avg_rating_found = False
+        most_reviewed_found = False
+        highest_rated_found = False
         for key, val in summary.items():
             if "total" in key and "review" in key:
-                ok = num_close(val, expected["total_reviews"], 5)
+                total_reviews_found = True
+                ok = num_close(val, expected["total_reviews"], 0)  # exact integer
                 record("Summary Total_Reviews", ok,
                        f"Expected {expected['total_reviews']}, got {val}")
                 if not ok:
                     all_ok = False
             elif key == "avg_rating" or ("avg" in key and "rating" in key):
-                ok = num_close(val, expected["overall_avg"], 0.1)
+                avg_rating_found = True
+                ok = num_close(val, expected["overall_avg"], 0.05)
                 record("Summary Avg_Rating", ok,
                        f"Expected {expected['overall_avg']}, got {val}")
                 if not ok:
                     all_ok = False
+            elif "most" in key and "reviewed" in key:
+                most_reviewed_found = True
+                ok = val is not None and str(val).strip().lower() == expected["most_reviewed"].strip().lower()
+                record("Summary Most_Reviewed_Product", ok,
+                       f"Expected '{expected['most_reviewed']}', got '{val}'")
+                if not ok:
+                    all_ok = False
+            elif "highest" in key and "rated" in key:
+                highest_rated_found = True
+                ok = val is not None and str(val).strip().lower() == expected["highest_rated"].strip().lower()
+                record("Summary Highest_Rated_Product", ok,
+                       f"Expected '{expected['highest_rated']}', got '{val}'")
+                if not ok:
+                    all_ok = False
+        if not total_reviews_found:
+            record("Summary Total_Reviews row", False, "Missing")
+            all_ok = False
+        if not avg_rating_found:
+            record("Summary Avg_Rating row", False, "Missing")
+            all_ok = False
+        if not most_reviewed_found:
+            record("Summary Most_Reviewed_Product row", False, "Missing")
+            all_ok = False
+        if not highest_rated_found:
+            record("Summary Highest_Rated_Product row", False, "Missing")
+            all_ok = False
 
     return all_ok
 
@@ -219,26 +306,67 @@ def check_word(agent_workspace):
         return False
 
     all_text = " ".join(p.text.lower() for p in doc.paragraphs)
-    record("Word mentions 'sentiment'", "sentiment" in all_text, "No mention of 'sentiment'")
-    record("Word mentions 'review'", "review" in all_text, "No mention of 'review'")
+    word_ok = True
+    title_ok = "product review sentiment analysis" in all_text
+    record("Word title 'Product Review Sentiment Analysis'", title_ok, all_text[:200])
+    if not title_ok:
+        word_ok = False
+    date_ok = "2026-03-06" in all_text
+    record("Word contains date '2026-03-06'", date_ok, "Date not found")
+    if not date_ok:
+        word_ok = False
+    sent_ok = "sentiment" in all_text
+    record("Word mentions 'sentiment'", sent_ok, "No mention of 'sentiment'")
+    if not sent_ok:
+        word_ok = False
+    rev_ok = "review" in all_text
+    record("Word mentions 'review'", rev_ok, "No mention of 'review'")
+    if not rev_ok:
+        word_ok = False
 
-    return True
+    return word_ok
 
 
 def check_gsheet():
-    """Check Google Sheet with review/sentiment in title."""
+    """Check Google Sheet titled 'Review Sentiment Dashboard' with 'Rating Distribution' tab."""
     print("\n=== Checking Google Sheet ===")
-    conn = psycopg2.connect(**DB)
-    cur = conn.cursor()
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+    except Exception as e:
+        record("GSheet DB connection", False, str(e))
+        return False
 
-    cur.execute("SELECT id FROM gsheet.spreadsheets WHERE title ILIKE '%%review%%' OR title ILIKE '%%sentiment%%'")
+    # Title check: must contain 'review sentiment' AND 'dashboard'
+    cur.execute("""
+        SELECT id, title FROM gsheet.spreadsheets
+        WHERE LOWER(title) LIKE '%review sentiment%'
+           AND LOWER(title) LIKE '%dashboard%'
+    """)
     rows = cur.fetchall()
     found = len(rows) > 0
-    record("GSheet with 'review' or 'sentiment' in title", found, "No matching spreadsheet found")
+    if not found:
+        cur.execute("SELECT title FROM gsheet.spreadsheets")
+        all_titles = [r[0] for r in cur.fetchall()]
+        record("GSheet titled 'Review Sentiment Dashboard'", False, f"Got titles: {all_titles}")
+        cur.close()
+        conn.close()
+        return False
+    record("GSheet titled 'Review Sentiment Dashboard'", True)
+
+    spreadsheet_id = rows[0][0]
+    # Check for 'Rating Distribution' tab
+    cur.execute("""
+        SELECT id, title FROM gsheet.sheets
+        WHERE spreadsheet_id = %s AND LOWER(title) LIKE '%%rating distribution%%'
+    """, (spreadsheet_id,))
+    sheets = cur.fetchall()
+    sheet_ok = len(sheets) > 0
+    record("GSheet has 'Rating Distribution' tab", sheet_ok, "Tab not found")
 
     cur.close()
     conn.close()
-    return found
+    return found and sheet_ok
 
 
 def main():
@@ -251,18 +379,13 @@ def main():
 
     excel_ok = check_excel(args.agent_workspace)
     word_ok = check_word(args.agent_workspace)
-
-    db_fail_before = FAIL_COUNT
     gsheet_ok = check_gsheet()
-    db_failures = FAIL_COUNT - db_fail_before
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")
     print(f"  Failed: {FAIL_COUNT}")
-    if db_failures > 0:
-        print(f"  WARNING: {db_failures} DB checks failed (not blocking)")
 
-    overall = excel_ok and word_ok
+    overall = excel_ok and word_ok and gsheet_ok and FAIL_COUNT == 0
     print(f"  Overall: {'PASS' if overall else 'FAIL'}")
     sys.exit(0 if overall else 1)
 

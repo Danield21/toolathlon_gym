@@ -1,9 +1,9 @@
-I need help with a sf canvas resource analysis. There is external benchmark data available that I need you to fetch the data from http://localhost:30329/api/data.json and extract the relevant metrics.
+I need help with a course resource analysis. There is external benchmark data available that I need you to fetch from http://localhost:30329/api/data.json and extract the relevant metrics.
 
-Then pull our internal data from the company data warehouse for comparison.
+Then pull our internal course performance records from the learning management system for comparison.
 
-Use the terminal to create and run a Python script called sf_canvas_resource_processor.py in the workspace that reads the collected data from JSON files you create, performs the analysis, and outputs sf_canvas_resource_results.json.
+Write and run a Python script called sf_canvas_resource_processor.py in the workspace that reads the collected data from JSON files you create, performs the analysis, and outputs sf_canvas_resource_results.json.
 
-Create an Excel file called Canvas_Resource_Report.xlsx with three sheets. The first sheet Data_Analysis should contain the main comparison data with relevant columns. The second sheet Metrics should summarize key metrics. The third sheet Recommendations should list actionable items.
+Create an Excel file called Canvas_Resource_Report.xlsx with three sheets. The first sheet Data_Analysis should have columns Course, Code, Enrollment, Avg_Score, and Pass_Rate, with one row per course covered by the analysis, sorted by Code ascending. The second sheet Metrics should have two columns Metric and Value with at least these metrics: Total_Courses, Total_Enrollment, Avg_Score, and Avg_Pass_Rate. The third sheet Recommendations should have columns Priority, Action, and Course and list at least two actionable items based on the analysis.
 
-The Data_Analysis sheet should include columns for the primary dimension (such as department, product, region, or topic), our internal metric values, the external benchmark values, and the gap or difference between them. Sort the data alphabetically by the primary dimension. The Metrics sheet should have two columns Metric and Value summarizing total counts, averages, and key statistics. The Recommendations sheet should list priority actions based on the gap analysis. Schedule a review meeting titled "Analysis Review" on March 14, 2026 from 2:00 PM to 3:00 PM UTC.
+Add an event to the shared calendar titled "Analysis Review" on March 14, 2026 from 2:00 PM to 3:00 PM UTC.

@@ -17,7 +17,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -136,7 +136,8 @@ def main():
     conn = psycopg2.connect(**DB_CONFIG)
     try:
         clear_tables(conn)
-        inject_gform(conn)
+        # Do NOT pre-create the Annual Performance Review Form. The task requires
+        # the agent to create it. Pre-creating would leak the solution.
         ensure_email_folder(conn)
     finally:
         conn.close()

@@ -30,8 +30,7 @@ Return ticket price (second-class seat)
 Total round-trip cost per student
 
 Cost calculation: ticket price times 2 (round trip) equals total cost per student.
-The second-class ticket price for Beijing South to Qufu East is 553 CNY each way.
-Therefore total round trip cost is 553 times 2 equals 1106 CNY per student.
+Use the actual second-class ticket price returned by the rail ticketing system query for both legs and compute the round-trip total accordingly.
 
 Section 6 - Cancellation Policy:
 The trip may be cancelled due to extreme weather or safety concerns.

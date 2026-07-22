@@ -1,0 +1,5 @@
+NSF-2021-CLIM-001 Climate Variability Study
+Funder: NSF
+PI: Dr. Alice Martinez
+Retention: 7 years
+Sensitive: false

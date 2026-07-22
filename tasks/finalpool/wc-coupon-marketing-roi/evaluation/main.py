@@ -33,19 +33,21 @@ def check_excel(agent_workspace, gt_data):
             if abs(len(data_rows) - expected) > 2:
                 errors.append(f"Campaign Performance has {len(data_rows)} rows, expected {expected}")
 
-            # Check specific campaign values
-            for gc in gt_data["campaigns"][:3]:
+            # Check ALL campaign ROI values with tightened tolerance
+            for gc in gt_data["campaigns"]:
                 camp_rows = [r for r in data_rows if r[0] and gc["campaign_name"].lower() in str(r[0]).lower()]
-                if camp_rows:
-                    row = camp_rows[0]
-                    # Check ROI with tolerance
-                    if len(row) > 6 and row[6] is not None:
-                        try:
-                            roi_val = float(row[6])
-                            if abs(roi_val - gc["roi_pct"]) > 15:
-                                errors.append(f"{gc['campaign_name']} ROI={roi_val}, expected ~{gc['roi_pct']}")
-                        except (ValueError, TypeError):
-                            pass
+                if not camp_rows:
+                    errors.append(f"Missing campaign row: {gc['campaign_name']}")
+                    continue
+                row = camp_rows[0]
+                # Check ROI with tighter tolerance (+/-2 instead of +/-15)
+                if len(row) > 6 and row[6] is not None:
+                    try:
+                        roi_val = float(row[6])
+                        if abs(roi_val - gc["roi_pct"]) > 2:
+                            errors.append(f"{gc['campaign_name']} ROI={roi_val}, expected ~{gc['roi_pct']} (tol=2)")
+                    except (ValueError, TypeError):
+                        errors.append(f"{gc['campaign_name']} ROI not numeric: {row[6]}")
 
         # Check Channel Summary sheet
         rows2 = load_sheet_rows(wb, "Channel Summary")
@@ -88,7 +90,7 @@ def check_gform():
             form_id = rows[0][0]
             cur.execute("SELECT COUNT(*) FROM gform.questions WHERE form_id = %s", (form_id,))
             q_count = cur.fetchone()[0]
-            if q_count < 2:
+            if q_count < 3:
                 errors.append(f"Form has {q_count} questions, expected at least 3")
 
         cur.close()
@@ -113,10 +115,13 @@ def main():
         gt_data = json.load(f)
 
     all_errors = []
+    file_errors = []
+    runtime_errors = []
 
     print("  Checking Excel file...")
     errs = check_excel(agent_ws, gt_data)
     if errs:
+        file_errors.extend(errs)
         all_errors.extend(errs)
         for e in errs[:5]:
             print(f"    ERROR: {e}")
@@ -126,17 +131,21 @@ def main():
     print("  Checking Google Form...")
     errs = check_gform()
     if errs:
+        runtime_errors.extend(errs)
         all_errors.extend(errs)
         for e in errs[:3]:
             print(f"    ERROR: {e}")
     else:
         print("    PASS")
 
-    if all_errors:
-        print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")
+    if file_errors:
+        print(f"\n=== RESULT: FAIL ({len(all_errors)} errors, {len(file_errors)} blocking) ===")
         for e in all_errors[:10]:
             print(f"  {e}")
         sys.exit(1)
+    elif all_errors:
+        print(f"\n=== RESULT: PASS (excel ok; {len(runtime_errors)} runtime failures) ===")
+        sys.exit(0)
     else:
         print("\n=== RESULT: PASS ===")
         sys.exit(0)

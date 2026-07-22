@@ -10,7 +10,7 @@ from datetime import datetime
 
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym", user="eigent", password="camel")
+DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym", user="eigent", password="camel")
 
 
 def clear_schemas(conn):
@@ -32,7 +32,9 @@ def inject_noise(conn):
     now = datetime.utcnow().isoformat()
 
     # Noise Notion pages (standalone, not in any database)
-    for title in ["Team Standup Notes", "Q1 OKR Tracker", "Holiday Schedule 2026"]:
+    noise_pages = ["Team Standup Notes", "Q1 OKR Tracker", "Holiday Schedule 2026",
+                   "Engineering Onboarding Checklist", "Product Roadmap Q2"]
+    for title in noise_pages:
         page_id = str(uuid.uuid4())
         cur.execute("""
             INSERT INTO notion.pages (id, object, created_time, last_edited_time,
@@ -46,20 +48,22 @@ def inject_noise(conn):
             f'{{"title": {{"id": "title", "type": "title", "title": [{{"type": "text", "text": {{"content": "{title}"}}}}]}}}}',
             f"https://www.notion.so/{page_id.replace('-', '')}",
         ))
-    print("[preprocess] Injected 3 noise Notion pages.")
+    print(f"[preprocess] Injected {len(noise_pages)} noise Notion pages.")
 
-    # Noise GCal events
+    # Noise GCal events (outside March 16-20 target week to avoid conflict)
     noise_events = [
         ("Weekly Team Sync", "2026-03-10 09:00:00", "2026-03-10 09:30:00"),
         ("Product Demo", "2026-03-12 14:00:00", "2026-03-12 15:00:00"),
         ("All Hands Meeting", "2026-03-13 16:00:00", "2026-03-13 17:00:00"),
+        ("Quarterly Business Review", "2026-03-25 10:00:00", "2026-03-25 11:00:00"),
+        ("Engineering Retrospective", "2026-03-27 15:00:00", "2026-03-27 16:00:00"),
     ]
     for summary, start, end in noise_events:
         cur.execute("""
             INSERT INTO gcal.events (summary, description, start_datetime, end_datetime, status)
             VALUES (%s, %s, %s, %s, %s)
         """, (summary, "Regular team meeting", start, end, "confirmed"))
-    print("[preprocess] Injected 3 noise GCal events.")
+    print(f"[preprocess] Injected {len(noise_events)} noise GCal events.")
 
     conn.commit()
     cur.close()

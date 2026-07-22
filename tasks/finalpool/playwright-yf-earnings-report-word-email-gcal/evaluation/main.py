@@ -91,17 +91,49 @@ def main():
                     # Consensus_EPS (col 5)
                     if not num_close(a_row[5], g_row[5], 0.5):
                         all_errors.append(f"{ticker} Consensus_EPS: {a_row[5]} vs {g_row[5]}")
+                    # EPS_Gap (col 6)
+                    if len(g_row) > 6 and len(a_row) > 6:
+                        if not num_close(a_row[6], g_row[6], 0.2):
+                            all_errors.append(f"{ticker} EPS_Gap: {a_row[6]} vs {g_row[6]}")
+                    # Revenue_Actual (col 7)
+                    if len(g_row) > 7 and len(a_row) > 7:
+                        if not num_close(a_row[7], g_row[7], 5.0):
+                            all_errors.append(f"{ticker} Revenue_Actual: {a_row[7]} vs {g_row[7]}")
+                    # Beats_Last_4Q (col 9)
+                    if len(g_row) > 9 and len(a_row) > 9:
+                        if not num_close(a_row[9], g_row[9], 0):
+                            all_errors.append(f"{ticker} Beats_Last_4Q: {a_row[9]} vs {g_row[9]}")
             print("    Done.")
 
         # Check Market Summary sheet
         print("  Checking Market Summary sheet...")
         a_rows2 = load_sheet_rows(agent_wb, "Market Summary")
+        g_rows2 = load_sheet_rows(gt_wb, "Market Summary")
         if a_rows2 is None:
             all_errors.append("Sheet 'Market Summary' not found")
         else:
             a_data2 = a_rows2[1:] if len(a_rows2) > 1 else []
-            if len(a_data2) < 5:
+            if len(a_data2) != 5:
                 all_errors.append(f"Market Summary: {len(a_data2)} rows, expected 5")
+            # Validate content per ticker against GT
+            a_lookup2 = {str(r[0]).strip().upper(): r for r in a_data2 if r and r[0]}
+            if g_rows2:
+                for g_row in g_rows2[1:]:
+                    if not g_row or not g_row[0]:
+                        continue
+                    ticker = str(g_row[0]).strip().upper()
+                    a_row = a_lookup2.get(ticker)
+                    if a_row is None:
+                        all_errors.append(f"Market Summary missing ticker: {ticker}")
+                        continue
+                    # PE_Ratio (col 3) tol=1.0
+                    if len(a_row) > 3 and len(g_row) > 3:
+                        if not num_close(a_row[3], g_row[3], 1.0):
+                            all_errors.append(f"{ticker} PE_Ratio: {a_row[3]} vs {g_row[3]}")
+                    # Forward_EPS (col 2) tol=0.5
+                    if len(a_row) > 2 and len(g_row) > 2:
+                        if not num_close(a_row[2], g_row[2], 0.5):
+                            all_errors.append(f"{ticker} Forward_EPS: {a_row[2]} vs {g_row[2]}")
             print("    Done.")
 
     # --- Check 2: Word document ---

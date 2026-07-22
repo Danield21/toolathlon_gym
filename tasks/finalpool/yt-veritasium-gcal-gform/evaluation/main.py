@@ -25,11 +25,12 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+CRITICAL_FAILURES = []
 
 EXPECTED_DATES = {"2026-04-01", "2026-04-08", "2026-04-15", "2026-04-22", "2026-04-29"}
 
 
-def record(name, passed, detail=""):
+def record(name, passed, detail="", critical=False):
     global PASS_COUNT, FAIL_COUNT
     if passed:
         PASS_COUNT += 1
@@ -38,6 +39,8 @@ def record(name, passed, detail=""):
         FAIL_COUNT += 1
         msg = f": {detail[:300]}" if detail else ""
         print(f"  [FAIL] {name}{msg}")
+        if critical:
+            CRITICAL_FAILURES.append(name)
 
 
 def check_excel(agent_workspace):
@@ -132,11 +135,67 @@ def check_gcal():
                dates_match >= 4,
                f"Found: {event_dates}, Expected: {EXPECTED_DATES}")
 
-        # Check descriptions mention view count (a number) or duration
-        desc_text = " ".join((e[1] or "") for e in science_events)
-        has_numbers = any(c.isdigit() for c in desc_text)
-        record("Event descriptions contain numeric data (view count or duration)",
-               has_numbers, "No numeric data in event descriptions")
+        # Validate event title truncation (video title portion <=50 chars)
+        overlong = []
+        for e in science_events:
+            s = e[0] or ""
+            # Strip prefix "Science Enrichment: "
+            prefix = "science enrichment:"
+            low = s.lower()
+            if prefix in low:
+                body_start = low.index(prefix) + len(prefix)
+                body_part = s[body_start:].strip()
+            else:
+                body_part = s.strip()
+            if len(body_part) > 55:  # 50 + small tolerance for boundary
+                overlong.append(body_part)
+        record("Event titles have video title portion within 50-char limit",
+               len(overlong) == 0, f"Overlong: {overlong}")
+
+        # Check descriptions contain the EXACT view_count and duration_sec
+        # integers of the top-5 Veritasium 2025 videos. Query DB for ground truth.
+        try:
+            conn2 = psycopg2.connect(**DB_CONFIG)
+            cur2 = conn2.cursor()
+            cur2.execute("""
+                SELECT video_id, title, view_count, duration
+                FROM youtube.videos
+                WHERE channel_title ILIKE '%veritasium%'
+                  AND published_at BETWEEN '2025-01-01' AND '2025-12-31'
+                ORDER BY view_count DESC LIMIT 5
+            """)
+            top_videos = cur2.fetchall()
+            cur2.close()
+            conn2.close()
+        except Exception:
+            top_videos = []
+
+        import re
+        # Gather descriptions per event
+        all_desc = " ".join((e[1] or "") for e in science_events)
+        missing_pairs = []
+        for video_id, vtitle, vc, dur in top_videos:
+            vc_s = str(int(vc))
+            dur_s = str(int(dur)) if dur is not None else ""
+            # Look for event whose title contains the truncated video title
+            matched_desc = None
+            for e in science_events:
+                event_title = (e[0] or "").lower()
+                vt_low = (vtitle or "").lower()
+                # Check truncated title match (first 10 chars is enough)
+                if vt_low[:20] and vt_low[:20] in event_title:
+                    matched_desc = e[1] or ""
+                    break
+            target_desc = matched_desc if matched_desc is not None else all_desc
+            # Word-boundary regex for the integer to avoid partial matches like "32716281" matching "327"
+            vc_found = re.search(r"\b" + re.escape(vc_s) + r"\b", target_desc) is not None
+            dur_found = dur_s and re.search(r"\b" + re.escape(dur_s) + r"\b", target_desc) is not None
+            if not (vc_found and dur_found):
+                missing_pairs.append(f"{vtitle[:30]} (view={vc_s}, dur={dur_s})")
+        record("Event descriptions contain exact view_count and duration_sec integers for top-5 videos",
+               len(missing_pairs) == 0,
+               f"Missing: {missing_pairs[:3]}",
+               critical=True)
 
 
 def check_gform():
@@ -171,6 +230,14 @@ def check_gform():
             record("Form has required question topics (topic, difficulty, frequency, open-text)",
                    has_topic_q and has_difficulty_q and has_frequency_q and has_text_q,
                    f"Questions: {q_titles}")
+
+            # Check topic question has >=5 options (for 5 videos)
+            topic_q = next((q for q in questions if "topic" in (q[0] or "").lower() or "interested" in (q[0] or "").lower()), None)
+            if topic_q and topic_q[2]:
+                cfg = topic_q[2] if isinstance(topic_q[2], dict) else json.loads(topic_q[2])
+                opts = cfg.get("options", [])
+                record("Topic question has >=5 options (video titles)", len(opts) >= 5,
+                       f"Options: {len(opts)}")
 
             # Check text question type
             q_types = [q[1] for q in questions]
@@ -249,6 +316,12 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
+    if CRITICAL_FAILURES:
+        print(f"\nCritical failures ({len(CRITICAL_FAILURES)}):")
+        for cf in CRITICAL_FAILURES:
+            print(f"  - {cf}")
+        print("FAIL (critical assertion failed)")
+        sys.exit(1)
     if accuracy >= 70:
         print("PASS")
         sys.exit(0)

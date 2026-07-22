@@ -4,7 +4,7 @@ import argparse, json, os, sys, shutil, subprocess, time
 from datetime import datetime, timedelta
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -44,6 +44,13 @@ def inject_data(launch_time):
     cur.execute("""INSERT INTO scholarly.arxiv_papers (id, title, authors, abstract, categories, primary_category, pdf_url, published)
         VALUES ('2303.00003', 'In-Context Learning Theory', '[{"name": "Author C"}]'::jsonb, 'Theoretical foundations of in-context learning.',
         '["cs.LG"]'::jsonb, 'cs.LG', 'https://arxiv.org/pdf/2303.00003', '2023-03-10')""")
+    # Two more relevant papers so 'at least 5 relevant' is satisfiable
+    cur.execute("""INSERT INTO scholarly.arxiv_papers (id, title, authors, abstract, categories, primary_category, pdf_url, published)
+        VALUES ('2304.00004', 'Chain-of-Thought Reasoning in Large Language Models', '[{"name": "Author F"}]'::jsonb, 'Studying chain-of-thought prompting strategies for large language models.',
+        '["cs.CL", "cs.AI"]'::jsonb, 'cs.CL', 'https://arxiv.org/pdf/2304.00004', '2023-04-05')""")
+    cur.execute("""INSERT INTO scholarly.arxiv_papers (id, title, authors, abstract, categories, primary_category, pdf_url, published)
+        VALUES ('2305.00005', 'Survey of In-Context Learning for Large Language Models', '[{"name": "Author G"}]'::jsonb, 'A survey of in-context learning approaches for large language models.',
+        '["cs.LG"]'::jsonb, 'cs.LG', 'https://arxiv.org/pdf/2305.00005', '2023-05-12')""")
     # Noise papers
     cur.execute("""INSERT INTO scholarly.arxiv_papers (id, title, authors, abstract, categories, primary_category, pdf_url, published)
         VALUES ('2304.99901', 'Quantum Computing Basics', '[{"name": "Author D"}]'::jsonb, 'Introduction to quantum computing.',
@@ -61,6 +68,12 @@ def inject_data(launch_time):
     cur.execute("""INSERT INTO arxiv.papers (id, title, authors, summary, categories, primary_category, pdf_url, published, is_downloaded)
         VALUES ('2303.00003', 'In-Context Learning Theory', '[{"name": "Author C"}]'::jsonb, 'Theoretical foundations of in-context learning.',
         '["cs.LG"]'::jsonb, 'cs.LG', 'https://arxiv.org/pdf/2303.00003', '2023-03-10', true)""")
+    cur.execute("""INSERT INTO arxiv.papers (id, title, authors, summary, categories, primary_category, pdf_url, published, is_downloaded)
+        VALUES ('2304.00004', 'Chain-of-Thought Reasoning in Large Language Models', '[{"name": "Author F"}]'::jsonb, 'Studying chain-of-thought prompting strategies for large language models.',
+        '["cs.CL", "cs.AI"]'::jsonb, 'cs.CL', 'https://arxiv.org/pdf/2304.00004', '2023-04-05', true)""")
+    cur.execute("""INSERT INTO arxiv.papers (id, title, authors, summary, categories, primary_category, pdf_url, published, is_downloaded)
+        VALUES ('2305.00005', 'Survey of In-Context Learning for Large Language Models', '[{"name": "Author G"}]'::jsonb, 'A survey of in-context learning approaches for large language models.',
+        '["cs.LG"]'::jsonb, 'cs.LG', 'https://arxiv.org/pdf/2305.00005', '2023-05-12', true)""")
     # Noise
     cur.execute("""INSERT INTO arxiv.papers (id, title, authors, summary, categories, primary_category, pdf_url, published, is_downloaded)
         VALUES ('2399.00099', 'Unrelated Biology Paper', '[{"name": "Author Z"}]'::jsonb, 'A study on marine biology.',

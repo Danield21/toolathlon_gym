@@ -1,6 +1,6 @@
 The VP of Sales needs a comprehensive quarterly territory performance review for the upcoming leadership meeting. The review should compare actual sales performance against the regional targets documented in the PDF file in the workspace.
 
-Start by reading the sales targets PDF to extract the target revenue for each region. Then query the company data warehouse for actual sales data, pulling order counts, total revenue, and average order values by region. Also gather segment-level data showing customer counts, order counts, total revenue, average order value, and average lifetime value by customer segment. Additionally, identify the top five products by revenue.
+Start by reading the sales targets PDF to extract the target revenue for each region (there are 5 regions: North America, Europe, Asia Pacific, Latin America, Middle East). Then query the company data warehouse for actual sales data, pulling order counts, total revenue, and average order values by region. Also gather segment-level data showing customer counts, order counts, total revenue, average order value, and average lifetime value by customer segment (there are 4 segments). Additionally, identify the top five products by revenue.
 
 Run variance analysis scripts that calculate the difference between target and actual revenue for each region, the variance percentage, and whether each region met its target.
 

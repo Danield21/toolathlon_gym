@@ -21,46 +21,15 @@ DB_CONFIG = {
 #   FFF-2013J: exam 2014-05-25 -> sessions on 2014-05-23 15:00 and 2014-05-24 10:00
 #   GGG-2013J: exam 2014-05-18 -> sessions on 2014-05-16 15:00 and 2014-05-17 10:00
 EXPECTED_SESSIONS = [
-    {
-        "summary_contains": "DDD-2013J",
-        "summary_contains_2": "Session 1",
-        "start_date": "2014-06-17",
-    },
-    {
-        "summary_contains": "DDD-2013J",
-        "summary_contains_2": "Session 2",
-        "start_date": "2014-06-18",
-    },
-    {
-        "summary_contains": "EEE-2013J",
-        "summary_contains_2": "Session 1",
-        "start_date": "2014-05-22",
-    },
-    {
-        "summary_contains": "EEE-2013J",
-        "summary_contains_2": "Session 2",
-        "start_date": "2014-05-23",
-    },
-    {
-        "summary_contains": "FFF-2013J",
-        "summary_contains_2": "Session 1",
-        "start_date": "2014-05-23",
-    },
-    {
-        "summary_contains": "FFF-2013J",
-        "summary_contains_2": "Session 2",
-        "start_date": "2014-05-24",
-    },
-    {
-        "summary_contains": "GGG-2013J",
-        "summary_contains_2": "Session 1",
-        "start_date": "2014-05-16",
-    },
-    {
-        "summary_contains": "GGG-2013J",
-        "summary_contains_2": "Session 2",
-        "start_date": "2014-05-17",
-    },
+    # Session 1: 15:00 start (3 PM); Session 2: 10:00 start
+    {"summary_contains": "DDD-2013J", "summary_contains_2": "Session 1", "start_date": "2014-06-17", "start_time": "15:00"},
+    {"summary_contains": "DDD-2013J", "summary_contains_2": "Session 2", "start_date": "2014-06-18", "start_time": "10:00"},
+    {"summary_contains": "EEE-2013J", "summary_contains_2": "Session 1", "start_date": "2014-05-22", "start_time": "15:00"},
+    {"summary_contains": "EEE-2013J", "summary_contains_2": "Session 2", "start_date": "2014-05-23", "start_time": "10:00"},
+    {"summary_contains": "FFF-2013J", "summary_contains_2": "Session 1", "start_date": "2014-05-23", "start_time": "15:00"},
+    {"summary_contains": "FFF-2013J", "summary_contains_2": "Session 2", "start_date": "2014-05-24", "start_time": "10:00"},
+    {"summary_contains": "GGG-2013J", "summary_contains_2": "Session 1", "start_date": "2014-05-16", "start_time": "15:00"},
+    {"summary_contains": "GGG-2013J", "summary_contains_2": "Session 2", "start_date": "2014-05-17", "start_time": "10:00"},
 ]
 
 
@@ -105,26 +74,36 @@ def check_gcal():
                 # Check date
                 if start_dt is not None:
                     start_date_str = start_dt.strftime("%Y-%m-%d")
-                    if start_date_str == expected["start_date"]:
+                    start_time_str = start_dt.strftime("%H:%M")
+                    date_ok = start_date_str == expected["start_date"]
+                    time_ok = start_time_str == expected["start_time"]
+                    # Also check description prefix "Prepare for"
+                    desc_ok = description is not None and "prepare for" in str(description).lower()
+
+                    if date_ok and time_ok and desc_ok:
                         found = True
                         matched += 1
                         break
                     else:
-                        # Date mismatch but summary matched
+                        probs = []
+                        if not date_ok:
+                            probs.append(f"date expected {expected['start_date']}, got {start_date_str}")
+                        if not time_ok:
+                            probs.append(f"time expected {expected['start_time']}, got {start_time_str}")
+                        if not desc_ok:
+                            probs.append("description missing 'Prepare for'")
                         differences.append(
                             f"{expected['summary_contains']} "
-                            f"{expected['summary_contains_2']}: "
-                            f"expected date {expected['start_date']}, "
-                            f"got {start_date_str}"
+                            f"{expected['summary_contains_2']}: {'; '.join(probs)}"
                         )
-                        found = True  # Found but wrong date
+                        found = True
                         break
 
         if not found:
             differences.append(
                 f"Missing: {expected['summary_contains']} "
                 f"{expected['summary_contains_2']} on "
-                f"{expected['start_date']}"
+                f"{expected['start_date']} {expected['start_time']}"
             )
 
     if differences:

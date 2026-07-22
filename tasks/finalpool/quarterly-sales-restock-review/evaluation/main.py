@@ -176,6 +176,15 @@ def check_excel(agent_workspace, groundtruth_workspace):
             check(f"Out-of-stock SKU '{sku}' in Restock Alerts", found)
             if not found:
                 all_passed = False
+        # Verify sort: stock values must be non-decreasing (primary sort key).
+        # Tiebreaker check skipped because GT product-name sort is non-strict.
+        try:
+            stocks = [r[2] if isinstance(r[2], (int, float)) else 0 for r in agent_rows if r and r[0]]
+            stock_sorted = all(stocks[i] <= stocks[i+1] for i in range(len(stocks)-1))
+            check("Restock Alerts sorted by stock ascending", stock_sorted,
+                  f"Stock values: {stocks[:10]}")
+        except Exception as e:
+            print(f"  WARN: sort check skipped: {e}")
     else:
         all_passed = False
 
@@ -298,16 +307,42 @@ def check_notion():
     )
     check("Notion page has 'Action Items' heading", has_action_heading)
 
-    # Check for to_do blocks
-    has_todo = any(btype == "to_do" for btype in block_types)
-    check("Notion page has to-do items", has_todo)
+    # Check for to_do blocks - task requires one checked + one unchecked
+    todo_blocks = [(bt, bd) for bt, bd in blocks if bt == "to_do"]
+    has_todo = len(todo_blocks) >= 2
+    check("Notion page has at least 2 to-do items", has_todo, f"Found {len(todo_blocks)}")
+    # Count checked vs unchecked
+    checked = 0
+    unchecked = 0
+    for bt, bd in todo_blocks:
+        inner = bd.get(bt, bd) if isinstance(bd, dict) else {}
+        is_checked = bool(inner.get("checked", False)) if isinstance(inner, dict) else False
+        if is_checked:
+            checked += 1
+        else:
+            unchecked += 1
+    check("Notion has one checked to-do", checked >= 1, f"checked={checked}")
+    check("Notion has one unchecked to-do", unchecked >= 1, f"unchecked={unchecked}")
 
     # Check for key content mentions
     all_text = " ".join(block_texts)
     check("Notion mentions 'Asia Pacific' (top region)",
           "asia pacific" in all_text)
-    check("Notion mentions 'LG' (top brand)",
-          "lg" in all_text.lower().replace(",", " ").replace(".", " ").split())
+    # Check for 'LG' as a standalone brand name (handle case variations and common contexts)
+    def extract_raw_texts(blocks):
+        out = []
+        for btype, bd in blocks:
+            if bd:
+                inner = bd.get(btype, bd) if isinstance(bd, dict) else {}
+                rich = inner.get('rich_text', []) if isinstance(inner, dict) else []
+                for t in rich:
+                    if isinstance(t, dict):
+                        out.append(t.get('text', {}).get('content', ''))
+        return ' '.join(out)
+    raw_text = extract_raw_texts(blocks)
+    has_lg = bool(re.search(r"\bLG\b", raw_text)) or "lg electronics" in raw_text.lower() or "brand lg" in raw_text.lower()
+    check("Notion mentions 'LG' (top brand)", has_lg,
+          f"'LG' brand mention not found in raw text (found: {raw_text[:150]})")
 
     cur.close()
     conn.close()

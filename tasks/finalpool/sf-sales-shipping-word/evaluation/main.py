@@ -188,6 +188,23 @@ def check_word(agent_workspace, expected):
               total_str in full_text,
               f"Expected '{total_str}' in text")
 
+        # Check total revenue number mentioned (with some formatting tolerance)
+        total_rev = expected["total_revenue"]
+        rev_int = int(round(total_rev))
+        rev_formats = [str(rev_int), f"{rev_int:,}", f"{total_rev:.2f}", f"{total_rev:,.2f}"]
+        check("Document mentions total revenue",
+              any(fmt in full_text for fmt in rev_formats),
+              f"Expected one of {rev_formats[:2]} in text")
+
+        # Check ship mode subsections (by heading-style paragraphs)
+        subheading_texts = [p.text.strip().lower() for p in doc.paragraphs
+                            if p.style and p.style.name and ("heading" in p.style.name.lower() or "title" in p.style.name.lower())]
+        for exp_row in expected["shipping"]:
+            mode = exp_row[0]
+            check(f"'{mode}' has subsection heading",
+                  any(mode.lower() in h for h in subheading_texts),
+                  f"No heading found for {mode}. Headings: {subheading_texts[:10]}")
+
 
 def check_excel_gt(agent_workspace, groundtruth_workspace):
     print("\n=== Checking Excel (vs groundtruth) ===")

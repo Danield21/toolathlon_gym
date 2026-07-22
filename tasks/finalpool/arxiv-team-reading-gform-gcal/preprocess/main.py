@@ -18,7 +18,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -277,8 +277,8 @@ def main():
         clear_tables(conn)
         inject_scholarly_papers(conn)
         inject_arxiv_papers(conn)
-        inject_gform(conn)
-        inject_gcal_events(conn)
+        # NOTE: We do NOT pre-inject the Google Form or Calendar events.
+        # The task explicitly asks the agent to create both.
         ensure_email_folder(conn)
     finally:
         conn.close()

@@ -1,8 +1,22 @@
 """Evaluation for canvas-submission-stats."""
 import argparse
+import json
 import os
 import sys
 import openpyxl
+
+try:
+    import psycopg2
+    DB = {
+        "host": os.environ.get("PGHOST", "localhost"),
+        "port": int(os.environ.get("PGPORT", "5432")),
+        "dbname": "toolathlon_gym",
+        "user": "eigent",
+        "password": "camel",
+    }
+except Exception:
+    psycopg2 = None
+    DB = None
 
 
 def num_close(a, b, tol=1.0):
@@ -16,6 +30,15 @@ def num_close(a, b, tol=1.0):
         return str(a).strip().lower() == str(b).strip().lower()
 
 
+def num_close_rel(a, b, rel=0.02, abs_tol=2.0):
+    if a is None or b is None:
+        return False
+    try:
+        return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel)
+    except (TypeError, ValueError):
+        return False
+
+
 def str_match(a, b):
     if a is None or b is None:
         return a is None and b is None
@@ -27,6 +50,142 @@ def load_sheet_rows(wb, sheet_name):
         if name.strip().lower() == sheet_name.strip().lower():
             return [[cell.value for cell in row] for row in wb[name].iter_rows()]
     return None
+
+
+def get_page_title(properties):
+    """Extract title text from notion.pages.properties."""
+    if not properties:
+        return ""
+    if isinstance(properties, str):
+        try:
+            properties = json.loads(properties)
+        except Exception:
+            return ""
+    if not isinstance(properties, dict):
+        return ""
+    for key, val in properties.items():
+        if not isinstance(val, dict):
+            continue
+        if val.get("type") == "title":
+            title_arr = val.get("title", [])
+            return "".join((t.get("plain_text") or "") for t in title_arr if isinstance(t, dict))
+    return ""
+
+
+def _fetch_expected_summary_from_gt(gt_dir):
+    """Read GT Excel summary values; falls back to None if missing."""
+    try:
+        gt_file = os.path.join(gt_dir, "Canvas_Submissions.xlsx")
+        if not os.path.exists(gt_file):
+            return None
+        wb = openpyxl.load_workbook(gt_file, data_only=True)
+        rows = load_sheet_rows(wb, "Summary")
+        wb.close()
+        if not rows:
+            return None
+        out = {}
+        for r in rows[1:]:
+            if not r or r[0] is None:
+                continue
+            metric = str(r[0]).strip().lower()
+            try:
+                out[metric] = float(r[1]) if r[1] is not None else None
+            except Exception:
+                out[metric] = r[1]
+        return out
+    except Exception:
+        return None
+
+
+def _format_variants(label_keys, value):
+    """Generate plausible string variants of a numeric value (with/without commas, 1-2 decimals)."""
+    variants = list(label_keys)
+    if value is None:
+        return variants
+    try:
+        f = float(value)
+    except Exception:
+        return variants
+    is_int = abs(f - round(f)) < 1e-6
+    if is_int:
+        i = int(round(f))
+        variants.append(str(i))
+        variants.append(f"{i:,}")  # 173,739
+    else:
+        variants.append(f"{f:.1f}")
+        variants.append(f"{f:.2f}")
+        variants.append(str(f))
+    return variants
+
+
+def check_notion(errors_list, gt_dir):
+    print("  Checking Notion 'Canvas Submission Analysis'...")
+    if psycopg2 is None or DB is None:
+        errors_list.append("psycopg2 unavailable; cannot verify Notion")
+        return
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        cur.execute("SELECT id, properties FROM notion.pages WHERE archived = false AND in_trash = false")
+        rows = cur.fetchall()
+        target_id = None
+        for pid, props in rows:
+            title = get_page_title(props)
+            if title and "canvas submission analysis" in title.strip().lower():
+                target_id = pid
+                break
+        if target_id is None:
+            errors_list.append(
+                f"Notion page 'Canvas Submission Analysis' not found (saw {len(rows)} pages)"
+            )
+            cur.close(); conn.close()
+            return
+
+        # Verify the page has at least some block content with summary metrics
+        cur.execute(
+            "SELECT block_data FROM notion.blocks WHERE parent_id = %s AND archived = false",
+            (target_id,)
+        )
+        blocks = cur.fetchall()
+        text_content = ""
+        for (bd,) in blocks:
+            if bd is None:
+                continue
+            if isinstance(bd, str):
+                try:
+                    bd = json.loads(bd)
+                except Exception:
+                    continue
+            text_content += json.dumps(bd) + " "
+
+        text_lower = text_content.lower()
+
+        # Compute expected values live from GT (avoid hardcoded brittle constants)
+        gt_summary = _fetch_expected_summary_from_gt(gt_dir) or {}
+        total_subs = gt_summary.get("total_submissions")
+        overall_avg = gt_summary.get("overall_avg_score")
+        total_late = gt_summary.get("total_late")
+
+        # Each metric: pass if either label or any plausible numeric format appears.
+        ts_keys = _format_variants(("total_submissions", "total submissions"), total_subs)
+        if not any(k.lower() in text_lower for k in ts_keys):
+            errors_list.append(
+                f"Notion page missing total submissions metric reference (looked for: {ts_keys[:5]})"
+            )
+        oa_keys = _format_variants(("overall_avg_score", "overall avg", "average score"), overall_avg)
+        if not any(k.lower() in text_lower for k in oa_keys):
+            errors_list.append(
+                f"Notion page missing overall avg score reference (looked for: {oa_keys[:5]})"
+            )
+        tl_keys = _format_variants(("total_late", "total late"), total_late)
+        if not any(k.lower() in text_lower for k in tl_keys):
+            errors_list.append(
+                f"Notion page missing total late reference (looked for: {tl_keys[:5]})"
+            )
+        cur.close(); conn.close()
+        print(f"    Found Notion page with {len(blocks)} blocks")
+    except Exception as e:
+        errors_list.append(f"Notion check raised: {e}")
 
 
 def main():
@@ -83,20 +242,20 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 10):
-                    errors.append(f"{key}.Submissions: {a_row[1]} vs {g_row[1]} (tol=10)")
+                if not num_close_rel(a_row[1], g_row[1], rel=0.02, abs_tol=2):
+                    errors.append(f"{key}.Submissions: {a_row[1]} vs {g_row[1]} (rel 2%)")
 
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 2.0):
-                    errors.append(f"{key}.Avg_Score: {a_row[2]} vs {g_row[2]} (tol=2.0)")
+                if not num_close(a_row[2], g_row[2], 0.5):
+                    errors.append(f"{key}.Avg_Score: {a_row[2]} vs {g_row[2]} (tol=0.5)")
 
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 10):
-                    errors.append(f"{key}.Late_Count: {a_row[3]} vs {g_row[3]} (tol=10)")
+                if not num_close_rel(a_row[3], g_row[3], rel=0.02, abs_tol=2):
+                    errors.append(f"{key}.Late_Count: {a_row[3]} vs {g_row[3]} (rel 2%)")
 
             if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 1.0):
-                    errors.append(f"{key}.Late_Pct: {a_row[4]} vs {g_row[4]} (tol=1.0)")
+                if not num_close(a_row[4], g_row[4], 0.5):
+                    errors.append(f"{key}.Late_Pct: {a_row[4]} vs {g_row[4]} (tol=0.5)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -134,8 +293,8 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 50.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=50.0)")
+                if not num_close_rel(a_row[1], g_row[1], rel=0.02, abs_tol=2.0):
+                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (rel 2%)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -144,7 +303,10 @@ def main():
         else:
             print(f"    PASS")
 
-    
+
+
+    # Notion check
+    check_notion(all_errors, gt_dir)
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

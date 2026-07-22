@@ -19,12 +19,55 @@ DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolath
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
-# Top 3 gold customers (by actual WC data: completed orders)
-GOLD_CUSTOMERS = [
-    {"name": "Scarlett Wright", "email": "scarlett.wright@x.dummyjson.com"},
-    {"name": "Ethan Martinez", "email": "ethan.martinez@x.dummyjson.com"},
-    {"name": "Olivia Wilson", "email": "olivia.wilson@x.dummyjson.com"},
+# Top 10 customers by completed-order spend, derived live from WC DB at
+# verifier startup (with hardcoded fallback). WC is read-only, so this
+# query produces the same result run-to-run; the live query future-proofs
+# the check against any data refresh.
+def _fetch_top10_customers():
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT c.first_name, c.last_name, c.email,
+                       ROUND(SUM(o.total::numeric), 2) AS total_spent
+                FROM wc.customers c
+                JOIN wc.orders o ON o.customer_id = c.id
+                WHERE o.status = 'completed'
+                GROUP BY c.id, c.first_name, c.last_name, c.email
+                ORDER BY total_spent DESC
+                LIMIT 10"""
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        if rows and len(rows) >= 10:
+            return [
+                {"name": f"{r[0]} {r[1]}", "email": r[2].lower(),
+                 "total_spent": float(r[3])}
+                for r in rows
+            ]
+    except Exception:
+        pass
+    return None
+
+
+_TOP10_FALLBACK = [
+    {"name": "Scarlett Wright", "email": "scarlett.wright@x.dummyjson.com", "total_spent": 3328.27},
+    {"name": "Ethan Martinez",  "email": "ethan.martinez@x.dummyjson.com",  "total_spent": 3053.80},
+    {"name": "Olivia Wilson",   "email": "olivia.wilson@x.dummyjson.com",   "total_spent": 2942.96},
+    {"name": "William Gonzalez", "email": "william.gonzalez@x.dummyjson.com", "total_spent": 2423.81},
+    {"name": "Charlotte Lopez", "email": "charlotte.lopez@x.dummyjson.com", "total_spent": 2359.28},
+    {"name": "Sophia Brown",    "email": "sophia.brown@x.dummyjson.com",    "total_spent": 1620.99},
+    {"name": "Carter Baker",    "email": "carter.baker@x.dummyjson.com",    "total_spent": 1482.45},
+    {"name": "Mason Parker",    "email": "mason.parker@x.dummyjson.com",    "total_spent": 1413.99},
+    {"name": "Henry Hill",      "email": "henry.hill@x.dummyjson.com",      "total_spent": 1380.71},
+    {"name": "Daniel Cook",     "email": "daniel.cook@x.dummyjson.com",     "total_spent": 1180.86},
 ]
+TOP10 = _fetch_top10_customers() or _TOP10_FALLBACK
+GOLD_CUSTOMERS = TOP10[:3]
+SILVER_CUSTOMERS = TOP10[3:7]
+BRONZE_CUSTOMERS = TOP10[7:10]
+TOP_SPENT = TOP10[0]["total_spent"]
 
 
 def check(name, condition, detail=""):
@@ -68,26 +111,102 @@ def check_gsheet():
 
     if sheets:
         ss_id = sheets[0][0]
+        # Read by row/col into matrix
         cur.execute("""
-            SELECT c.value FROM gsheet.cells c
-            JOIN gsheet.sheets s ON c.spreadsheet_id = s.spreadsheet_id AND c.sheet_id = s.id
-            WHERE c.spreadsheet_id = %s
+            SELECT row_index, col_index, value FROM gsheet.cells
+            WHERE spreadsheet_id = %s ORDER BY row_index, col_index
         """, (ss_id,))
-        cells = cur.fetchall()
-        all_values = " ".join(str(c[0]) for c in cells if c[0])
-        all_lower = all_values.lower()
+        cell_rows = cur.fetchall()
+        grid = {}
+        for r, c, v in cell_rows:
+            grid.setdefault(r, {})[c] = v
 
-        check("GSheet contains at least 10 customer rows",
-              all_lower.count("gold") + all_lower.count("silver") + all_lower.count("bronze") >= 10,
-              f"Tiers found: gold={all_lower.count('gold')}, silver={all_lower.count('silver')}, bronze={all_lower.count('bronze')}")
-        check("GSheet contains 'Gold' tier", "gold" in all_lower, "Gold not found")
-        check("GSheet contains 'Silver' tier", "silver" in all_lower, "Silver not found")
-        check("GSheet contains 'Bronze' tier", "bronze" in all_lower, "Bronze not found")
-        check("GSheet contains top customer Scarlett Wright",
-              "scarlett" in all_lower, "Name not found")
-        check("GSheet contains Total_Spent data",
-              "3328" in all_values or "3053" in all_values or "2942" in all_values,
-              "Spend values not found")
+        if grid:
+            min_r = min(grid.keys())
+            headers = [str(grid[min_r].get(i, "")).strip().lower() for i in sorted(grid[min_r].keys())]
+            data_rows = sorted([r for r in grid if r > min_r])
+
+            # Word-boundary tier counting (exact match within cell)
+            import re
+            def count_exact(token, rows_set):
+                cnt = 0
+                for r in rows_set:
+                    for c in grid[r].values():
+                        if c is None: continue
+                        if re.fullmatch(rf"\s*{token}\s*", str(c), flags=re.IGNORECASE):
+                            cnt += 1
+                cnt_breakdown = cnt
+                return cnt_breakdown
+
+            gold_n = count_exact("gold", data_rows)
+            silver_n = count_exact("silver", data_rows)
+            bronze_n = count_exact("bronze", data_rows)
+
+            check("GSheet has exactly 10 data rows",
+                  len(data_rows) == 10, f"Got {len(data_rows)}")
+            check("GSheet has 3 Gold tier rows", gold_n == 3, f"Got {gold_n}")
+            check("GSheet has 4 Silver tier rows", silver_n == 4, f"Got {silver_n}")
+            check("GSheet has 3 Bronze tier rows", bronze_n == 3, f"Got {bronze_n}")
+
+            # Find tier and customer name columns
+            tier_col = next((i for i, h in enumerate(headers) if "tier" in h or "vip" in h), None)
+            name_col = next((i for i, h in enumerate(headers) if "customer" in h or "name" in h), None)
+            spent_col = next((i for i, h in enumerate(headers) if "spent" in h or "total" in h and "spent" in h), None)
+
+            if tier_col is not None and name_col is not None:
+                # Verify EACH expected customer is tagged with the right tier
+                # (per-rank mapping, not just gold count). Per QA: previous
+                # version only checked Gold names + tier counts, not whether
+                # silver/bronze rows mapped to the right ranks.
+                row_lookup = {}
+                for r in data_rows:
+                    name = str(grid[r].get(name_col, "")).strip().lower()
+                    tier = str(grid[r].get(tier_col, "")).strip().lower()
+                    row_lookup[name] = tier
+
+                def _find_tier(cust_name):
+                    parts = cust_name.lower().split()
+                    if not parts:
+                        return None
+                    first, last = parts[0], parts[-1]
+                    for k, v in row_lookup.items():
+                        if first in k and last in k:
+                            return v
+                    return None
+
+                for cust in GOLD_CUSTOMERS:
+                    found = _find_tier(cust["name"])
+                    check(f"Customer '{cust['name']}' tagged Gold tier",
+                          found == "gold", f"got '{found}'")
+                for cust in SILVER_CUSTOMERS:
+                    found = _find_tier(cust["name"])
+                    check(f"Customer '{cust['name']}' tagged Silver tier",
+                          found == "silver", f"got '{found}'")
+                for cust in BRONZE_CUSTOMERS:
+                    found = _find_tier(cust["name"])
+                    check(f"Customer '{cust['name']}' tagged Bronze tier",
+                          found == "bronze", f"got '{found}'")
+
+            # Total_Spent verification: top customer's spent must match DB
+            # (live-derived TOP_SPENT or fallback constant).
+            if spent_col is not None and name_col is not None:
+                top_cust = TOP10[0]
+                top_first = top_cust["name"].split()[0].lower()
+                top_last = top_cust["name"].split()[-1].lower()
+                expected_top_spent = TOP_SPENT
+                for r in data_rows:
+                    name = str(grid[r].get(name_col, "")).strip().lower()
+                    if top_first in name and top_last in name:
+                        spent_val = grid[r].get(spent_col)
+                        try:
+                            spent_num = float(str(spent_val).replace("$", "").replace(",", "").strip())
+                            check(f"Top customer '{top_cust['name']}' Total_Spent ~ {expected_top_spent:.2f}",
+                                  abs(spent_num - expected_top_spent) <= 5.0,
+                                  f"got {spent_val}")
+                        except (TypeError, ValueError):
+                            check(f"Top customer '{top_cust['name']}' Total_Spent ~ {expected_top_spent:.2f}",
+                                  False, f"got {spent_val}")
+                        break
 
     cur.close()
     conn.close()
@@ -162,7 +281,7 @@ def check_emails():
                 check(f"Subject contains 'VIP' for {customer['name']}",
                       "vip" in subj_lower, f"Subject: {subj}")
                 check(f"Subject contains 'discount' or '20%' for {customer['name']}",
-                      "discount" in subj_lower or "20%" in subj_lower or "20" in subj_lower,
+                      "discount" in subj_lower or "20%" in subj_lower,
                       f"Subject: {subj}")
                 gold_emails_found += 1
                 break

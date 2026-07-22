@@ -258,9 +258,23 @@ def check_summary(wb, expected_revenue, indicators):
     if agent_gold_trend.lower() != gold_trend.lower():
         errors.append(f"Gold_Trend mismatch: agent='{agent_gold_trend}', expected='{gold_trend}'")
 
+    # Check Strong_Months_Count: derived from memory.json threshold (revenue > 3000)
+    # Expected count: months with revenue strictly greater than $3000
+    strong_months_count = sum(1 for m in expected_revenue if m["revenue"] > 3000)
+    agent_strong = safe_float(kv.get("Strong_Months_Count"))
+    if agent_strong is None:
+        errors.append(
+            "Strong_Months_Count is missing (agent likely did not read memory.json). "
+            "Expected integer count of months with revenue > 3000."
+        )
+    elif abs(int(agent_strong) - strong_months_count) > 0:
+        errors.append(
+            f"Strong_Months_Count mismatch: agent={int(agent_strong)}, expected={strong_months_count}"
+        )
+
     if errors:
         return False, "Summary errors:\n  " + "\n  ".join(errors)
-    return True, f"Summary: all 6 metrics verified"
+    return True, f"Summary: all 7 metrics verified"
 
 
 def run_evaluation(agent_workspace):

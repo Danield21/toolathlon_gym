@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 
 import psycopg2
@@ -22,6 +23,33 @@ def record(name, passed, detail=""):
 def num_close(a, b, tol=1.0):
     try: return abs(float(a) - float(b)) <= tol
     except: return False
+
+
+def _extract_text(json_obj):
+    """Extract plain text from a Notion title/rich_text JSON."""
+    if json_obj is None:
+        return ""
+    if isinstance(json_obj, str):
+        return json_obj
+    if isinstance(json_obj, list):
+        out = []
+        for item in json_obj:
+            if isinstance(item, dict):
+                t = item.get("plain_text") or (item.get("text") or {}).get("content") or ""
+                out.append(t)
+            elif isinstance(item, str):
+                out.append(item)
+        return "".join(out)
+    if isinstance(json_obj, dict):
+        # Could be {"title":[...]} or other
+        for k in ("title", "rich_text", "plain_text"):
+            if k in json_obj:
+                return _extract_text(json_obj[k])
+    return ""
+
+
+def _normalize(s):
+    return re.sub(r"\s+", " ", str(s or "").strip().lower())
 
 
 def get_expected():
@@ -52,43 +80,90 @@ def check_notion(expected):
     dbs = cur.fetchall()
     record("Notion database created", len(dbs) >= 1, f"Found {len(dbs)}")
 
+    # Find database with exact (or near-exact) title 'Course Enrollment Tracker'
+    expected_title = "course enrollment tracker"
     target_db = None
     for did, title_json in dbs:
-        title_str = json.dumps(title_json).lower() if title_json else ""
-        if "enrollment" in title_str or "course" in title_str:
+        title_str = _normalize(_extract_text(title_json))
+        if title_str == expected_title:
             target_db = did
             break
-    if target_db is None and dbs:
-        target_db = dbs[0][0]
+    # Strict: must find by name; no fallback to dbs[0]
+    record("Database titled 'Course Enrollment Tracker'", target_db is not None,
+           f"Looking for exact title; dbs={[_extract_text(d[1]) for d in dbs]}")
 
     if target_db is None:
+        cur.close()
         conn.close()
         return
 
-    record("Database titled with enrollment/course", target_db is not None)
-
-    # Check pages (entries) in the database
+    # Pages
     cur.execute("""SELECT id, properties FROM notion.pages
         WHERE parent->>'database_id' = %s AND archived=false""", (target_db,))
     pages = cur.fetchall()
-    record("Database has course entries", len(pages) >= 20,
-           f"Found {len(pages)}, expected ~{len(expected)}")
+    expected_count = len(expected)
+    record(f"Database has all course entries (expected {expected_count})",
+           len(pages) == expected_count,
+           f"Found {len(pages)}, expected {expected_count}")
 
-    # Check that some course names appear in page properties
-    course_names_lower = {c["name"].lower() for c in expected.values()}
-    found_names = 0
+    # Build name -> expected map (lower)
+    expected_by_name = {}
+    for c in expected.values():
+        expected_by_name[_normalize(c["name"])] = c
+
+    # Check per-page: title matches a course; counts correct
+    matched_titles = 0
+    correct_props = 0
+    pages_with_props_checked = 0
     for pid, props in pages:
-        if props:
-            props_str = json.dumps(props).lower()
-            for cn in course_names_lower:
-                # Check if any part of course name appears
-                short_name = cn.split("(")[0].strip()
-                if short_name in props_str:
-                    found_names += 1
+        if not props:
+            continue
+        # Find the title property value
+        title_text = ""
+        # props is dict of {propname: {type:..., title:..., number:..., ...}}
+        for pname, pval in props.items():
+            if isinstance(pval, dict):
+                ptype = pval.get("type")
+                if ptype == "title":
+                    title_text = _extract_text(pval.get("title", []))
                     break
+        title_norm = _normalize(title_text)
+        if title_norm in expected_by_name:
+            matched_titles += 1
+            exp = expected_by_name[title_norm]
+            # Verify counts
+            student_val = teacher_val = ta_val = total_val = None
+            for pname, pval in props.items():
+                if not isinstance(pval, dict): continue
+                lname = _normalize(pname).replace(" ", "_")
+                if pval.get("type") == "number":
+                    val = pval.get("number")
+                    # Match exact normalized property names per task.md
+                    if lname in ("student_count", "studentcount", "students", "student"):
+                        student_val = val
+                    elif lname in ("teacher_count", "teachercount", "teachers", "teacher"):
+                        teacher_val = val
+                    elif lname in ("ta_count", "tacount", "tas", "ta"):
+                        ta_val = val
+                    elif lname in ("total_enrollment", "totalenrollment", "total"):
+                        total_val = val
+            pages_with_props_checked += 1
+            ok = (
+                student_val == exp["students"]
+                and teacher_val == exp["teachers"]
+                and ta_val == exp["tas"]
+                and total_val == exp["total"]
+            )
+            if ok:
+                correct_props += 1
 
-    record("Course names in entries", found_names >= 15,
-           f"Found {found_names} matching names out of {len(pages)}")
+    # Strict: every course must be present and counts must match
+    record("All course names present as page titles",
+           matched_titles == expected_count,
+           f"Matched {matched_titles}/{expected_count}")
+    record("All page property counts correct",
+           correct_props == expected_count,
+           f"Correct {correct_props}/{expected_count}")
 
     cur.close()
     conn.close()
@@ -103,29 +178,57 @@ def check_email(expected):
     emails = cur.fetchall()
     record("At least 1 email sent", len(emails) >= 1, f"Found {len(emails)}")
 
-    # Find the summary email
+    # Find the summary email by exact subject
+    expected_subject = "Course Enrollment Summary Report"
     summary_email = None
     for subj, to, body in emails:
-        if subj and "enrollment" in subj.lower() and "summary" in subj.lower():
+        if (subj or "").strip().lower() == expected_subject.lower():
             summary_email = (subj, to, body)
             break
-    if summary_email is None and emails:
-        summary_email = emails[0]
 
-    if summary_email:
-        subj, to, body = summary_email
-        record("Email subject matches", "enrollment" in (subj or "").lower(),
-               f"Subject: {subj}")
+    record("Email subject exactly 'Course Enrollment Summary Report'",
+           summary_email is not None,
+           f"Subjects seen: {[e[0] for e in emails]}")
 
-        to_str = json.dumps(to).lower() if isinstance(to, list) else str(to).lower()
-        record("Email to admin@university.example.com",
-               "admin@university.example.com" in to_str, f"To: {to}")
+    if summary_email is None:
+        cur.close()
+        conn.close()
+        return
 
-        body_lower = (body or "").lower()
-        total_courses = len(expected)
-        record("Email mentions course count",
-               str(total_courses) in (body or ""),
-               f"Expected {total_courses} in body")
+    subj, to, body = summary_email
+    to_str = json.dumps(to).lower() if isinstance(to, list) else str(to).lower()
+    record("Email to admin@university.example.com",
+           "admin@university.example.com" in to_str, f"To: {to}")
+
+    body_str = body or ""
+    body_lower = body_str.lower()
+    total_courses = len(expected)
+    total_enrollment = sum(c["total"] for c in expected.values())
+
+    record("Body mentions total course count",
+           re.search(rf"\b{total_courses}\b", body_str) is not None,
+           f"Expected {total_courses} in body")
+
+    # Total enrollment number could be displayed with or without commas
+    te_str = str(total_enrollment)
+    te_str_with_comma = f"{total_enrollment:,}"
+    record("Body mentions total enrollment",
+           te_str in body_str or te_str_with_comma in body_str,
+           f"Expected {te_str} (or {te_str_with_comma}) in body")
+
+    # Top 5 by total
+    sorted_courses = sorted(expected.values(), key=lambda c: c["total"], reverse=True)
+    top5 = sorted_courses[:5]
+    matched_top = 0
+    for c in top5:
+        cname = c["name"]
+        # try short name (before paren) too
+        short = cname.split("(")[0].strip()
+        if short.lower() in body_lower or cname.lower() in body_lower:
+            matched_top += 1
+    record("Body lists top 5 courses by total enrollment",
+           matched_top == 5,
+           f"Matched {matched_top}/5; top names: {[c['name'] for c in top5]}")
 
     cur.close()
     conn.close()

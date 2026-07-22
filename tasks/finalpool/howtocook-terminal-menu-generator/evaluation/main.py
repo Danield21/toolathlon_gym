@@ -69,38 +69,65 @@ def main():
           len(found_days) >= 5,
           f"Found {len(found_days)} weekday(s): {found_days}")
 
-    # ---- Check 3: Contains dishes from at least 4 different categories ----
-    # Look for category keywords in the document
-    category_keywords = {
-        "meat": ["meat", "chicken", "pork", "beef", "lamb", "duck",
-                 "wings", "ribs",
-                 "\u8089", "\u9e21", "\u7fc5", "\u732a", "\u725b", "\u7f8a", "\u9e2d"],
-        "vegetable": ["vegetable", "veggie", "tofu", "mushroom", "bean",
-                       "greens", "salad", "cabbage", "eggplant",
-                       "\u83dc", "\u8c46", "\u83c7", "\u7d20", "\u8304",
-                       "\u91d1\u9488\u83c7", "\u51c9\u62cc"],
-        "soup": ["soup", "broth", "stew",
-                 "\u6c64", "\u7092"],
-        "staple": ["rice", "noodle", "bread", "cake", "dumpling",
-                   "pancake", "bun",
-                   "\u996d", "\u9762", "\u997c", "\u5e74\u7cd5",
-                   "\u7c89", "\u9985"],
-        "seafood": ["fish", "shrimp", "prawn", "crab", "squid",
-                    "\u9c7c", "\u867e", "\u87f9"],
-        "snack": ["snack", "dessert", "sweet", "cookie",
-                  "\u70b9\u5fc3", "\u96f6\u98df", "\u751c"],
-    }
-
-    found_categories = set()
-    for cat, keywords in category_keywords.items():
-        for kw in keywords:
-            if kw in normalized:
-                found_categories.add(cat)
+    # ---- Check 3: Parse per-day Category: lines and validate ----
+    # Structured approach: find "Category: X" lines under each weekday section
+    weekdays_order = ["monday", "tuesday", "wednesday", "thursday", "friday"]
+    per_day_category = {}
+    per_day_difficulty = {}
+    per_day_name = {}
+    current_day = None
+    for p in all_paragraphs:
+        t = p.strip()
+        t_lower = t.lower()
+        # Detect weekday heading
+        for d in weekdays_order:
+            if t_lower == d or t_lower.startswith(d + " ") or t_lower == d.capitalize().lower():
+                current_day = d
                 break
+        else:
+            # Not a weekday heading
+            pass
+        # Detect Category line
+        cat_m = re.match(r"^\s*category\s*:\s*(\S+)", t_lower)
+        if cat_m and current_day:
+            per_day_category[current_day] = cat_m.group(1).strip().rstrip(",.;:")
+        # Detect Difficulty line
+        diff_m = re.match(r"^\s*difficulty\s*(?:level)?\s*:\s*(\d+)", t_lower)
+        if diff_m and current_day:
+            try:
+                per_day_difficulty[current_day] = int(diff_m.group(1))
+            except Exception:
+                pass
+        # Detect Dish: line
+        dish_m = re.match(r"^\s*dish\s*:\s*(.+)$", t_lower)
+        if dish_m and current_day:
+            per_day_name[current_day] = dish_m.group(1).strip()
 
-    check("Contains dishes from at least 4 different categories",
-          len(found_categories) >= 4,
-          f"Found {len(found_categories)} categories: {found_categories}")
+    # Distinct categories among selected days
+    sel_cats = [per_day_category[d] for d in weekdays_order if d in per_day_category]
+    distinct_cats = set(sel_cats)
+    check("All 5 weekdays have a Category line", len(sel_cats) == 5,
+          f"per_day_category={per_day_category}")
+    check("At least 4 distinct categories across Mon-Fri", len(distinct_cats) >= 4,
+          f"categories: {sel_cats}")
+
+    # No consecutive-day category repeats
+    consec_ok = True
+    violating = []
+    for i in range(1, len(sel_cats)):
+        if sel_cats[i] == sel_cats[i-1]:
+            consec_ok = False
+            violating.append((weekdays_order[i-1], weekdays_order[i], sel_cats[i]))
+    check("No consecutive-day category repeats", consec_ok,
+          f"violations: {violating}")
+
+    # All selected difficulties <= 3
+    diff_values = [per_day_difficulty[d] for d in weekdays_order if d in per_day_difficulty]
+    check("All 5 weekdays have a Difficulty line", len(diff_values) == 5,
+          f"per_day_difficulty={per_day_difficulty}")
+    check("All selected dishes have difficulty <= 3",
+          all(d <= 3 for d in diff_values) if diff_values else False,
+          f"difficulties: {diff_values}")
 
     # ---- Check 4: Each weekday section has ingredients ----
     # Check that ingredient-related words appear multiple times
@@ -133,11 +160,70 @@ def main():
             check("Memory file has been updated with entities",
                   len(entities) > 0,
                   "No entities found in memory.json")
+            # Must contain dietary preferences with >=4 observations
+            diet_entity = next(
+                (e for e in entities
+                 if "dietary" in str(e.get("name", "")).lower()
+                 or "preference" in str(e.get("entityType", "")).lower()),
+                None)
+            if diet_entity:
+                obs = diet_entity.get("observations", [])
+                check("Memory has dietary_preferences entity with >=4 observations",
+                      len(obs) >= 4, f"Got {len(obs)} observations")
+            else:
+                check("Memory has dietary_preferences entity with >=4 observations",
+                      False, f"Entities: {[e.get('name') for e in entities]}")
         except Exception as e:
             check("Memory file has been updated with entities", False, str(e))
     else:
         check("Memory file has been updated with entities", False,
               f"memory.json not found at {memory_path}")
+
+    # ---- Check 7: Title contains 'Weekly Lunch Menu' (or 'Weekly Menu') ----
+    title_ok = (
+        "weekly lunch menu" in normalized
+        or "weekly menu" in normalized
+    )
+    check("Title contains 'Weekly Lunch Menu' or 'Weekly Menu'",
+          title_ok, f"Sample: {full_text[:150]}")
+
+    # ---- Check 8: Intermediate JSON pipeline artifacts REQUIRED ----
+    # Task requires saving all_recipes.json and filtered_recipes.json.
+    all_recipes_path = None
+    filtered_path = None
+    for candidate in ("all_recipes.json", "recipes.json", "all_dishes.json"):
+        p = os.path.join(agent_ws, candidate)
+        if os.path.isfile(p):
+            all_recipes_path = p
+            break
+    for candidate in ("filtered_recipes.json", "filtered.json", "dishes_filtered.json"):
+        p = os.path.join(agent_ws, candidate)
+        if os.path.isfile(p):
+            filtered_path = p
+            break
+    check("all_recipes.json present (REQUIRED)", all_recipes_path is not None,
+          f"Expected at {os.path.join(agent_ws, 'all_recipes.json')}")
+    check("filtered_recipes.json present (REQUIRED)", filtered_path is not None,
+          f"Expected at {os.path.join(agent_ws, 'filtered_recipes.json')}")
+    if filtered_path:
+        try:
+            with open(filtered_path) as f:
+                data = json.load(f)
+            # Look for records with difficulty<=3
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                items = data.get("recipes") or data.get("dishes") or list(data.values())
+            else:
+                items = []
+            hard_ones = [r for r in items if isinstance(r, dict)
+                         and isinstance(r.get("difficulty"), (int, float))
+                         and r["difficulty"] > 3]
+            check("Filtered recipes JSON: no difficulty>3 entries",
+                  len(hard_ones) == 0,
+                  f"Found {len(hard_ones)} difficulty>3")
+        except Exception as e:
+            check("Filtered recipes JSON readable", False, str(e))
 
     # ---- Summary ----
     total = PASS_COUNT + FAIL_COUNT

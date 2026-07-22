@@ -79,7 +79,14 @@ def check_excel(agent_workspace, groundtruth_workspace):
             check(f"Paper '{eid}' in catalog", eid in a_ids,
                   f"Missing from {a_ids}")
 
-        # Verify a couple of titles
+        # Verify a couple of titles + authors
+        EXPECTED_AUTHORS = {
+            "1706.03762": "vaswani",
+            "1810.04805": "devlin",
+            "2005.14165": "brown",
+            "2010.11929": "dosovitskiy",
+            "2301.07041": "kaplan",
+        }
         a_lookup = {str(r[0]).strip(): r for r in a_rows if r and r[0]}
         for g_row in g_rows:
             if not g_row or not g_row[0]:
@@ -90,6 +97,22 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 check(f"'{key}' Year",
                       num_close(a_row[3], g_row[3], 0),
                       f"Expected {g_row[3]}, got {a_row[3]}")
+            # Check first-author surname present and is limited to surname-only-ish
+            # (word-boundary match + column text not unreasonably long)
+            if a_row and len(a_row) > 2 and key in EXPECTED_AUTHORS:
+                import re
+                author_str = str(a_row[2] or "").lower()
+                surname = EXPECTED_AUTHORS[key]
+                present = re.search(rf"\b{re.escape(surname)}\b", author_str) is not None
+                check(f"'{key}' first-author surname present",
+                      present,
+                      f"Expected '{surname}' (word-boundary) in '{author_str}'")
+                # Authors field must be just the first author surname (not the full list).
+                # Accept "Vaswani" or "Vaswani et al." style, reject full author list >60 chars.
+                len_ok = len(author_str.strip()) <= 60
+                check(f"'{key}' Authors field limited to first-author surname",
+                      len_ok,
+                      f"Authors too long ({len(author_str)}): '{author_str}'")
 
     # Methodology_Comparison
     print("  Checking Methodology_Comparison...")
@@ -104,7 +127,7 @@ def check_excel(agent_workspace, groundtruth_workspace):
         for eid in expected_ids:
             check(f"Method for '{eid}'", eid in a_ids, f"Missing from {a_ids}")
 
-        # Check each row has method_name and approach
+        # Check each row has method_name, approach, and key innovation (length-bounded)
         for r in a_rows:
             if r and r[0] and str(r[0]).strip() in expected_ids:
                 has_method = r[1] is not None and len(str(r[1]).strip()) > 0
@@ -112,6 +135,15 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 check(f"'{str(r[0]).strip()}' has method and approach",
                       has_method and has_approach,
                       f"method={r[1]}, approach={r[2] if len(r) > 2 else None}")
+                # Key_Innovation must always be present and ~one sentence long.
+                # Previously this check was skipped when the cell was None (becoming a silent pass).
+                ki_val = r[3] if len(r) > 3 else None
+                ki_txt = str(ki_val).strip() if ki_val is not None else ""
+                ki_len = len(ki_txt)
+                ki_words = len(ki_txt.split())
+                check(f"'{str(r[0]).strip()}' Key_Innovation one-sentence length (non-empty, <=200 chars, <=40 words)",
+                      0 < ki_len <= 200 and ki_words <= 40,
+                      f"len={ki_len}, words={ki_words}, val={ki_val!r}")
 
     # Citation_Network
     print("  Checking Citation_Network...")
@@ -122,14 +154,17 @@ def check_excel(agent_workspace, groundtruth_workspace):
         a_rows = list(a_sheet.iter_rows(min_row=2, values_only=True))
         check("Citation_Network has >= 5 rows", len(a_rows) >= 5, f"Got {len(a_rows)}")
 
-        # Check key citation: 1810.04805 cites 1706.03762
+        # Check key citations (exact strict pairs; all must be present)
         citations = {(str(r[0]).strip(), str(r[1]).strip()) for r in a_rows if r and r[0] and r[1]}
-        check("BERT cites Transformer",
-              ("1810.04805", "1706.03762") in citations,
-              f"Not found in {list(citations)[:5]}")
-        check("GPT-3 cites Transformer",
-              ("2005.14165", "1706.03762") in citations,
-              f"Not found")
+        required_citations = [
+            (("1810.04805", "1706.03762"), "BERT cites Transformer"),
+            (("2005.14165", "1706.03762"), "GPT-3 cites Transformer"),
+            (("2010.11929", "1706.03762"), "ViT cites Transformer"),
+            (("2010.11929", "1810.04805"), "ViT cites BERT"),
+            (("2301.07041", "1706.03762"), "Scaling Laws cite Transformer"),
+        ]
+        for pair, label in required_citations:
+            check(label, pair in citations, f"Missing pair {pair} in {list(citations)[:10]}")
 
 
 def check_word(agent_workspace):
@@ -207,6 +242,17 @@ def check_reverse_validation(workspace):
                   len(unexpected) == 0,
                   f"Unexpected sheets: {unexpected}")
 
+            # Reverse: noise paper IDs (LoRA, Adversarial, Knowledge Graph) must NOT be in catalog
+            noise_ids = {"1901.02860", "2002.05709", "2106.09685"}
+            a_sheet = get_sheet(wb, "Paper_Catalog")
+            if a_sheet is not None:
+                rows = list(a_sheet.iter_rows(min_row=2, values_only=True))
+                ids_in = {str(r[0]).strip() for r in rows if r and r[0]}
+                polluted = ids_in & noise_ids
+                check("Reverse: noise papers NOT in Paper_Catalog",
+                      len(polluted) == 0,
+                      f"Found noise IDs: {polluted}")
+
             # Check no duplicate Notion pages
             try:
                 conn = psycopg2.connect(**DB)
@@ -231,6 +277,13 @@ def check_reverse_validation(workspace):
                               f"{len(page_texts)} pages but {len(set(page_texts))} unique")
                     else:
                         check("No duplicate pages in Notion database", True)
+                    # Reverse: Notion pages should NOT include noise paper titles
+                    all_text = " ".join(page_texts).lower()
+                    noise_keywords = ["lora", "adversarial", "knowledge graph"]
+                    polluted = [k for k in noise_keywords if k in all_text]
+                    check("Reverse: Notion database excludes noise papers",
+                          len(polluted) == 0,
+                          f"Found noise keywords: {polluted}")
                 cur.close(); conn.close()
             except Exception:
                 pass

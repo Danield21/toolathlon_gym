@@ -13,7 +13,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -48,6 +48,10 @@ def ensure_email_folders(conn):
 
 
 def verify_youtube_data(conn):
+    """Verify read-only YouTube data and print the concrete top 5 videos
+    (by view_count) that the agent is expected to select. Serves as a
+    sanity reference so task solvability can be audited.
+    """
     with conn.cursor() as cur:
         cur.execute("""
             SELECT COUNT(*) FROM youtube.videos
@@ -55,7 +59,22 @@ def verify_youtube_data(conn):
             AND published_at >= '2025-01-01' AND published_at < '2026-01-01'
         """)
         count = cur.fetchone()[0]
+        # Reverse validation: ensure at least 5 videos to pick from
+        assert count >= 5, f"Expected >=5 Veritasium 2025 videos, got {count}"
+
+        cur.execute("""
+            SELECT video_id, title, view_count, duration
+            FROM youtube.videos
+            WHERE channel_title = 'Veritasium'
+            AND published_at >= '2025-01-01' AND published_at < '2026-01-01'
+            ORDER BY view_count DESC
+            LIMIT 5
+        """)
+        top5 = cur.fetchall()
     print(f"[preprocess] Verified: {count} Veritasium 2025 videos (read-only).")
+    print("[preprocess] Top 5 by view_count (expected agent selection):")
+    for i, (vid, title, vc, dur) in enumerate(top5, 1):
+        print(f"  {i}. {vid} | views={vc} | duration={dur}s | {title}")
 
 
 def main():

@@ -152,6 +152,23 @@ def check_excel(workspace):
         data2 = [r for r in rows2[1:] if any(c for c in r)]
         check(f"Customer_Impact has {EXPECTED['unique_customers']} customers",
               num_close(len(data2), EXPECTED["unique_customers"], 2), f"Found {len(data2)}")
+        # Check for order_dates column and date formatting
+        import re
+        if rows2:
+            ci_headers = [str(c).lower() if c else "" for c in rows2[0]]
+            dates_col_idx = next((i for i, h in enumerate(ci_headers) if "date" in h), -1)
+            if dates_col_idx >= 0 and data2:
+                # Check first row has ISO-formatted dates
+                first_val = str(data2[0][dates_col_idx] or "")
+                has_iso = bool(re.search(r"\d{4}-\d{2}-\d{2}", first_val))
+                check("Customer_Impact order_dates has YYYY-MM-DD format", has_iso,
+                      f"First row: {first_val[:80]}")
+                # If multiple orders per customer, expect semicolon delimiter
+                has_multi = any(";" in str(r[dates_col_idx] or "") for r in data2)
+                check("Customer_Impact uses semicolons for multiple dates", has_multi or len(data2) == 0,
+                      "No semicolon found in any row")
+            else:
+                check("Customer_Impact has order_dates column", False, f"Headers: {ci_headers}")
 
     # Financial_Summary
     fs_idx = next((i for i, s in enumerate(sheets_lower) if "financial" in s or "summary" in s), 2)
@@ -195,6 +212,41 @@ def check_excel(workspace):
         all_text4 = " ".join(str(c) for r in rows4 for c in r if c).lower()
         check("Timeline has Pending status", "pending" in all_text4)
         check("Timeline has Complete status", "complete" in all_text4)
+        # Verify specific deadlines & responsibilities per task.md
+        import re
+        tl_map = {}
+        for r in data4:
+            if r and r[0]:
+                key = str(r[0]).strip().lower()
+                tl_map[key] = r
+        expected_actions = [
+            ("identify", 8, "operations", "complete"),
+            ("notify", 10, "customer service", "pending"),
+            ("process", 17, "warehouse", "pending"),
+            ("financial", 21, "finance", "pending"),
+        ]
+        for action_keyword, day_num, responsible_keyword, status_keyword in expected_actions:
+            matched = None
+            for k, v in tl_map.items():
+                if action_keyword in k:
+                    matched = v
+                    break
+            if matched is None:
+                check(f"Timeline action containing '{action_keyword}' exists", False,
+                      f"Keys: {list(tl_map.keys())}")
+                continue
+            row_text = " ".join(str(c) for c in matched if c).lower()
+            # match deadline as: "march <day>" OR "2026-03-<day>" OR "03/<day>/2026"
+            deadline_re = re.compile(
+                rf"(march[\s,]+0?{day_num}(?![0-9])|2026[-/]03[-/]0?{day_num}(?![0-9])|0?3[-/]0?{day_num}[-/]2026)"
+            )
+            has_deadline = deadline_re.search(row_text) is not None
+            check(f"Timeline '{action_keyword}' has deadline March {day_num}",
+                  has_deadline, f"Row: {row_text[:120]}")
+            check(f"Timeline '{action_keyword}' assigned to {responsible_keyword}",
+                  responsible_keyword in row_text, f"Row: {row_text[:120]}")
+            check(f"Timeline '{action_keyword}' has status {status_keyword}",
+                  status_keyword in row_text, f"Row: {row_text[:120]}")
 
 
 def check_pptx(workspace):
@@ -380,7 +432,10 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    # Tightened: require all checks to pass. The Timeline per-row checks and
+    # other strict assertions are defanged by a 70% threshold — a bad case can
+    # accumulate ~14 failed timeline/email/script checks and still pass.
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

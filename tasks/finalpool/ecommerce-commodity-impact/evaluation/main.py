@@ -252,6 +252,9 @@ def check_excel_commodities(wb, expected):
     errors = []
     found_symbols = set()
 
+    if len(data) != 3:
+        errors.append(f"Commodity Trends expected 3 rows, got {len(data)}")
+
     for row in data:
         symbol = str(row.get("Symbol", "")).strip()
         if not symbol:
@@ -408,7 +411,11 @@ def check_memory(agent_workspace):
     if not entities or len(entities) == 0:
         return False, "memory/memory.json contains no entities (expected the agent to store findings)"
 
-    return True, f"Memory check passed: {len(entities)} entities found"
+    relations = data.get("relations", [])
+    if not relations or len(relations) == 0:
+        return False, f"memory/memory.json contains no relations (expected the agent to store relations); {len(entities)} entities found"
+
+    return True, f"Memory check passed: {len(entities)} entities, {len(relations)} relations found"
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 """Evaluation for sf-support-metrics-pdf-email."""
 import argparse
 import os
+import re
 import sys
 
 import psycopg2
@@ -11,7 +12,26 @@ DB = {"host": os.environ.get("PGHOST", "localhost"), "port": 5432, "dbname": "to
 def extract_pdf_text(path):
     """Extract text from PDF using available libraries."""
     try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(path)
+        text = ""
+        for page in doc:
+            text += page.get_text() or ""
+        doc.close()
+        return text
+    except ImportError:
+        pass
+    try:
         from pypdf import PdfReader
+        reader = PdfReader(path)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() or ""
+        return text
+    except ImportError:
+        pass
+    try:
+        from PyPDF2 import PdfReader
         reader = PdfReader(path)
         text = ""
         for page in reader.pages:
@@ -93,10 +113,9 @@ def main():
 
     total_tickets = sum(r[1] for r in issue_types)
 
-    # Check issue types present
-    expected_issues = ["performance issue", "bug", "feature request", "incident",
-                       "service request", "maintenance", "technical issue"]
-    for issue in expected_issues:
+    # Check issue types present (derive from DB to avoid stale hardcoded list)
+    db_issue_types = [str(r[0]).strip().lower() for r in issue_types if r[0]]
+    for issue in db_issue_types:
         if issue not in text:
             all_errors.append(f"PDF missing issue type: {issue}")
 
@@ -105,48 +124,109 @@ def main():
         if p not in text:
             all_errors.append(f"PDF missing priority: {p}")
 
+    # Helper: word-boundary regex match for an integer to avoid 12 matching 120
+    def has_int(t, n):
+        return re.search(r"(?<![\d.,])" + re.escape(str(n)) + r"(?![\d.,])", t) is not None
+
+    # Helper: numeric tolerance match for a 2-decimal float in PDF text. Accept
+    # any nearby formatting (e.g. 14.63, 14.6, 14.625) within tolerance.
+    def has_float(t, val, tol=0.05):
+        target = float(val)
+        # find every numeric token in text and check at least one is within tol
+        for m in re.finditer(r"\d+\.\d+", t):
+            try:
+                if abs(float(m.group(0)) - target) <= tol:
+                    return True
+            except Exception:
+                continue
+        return False
+
     # Check total ticket count appears
-    if str(total_tickets) not in text:
+    if not has_int(text, total_tickets):
         all_errors.append(f"PDF missing total ticket count: {total_tickets}")
 
-    # Check issue type ticket counts
+    # Check issue type ticket counts AND avg response AND avg satisfaction
+    # appear in PDF text. Use word-boundary regex to avoid substring overlap
+    # (e.g. '12' matching inside '120').
     for r in issue_types:
-        if str(r[1]) not in text:
-            all_errors.append(f"PDF missing ticket count {r[1]} for {r[0]}")
+        issue_name, cnt, avg_resp, avg_csat = r
+        if not has_int(text, cnt):
+            all_errors.append(f"PDF missing ticket count {cnt} for {issue_name}")
+        if avg_resp is not None and not has_float(text, avg_resp):
+            all_errors.append(
+                f"PDF missing avg response time {avg_resp} for {issue_name}"
+            )
+        if avg_csat is not None and not has_float(text, avg_csat):
+            all_errors.append(
+                f"PDF missing avg satisfaction {avg_csat} for {issue_name}"
+            )
 
-    # Check priority ticket counts
+    # Check priority ticket counts AND metrics
     for r in priorities:
-        if str(r[1]) not in text:
-            all_errors.append(f"PDF missing ticket count {r[1]} for priority {r[0]}")
+        priority_name, cnt, avg_resp, avg_csat = r
+        if not has_int(text, cnt):
+            all_errors.append(f"PDF missing ticket count {cnt} for priority {priority_name}")
+        if avg_resp is not None and not has_float(text, avg_resp):
+            all_errors.append(
+                f"PDF missing avg response time {avg_resp} for priority {priority_name}"
+            )
+        if avg_csat is not None and not has_float(text, avg_csat):
+            all_errors.append(
+                f"PDF missing avg satisfaction {avg_csat} for priority {priority_name}"
+            )
 
     if not all_errors:
         print("    PASS")
 
-    # --- Non-blocking: Check email in DB ---
-    print("  Checking email (non-blocking)...")
+    # --- BLOCKING: Check email in DB ---
+    print("  Checking email (blocking - required by task)...")
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
+        # Required: to=manager@supportcenter.com, subject "Monthly Support Metrics Report"
         cur.execute("""
-            SELECT id, subject, to_addr, body_text
+            SELECT id, subject, to_addr, body_text, from_addr
             FROM email.messages
-            WHERE LOWER(subject) LIKE '%support%metrics%'
-            OR LOWER(to_addr::text) LIKE '%manager@supportcenter%'
+            WHERE LOWER(to_addr::text) LIKE '%manager@supportcenter.com%'
+              AND LOWER(subject) LIKE '%monthly%support%metrics%report%'
         """)
         emails = cur.fetchall()
-        if emails:
-            print(f"    Found {len(emails)} matching email(s)")
+        if not emails:
+            all_errors.append("Email not found: required to=manager@supportcenter.com with subject 'Monthly Support Metrics Report'")
         else:
-            # Also check sent_log
-            cur.execute("SELECT COUNT(*) FROM email.sent_log")
-            sent = cur.fetchone()[0]
-            if sent > 0:
-                print(f"    Found {sent} sent email(s)")
-            else:
-                print("    WARNING: No matching email found (non-blocking)")
+            # Validate body mentions total tickets and average satisfaction
+            email_body = (emails[0][3] or "").lower()
+            # word-boundary regex to avoid substring overlap
+            tt_str = str(total_tickets)
+            tt_with_sep = f"{total_tickets:,}"
+            email_has_total = (
+                re.search(r"(?<![\d.,])" + re.escape(tt_str) + r"(?![\d.,])", email_body) is not None
+                or re.search(r"(?<![\d.,])" + re.escape(tt_with_sep) + r"(?![\d.,])", email_body) is not None
+            )
+            if not email_has_total:
+                all_errors.append(f"Email body missing total ticket count: {total_tickets}")
+            # Compute overall avg satisfaction
+            cur.execute("""
+                SELECT ROUND(AVG("CUSTOMER_SATISFACTION")::numeric, 2)
+                FROM sf_data."SUPPORT_CENTER__PUBLIC__TICKETS"
+            """)
+            overall_csat = cur.fetchone()[0]
+            # accept the rounded value within a small tolerance against any
+            # numeric token in the body
+            target = float(overall_csat)
+            email_has_csat = False
+            for m in re.finditer(r"\d+\.\d+", email_body):
+                try:
+                    if abs(float(m.group(0)) - target) <= 0.05:
+                        email_has_csat = True
+                        break
+                except Exception:
+                    continue
+            if not email_has_csat:
+                all_errors.append(f"Email body missing avg satisfaction (~{overall_csat})")
         conn.close()
     except Exception as e:
-        print(f"    WARNING: Email DB check error: {e} (non-blocking)")
+        all_errors.append(f"Email DB check error: {e}")
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

@@ -77,29 +77,29 @@ def main():
                 all_errors.append(f"Missing row in Breach Analysis: {g_row[0]}")
                 continue
 
-            # Total_Tickets (col 1)
+            # Total_Tickets (col 1) - exact match (counts must be precise)
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 10):
+                if not num_close(a_row[1], g_row[1], 0):
                     all_errors.append(f"{key}.Total_Tickets: {a_row[1]} vs {g_row[1]}")
 
-            # Avg_Response_Hours (col 2)
+            # Avg_Response_Hours (col 2) - tighten ±0.05
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 0.5):
+                if not num_close(a_row[2], g_row[2], 0.05):
                     all_errors.append(f"{key}.Avg_Response_Hours: {a_row[2]} vs {g_row[2]}")
 
-            # SLA_Target_Hours (col 3)
+            # SLA_Target_Hours (col 3) - exact (policy values)
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 0.5):
+                if not num_close(a_row[3], g_row[3], 0):
                     all_errors.append(f"{key}.SLA_Target_Hours: {a_row[3]} vs {g_row[3]}")
 
-            # Breached_Count (col 4)
+            # Breached_Count (col 4) - exact match (counts)
             if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 10):
+                if not num_close(a_row[4], g_row[4], 0):
                     all_errors.append(f"{key}.Breached_Count: {a_row[4]} vs {g_row[4]}")
 
-            # Breach_Rate (col 5)
+            # Breach_Rate (col 5) - tighten ±0.1 percentage points
             if len(a_row) > 5 and len(g_row) > 5:
-                if not num_close(a_row[5], g_row[5], 1.0):
+                if not num_close(a_row[5], g_row[5], 0.1):
                     all_errors.append(f"{key}.Breach_Rate: {a_row[5]} vs {g_row[5]}")
 
         if not [e for e in all_errors if "Breach Analysis" in e]:
@@ -138,8 +138,10 @@ def main():
 
             try:
                 float(a_val); float(g_val)
-                if not num_close(a_val, g_val, 1.0):
-                    all_errors.append(f"Summary.{key}: {a_val} vs {g_val} (tol=1.0)")
+                # Tighter tolerance for percentages and counts in summary
+                tol = 0.1 if "rate" in key else 0
+                if not num_close(a_val, g_val, tol):
+                    all_errors.append(f"Summary.{key}: {a_val} vs {g_val} (tol={tol})")
             except (TypeError, ValueError):
                 if not str_match(a_val, g_val):
                     all_errors.append(f"Summary.{key}: {a_val} vs {g_val}")
@@ -160,18 +162,52 @@ def main():
         """)
         all_msgs = cur.fetchall()
 
-        found_email = False
+        # Tightened: from sla-audit, to ops-director, subject 'SLA Breach Audit Results',
+        # body contains overall breach rate value and worst priority name
+        # Determine expected values from GT Summary sheet
+        gt_summary = load_sheet_rows(gt_wb, "Summary")
+        expected_overall_rate = None
+        expected_worst = None
+        for row in gt_summary[1:] if gt_summary else []:
+            if not row or row[0] is None: continue
+            k = str(row[0]).strip().lower()
+            if k == "overall_breach_rate" and row[1] is not None:
+                try:
+                    expected_overall_rate = float(row[1])
+                except (TypeError, ValueError):
+                    pass
+            elif k == "worst_priority" and row[1] is not None:
+                expected_worst = str(row[1]).strip()
+
+        found_email = None
         for subj, to_addr, body, from_addr in all_msgs:
             subj_str = str(subj or "").lower()
             to_str = str(to_addr or "").lower()
-            if "breach" in subj_str and "ops-director" in to_str:
-                found_email = True
-                break
+            from_str = str(from_addr or "").lower()
+            if ("sla breach audit results" in subj_str or
+                ("sla" in subj_str and "breach" in subj_str and "audit" in subj_str)):
+                if "ops-director@company.com" in to_str and "sla-audit@company.com" in from_str:
+                    found_email = (subj, to_addr, body, from_addr)
+                    break
 
         if not found_email:
-            all_errors.append("No email with 'Breach' in subject sent to ops-director@company.com")
+            all_errors.append("Email not found: from=sla-audit@company.com, to=ops-director@company.com, subject contains 'SLA Breach Audit Results'")
         else:
-            print("    PASS")
+            print("    Email envelope PASS")
+            body_str = str(found_email[2] or "")
+            # Body must contain overall breach rate value (as a number) and worst priority name
+            if expected_overall_rate is not None:
+                rate_str = f"{expected_overall_rate:g}"
+                rate_alt = f"{expected_overall_rate:.2f}"
+                if rate_str not in body_str and rate_alt not in body_str:
+                    all_errors.append(f"Email body missing overall breach rate {rate_str} or {rate_alt}; body: {body_str[:200]}")
+                else:
+                    print(f"    Body contains overall_breach_rate={rate_str}")
+            if expected_worst is not None:
+                if expected_worst.lower() not in body_str.lower():
+                    all_errors.append(f"Email body missing worst priority '{expected_worst}'; body: {body_str[:200]}")
+                else:
+                    print(f"    Body mentions worst_priority={expected_worst}")
 
         cur.close()
         conn.close()

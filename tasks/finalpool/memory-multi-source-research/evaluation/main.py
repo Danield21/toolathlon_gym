@@ -96,31 +96,52 @@ def check_excel(agent_workspace):
 
         # Check header has expected columns
         if rows:
-            header = " ".join(str(h).lower() for h in rows[0] if h is not None)
+            header_cells = [str(h).lower() if h is not None else "" for h in rows[0]]
+            header = " ".join(c for c in header_cells if c)
             has_title_col = "title" in header
             has_year_col = "year" in header
             has_citations_col = "citation" in header
+            has_authors_col = "author" in header
             check("Paper Summary has Title column", has_title_col,
+                  f"Header: {header}")
+            check("Paper Summary has Authors column", has_authors_col,
                   f"Header: {header}")
             check("Paper Summary has Year column", has_year_col,
                   f"Header: {header}")
             check("Paper Summary has Citations column", has_citations_col,
                   f"Header: {header}")
 
-    # Check Research Progress sheet
+            # Authors column non-empty per row
+            if has_authors_col:
+                try:
+                    author_col_idx = next(i for i, c in enumerate(header_cells) if "author" in c)
+                    empty_authors = 0
+                    for r in data_rows:
+                        if author_col_idx < len(r):
+                            val = r[author_col_idx]
+                            if val is None or str(val).strip() == "":
+                                empty_authors += 1
+                    check("Paper Summary Authors column non-empty for all rows",
+                          empty_authors == 0,
+                          f"{empty_authors} rows with empty Authors")
+                except StopIteration:
+                    pass
+
+    # Check Research Progress sheet. Prefer 'progress' first (unambiguous),
+    # then fall back to 'research' but only for sheets that aren't the paper
+    # summary sheet. This avoids "research" accidentally matching an unrelated
+    # sheet before finding the actual progress sheet.
     progress_sheet = None
     for name in wb.sheetnames:
-        if "progress" in name.lower() or "research" in name.lower():
-            if paper_sheet is None or wb[name] != paper_sheet:
-                progress_sheet = wb[name]
-                break
-
+        if "progress" in name.lower():
+            progress_sheet = wb[name]
+            break
     if progress_sheet is None:
-        # Try matching just "progress"
         for name in wb.sheetnames:
-            if "progress" in name.lower():
-                progress_sheet = wb[name]
-                break
+            if "research" in name.lower():
+                if paper_sheet is None or wb[name] != paper_sheet:
+                    progress_sheet = wb[name]
+                    break
 
     if progress_sheet is None:
         check("Research Progress sheet exists", False,
@@ -131,8 +152,9 @@ def check_excel(agent_workspace):
         rows = list(progress_sheet.iter_rows(values_only=True))
         data_rows = rows[1:] if len(rows) > 1 else []
 
-        check("Research Progress has at least 2 data rows",
-              len(data_rows) >= 2,
+        # Task: 2 search rounds + analysis + writing => at least 4 rows
+        check("Research Progress has at least 4 data rows",
+              len(data_rows) >= 4,
               f"Found {len(data_rows)} data rows")
 
         if rows:
@@ -176,33 +198,34 @@ def check_word(agent_workspace):
           "introduction" in normalized,
           "No Introduction section found")
 
-    has_lit_review = ("literature review" in normalized or "literature" in normalized)
-    check("Report has Literature Review section",
+    # Require phrase "literature review" (not just "literature")
+    has_lit_review = "literature review" in normalized
+    check("Report has Literature Review section (phrase)",
           has_lit_review,
-          "No Literature Review section found")
+          "Expected phrase 'literature review'")
 
-    has_key_findings = ("key findings" in normalized or "findings" in normalized)
-    check("Report has Key Findings section",
+    has_key_findings = "key findings" in normalized
+    check("Report has Key Findings section (phrase)",
           has_key_findings,
-          "No Key Findings section found")
+          "Expected phrase 'key findings'")
 
-    has_gaps = ("research gaps" in normalized or "gaps" in normalized)
-    check("Report has Research Gaps section",
+    has_gaps = "research gaps" in normalized
+    check("Report has Research Gaps section (phrase)",
           has_gaps,
-          "No Research Gaps section found")
+          "Expected phrase 'research gaps'")
 
     check("Report has Conclusion section",
           "conclusion" in normalized,
           "No Conclusion section found")
 
-    # Check paper mentions
+    # Check paper mentions - require at least 5 (task says at least 5 papers)
     paper_mention_count = 0
     for title_fragment in EXPECTED_PAPER_FRAGMENTS:
         if title_fragment in normalized:
             paper_mention_count += 1
-    check("Report mentions at least 3 papers",
-          paper_mention_count >= 3,
-          f"Found {paper_mention_count} paper mentions")
+    check("Report mentions at least 5 papers",
+          paper_mention_count >= 5,
+          f"Found {paper_mention_count} paper mentions; need 5")
 
 
 def check_memory(agent_workspace):
@@ -238,9 +261,10 @@ def check_memory(agent_workspace):
     if isinstance(memory_data, list):
         entities = memory_data
 
-    check("Memory has at least 3 entities",
-          len(entities) >= 3,
-          f"Found {len(entities)} entities")
+    # 5 paper entities + 1 research tracking entity = at least 6
+    check("Memory has at least 6 entities",
+          len(entities) >= 6,
+          f"Found {len(entities)} entities (expect 5 papers + research tracker)")
 
     entity_text = ""
     for ent in entities:

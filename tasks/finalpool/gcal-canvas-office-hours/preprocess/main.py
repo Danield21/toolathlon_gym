@@ -17,7 +17,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -46,14 +46,21 @@ BOOKING_DATA = [
 
 
 def get_canvas_students(cur):
-    """Try to get real student names from Canvas DB for an Analytics/Algorithms course."""
+    """Get real student names from Canvas DB for an Applied Analytics & Algorithms course.
+
+    Uses course_code prefix 'AAA-' plus full course name to disambiguate from any
+    unrelated courses that might share 'Analytics' or 'Algorithm' keywords. The
+    DISTINCT + ORDER BY name keeps output deterministic across any number of
+    matching course offerings, and selects the first 6 unique names.
+    """
     try:
         cur.execute("""
             SELECT DISTINCT u.name, u.id
             FROM canvas.users u
             JOIN canvas.enrollments e ON u.id = e.user_id
             JOIN canvas.courses c ON e.course_id = c.id
-            WHERE c.name ILIKE '%%Analytics%%Algorithm%%'
+            WHERE c.course_code LIKE 'AAA-%%'
+              AND c.name ILIKE '%%Applied Analytics%%Algorithms%%'
               AND e.type = 'StudentEnrollment'
             ORDER BY u.name
             LIMIT 10

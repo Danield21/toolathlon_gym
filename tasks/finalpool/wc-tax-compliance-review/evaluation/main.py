@@ -17,8 +17,9 @@ DB = {
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
-# Official rates from mock website (state base rates only)
-OFFICIAL_RATES = {
+# Official rates from mock website (state base rates only).
+# Kept as a fallback if the mock HTML cannot be parsed.
+FALLBACK_OFFICIAL_RATES = {
     "CA": 7.25,
     "FL": 6.50,
     "NY": 8.875,
@@ -27,6 +28,60 @@ OFFICIAL_RATES = {
 }
 
 COMPLIANCE_THRESHOLD = 0.25
+
+
+def load_official_rates_from_mock():
+    """Parse the mock tax-authority website (localhost:30205 or the extracted
+    tmp/mock_pages/index.html file) and return a dict of state_code -> base_rate.
+    Falls back to FALLBACK_OFFICIAL_RATES if parsing fails."""
+    import re
+
+    html = None
+    # Prefer live HTTP (most accurate to what the agent sees)
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://localhost:30205/", timeout=2) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        pass
+    if not html:
+        # Fall back to extracted file on disk
+        task_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        candidates = [
+            os.path.join(task_root, "tmp", "mock_pages", "index.html"),
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                try:
+                    with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                        html = f.read()
+                    break
+                except Exception:
+                    continue
+    if not html:
+        return dict(FALLBACK_OFFICIAL_RATES)
+
+    # Extract <td> cells sequentially; then parse consecutive pairs (STATE, RATE)
+    cells = re.findall(r"<td[^>]*>\s*([^<]+?)\s*</td>", html)
+    rates = {}
+    i = 0
+    while i < len(cells) - 1:
+        cell = cells[i].strip()
+        if re.fullmatch(r"[A-Z]{2}", cell):
+            # Next numeric cell within window of 2
+            for j in (1, 2):
+                if i + j < len(cells):
+                    nxt = cells[i + j].strip().replace("%", "")
+                    try:
+                        rates[cell] = float(nxt)
+                        break
+                    except ValueError:
+                        continue
+        i += 1
+    return rates or dict(FALLBACK_OFFICIAL_RATES)
+
+
+OFFICIAL_RATES = load_official_rates_from_mock()
 
 
 def record(name, passed, detail=""):
@@ -133,6 +188,11 @@ def check_excel(agent_workspace):
         record("Rate Comparison has correct row count",
                len(rows) >= len(expected),
                f"Expected {len(expected)}, got {len(rows)}")
+        # Optional: verify states are sorted alphabetically (common convention)
+        state_col = [safe_str(r[0]).upper() for r in rows if r and r[0]]
+        sorted_ok = state_col == sorted(state_col)
+        record("Rate Comparison states sorted alphabetically", sorted_ok,
+               f"Got order: {state_col}")
 
         for exp_state, exp_name, exp_wc, exp_off, exp_diff, exp_compl in expected:
             found = False
@@ -253,20 +313,34 @@ def check_word(agent_workspace):
         record("Word readable", False, str(e))
         return False
 
-    full_text = " ".join(p.text.lower() for p in doc.paragraphs)
+    import re
+    full_text = " ".join(p.text for p in doc.paragraphs)
+    full_lower = full_text.lower()
 
     record("Mentions 'compliance' or 'compliant'",
-           "complian" in full_text)
+           "complian" in full_lower)
     record("Mentions 'florida' or 'FL'",
-           "florida" in full_text or " fl " in full_text)
+           "florida" in full_lower or re.search(r"\bfl\b", full_text) is not None)
     record("Mentions 'new york' or 'NY'",
-           "new york" in full_text or " ny " in full_text)
+           "new york" in full_lower or re.search(r"\bny\b", full_text) is not None)
     record("Mentions 'discrepan' or 'non-compliant'",
-           "discrepan" in full_text or "non-compliant" in full_text or "non compliant" in full_text)
+           "discrepan" in full_lower or "non-compliant" in full_lower or "non compliant" in full_lower)
     record("Mentions 'recommend'",
-           "recommend" in full_text)
+           "recommend" in full_lower)
     record("Has at least 3 paragraphs", len(doc.paragraphs) >= 3,
            f"Got {len(doc.paragraphs)} paragraphs")
+
+    # Verify that at least one specific rate value appears (e.g., '6.0' for FL or '4.0' for NY)
+    try:
+        expected_disc = [e for e in compute_expected() if e[5] == "No"]
+        for st, _, wc_rate, off_rate, diff, _ in expected_disc:
+            wc_str = f"{wc_rate:.2f}"
+            off_str = f"{off_rate:.2f}"
+            has_rate = wc_str in full_text or off_str in full_text or f"{wc_rate:.3f}" in full_text
+            record(f"Word mentions rate value for {st}", has_rate,
+                   f"Neither {wc_str} nor {off_str} found")
+    except Exception as e:
+        print(f"  WARN: could not load expected discrepancies: {e}")
 
     return True
 

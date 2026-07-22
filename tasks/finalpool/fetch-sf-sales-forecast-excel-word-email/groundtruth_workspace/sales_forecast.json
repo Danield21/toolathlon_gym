@@ -1,0 +1,42 @@
+[
+  {
+    "region": "Asia Pacific",
+    "current_orders": 4198,
+    "current_revenue": 642644.81,
+    "growth_rate_pct": 8.5,
+    "forecasted_revenue": 697269.62,
+    "revenue_increase": 54624.81
+  },
+  {
+    "region": "Europe",
+    "current_orders": 4100,
+    "current_revenue": 648798.47,
+    "growth_rate_pct": 3.2,
+    "forecasted_revenue": 669560.02,
+    "revenue_increase": 20761.55
+  },
+  {
+    "region": "Latin America",
+    "current_orders": 3697,
+    "current_revenue": 549129.15,
+    "growth_rate_pct": 6.8,
+    "forecasted_revenue": 586469.93,
+    "revenue_increase": 37340.78
+  },
+  {
+    "region": "Middle East",
+    "current_orders": 3872,
+    "current_revenue": 602107.55,
+    "growth_rate_pct": 5.4,
+    "forecasted_revenue": 634621.36,
+    "revenue_increase": 32513.81
+  },
+  {
+    "region": "North America",
+    "current_orders": 4133,
+    "current_revenue": 606318.35,
+    "growth_rate_pct": 4.1,
+    "forecasted_revenue": 631177.4,
+    "revenue_increase": 24859.05
+  }
+]

@@ -107,12 +107,12 @@ def check_excel(agent_workspace, groundtruth_workspace):
                           num_close(a_row[3], expected_price, 5.0),
                           f"Expected {expected_price}, got {a_row[3]}")
             if len(a_row) > 4 and len(g_row) > 4:
-                check(f"'{key}' Total_Return_Pct",
-                      num_close(a_row[4], g_row[4], 5.0),
+                check(f"'{key}' Total_Return_Pct (tol 1.5)",
+                      num_close(a_row[4], g_row[4], 1.5),
                       f"Expected {g_row[4]}, got {a_row[4]}")
             if len(a_row) > 5 and len(g_row) > 5:
-                check(f"'{key}' Annualized_Volatility_Pct",
-                      num_close(a_row[5], g_row[5], 5.0),
+                check(f"'{key}' Annualized_Volatility_Pct (tol 1.5)",
+                      num_close(a_row[5], g_row[5], 1.5),
                       f"Expected {g_row[5]}, got {a_row[5]}")
 
     # Risk_Metrics
@@ -139,8 +139,8 @@ def check_excel(agent_workspace, groundtruth_workspace):
                       num_close(a_row[1], g_row[1], 0.3),
                       f"Expected {g_row[1]}, got {a_row[1]}")
             if len(a_row) > 2 and len(g_row) > 2:
-                check(f"'{key}' Max_Drawdown_Pct",
-                      num_close(a_row[2], g_row[2], 5.0),
+                check(f"'{key}' Max_Drawdown_Pct (tol 1.5)",
+                      num_close(a_row[2], g_row[2], 1.5),
                       f"Expected {g_row[2]}, got {a_row[2]}")
 
     # Portfolio_Summary
@@ -162,17 +162,27 @@ def check_excel(agent_workspace, groundtruth_workspace):
         check("Total_Holdings = 5",
               num_close(a_data.get("total_holdings"), 5, 0),
               f"Got {a_data.get('total_holdings')}")
+        # Use groundtruth values for Best/Worst performers (which were computed correctly)
+        gt_bp = g_data.get("best_performer")
+        gt_wp = g_data.get("worst_performer")
         bp = a_data.get("best_performer")
-        check("Best_Performer is GOOGL",
-              bp is not None and "GOOGL" in str(bp).upper(),
-              f"Got {bp}")
+        check(f"Best_Performer matches GT '{gt_bp}'",
+              bp is not None and str(bp).upper().strip() == str(gt_bp).upper().strip(),
+              f"Got {bp}, expected {gt_bp}")
         wp = a_data.get("worst_performer")
-        check("Worst_Performer is AMZN",
-              wp is not None and "AMZN" in str(wp).upper(),
-              f"Got {wp}")
-        check("Avg_Total_Return_Pct",
+        check(f"Worst_Performer matches GT '{gt_wp}'",
+              wp is not None and str(wp).upper().strip() == str(gt_wp).upper().strip(),
+              f"Got {wp}, expected {gt_wp}")
+        # Highest/Lowest volatility should be present
+        check("Highest_Volatility metric present",
+              a_data.get("highest_volatility") is not None,
+              f"Got {a_data.get('highest_volatility')}")
+        check("Lowest_Volatility metric present",
+              a_data.get("lowest_volatility") is not None,
+              f"Got {a_data.get('lowest_volatility')}")
+        check("Avg_Total_Return_Pct (tol 1.0)",
               num_close(a_data.get("avg_total_return_pct"),
-                        g_data.get("avg_total_return_pct"), 5.0),
+                        g_data.get("avg_total_return_pct"), 1.0),
               f"Expected {g_data.get('avg_total_return_pct')}, got {a_data.get('avg_total_return_pct')}")
 
 
@@ -195,6 +205,15 @@ def check_word(agent_workspace):
               "risk" in text or "volatility" in text or "sharpe" in text)
         check("Contains recommendation",
               "recommend" in text or "rebalanc" in text or "suggest" in text)
+        # Require each of the 4 sections mentioned in task.md
+        check("Contains executive summary",
+              "executive summary" in text or "summary" in text)
+        check("Contains individual stock performance analysis",
+              "individual" in text or all(sym.lower() in text for sym in ["amzn","googl","jpm","jnj","xom"]) or
+              sum(1 for sym in ["amzn","googl","jpm","jnj","xom"] if sym in text) >= 3,
+              "Not enough stock symbol mentions")
+        check("Contains rebalancing/recommendations section",
+              "rebalanc" in text or "recommend" in text)
     except ImportError:
         check("python-docx available", False)
     except Exception as e:
@@ -218,10 +237,29 @@ def check_gform():
         if forms:
             form_id = forms[0][0]
             cur.execute("""
-                SELECT COUNT(*) FROM gform.questions WHERE form_id = %s
+                SELECT title, question_type FROM gform.questions WHERE form_id = %s
             """, (form_id,))
-            q_count = cur.fetchone()[0]
-            check("Form has >= 4 questions", q_count >= 4, f"Got {q_count}")
+            questions = cur.fetchall()
+            check("Form has >= 4 questions", len(questions) >= 4, f"Got {len(questions)}")
+
+            q_titles = " ".join((q[0] or "").lower() for q in questions)
+            q_types = set((q[1] or "").upper() for q in questions)
+
+            check("Form has rating/scale question",
+                  any(t in q_types for t in ["RATING", "SCALE", "LINEAR_SCALE", "LINEAR"])
+                  or "rating" in q_titles or "scale" in q_titles or "satisfaction" in q_titles,
+                  f"Types: {q_types}, titles: {q_titles[:200]}")
+            check("Form has multiple choice question (risk tolerance)",
+                  any(t in q_types for t in ["MULTIPLE_CHOICE", "RADIO", "MCQ"])
+                  and ("risk" in q_titles or "toleran" in q_titles),
+                  f"Types: {q_types}")
+            check("Form has short answer/comments question",
+                  any(t in q_types for t in ["SHORT_ANSWER", "SHORT", "PARAGRAPH", "TEXT"])
+                  and ("comment" in q_titles or "feedback" in q_titles or "additional" in q_titles),
+                  f"Types: {q_types}")
+            check("Form has communication frequency question",
+                  "frequenc" in q_titles or "communication" in q_titles,
+                  f"Titles: {q_titles[:200]}")
         cur.close()
         conn.close()
     except Exception as e:
@@ -251,9 +289,19 @@ def check_email():
             rows = cur.fetchall()
         check("Portfolio review email sent", len(rows) > 0, f"Found {len(rows)}")
         if rows:
-            to_str = str(rows[0][1]).lower() if rows[0][1] else ""
-            check("Email to investment_committee",
-                  "investment_committee" in to_str, f"To: {rows[0][1]}")
+            # Require exact subject match
+            exact_match = False
+            for subj, to, body in rows:
+                if (subj or "").strip().lower() == "q1 2025 portfolio performance review":
+                    exact_match = True
+                    to_str = str(to).lower() if to else ""
+                    check("Email to investment_committee@company.com",
+                          "investment_committee@company.com" in to_str,
+                          f"To: {to}")
+                    break
+            check("Email subject is exactly 'Q1 2025 Portfolio Performance Review'",
+                  exact_match,
+                  f"Subjects: {[r[0] for r in rows]}")
         cur.close()
         conn.close()
     except Exception as e:

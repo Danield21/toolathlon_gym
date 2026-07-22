@@ -122,25 +122,64 @@ def main():
                 # Total_Employees
                 if not num_close(a_row[1], g_row[1], 1):
                     all_errors.append(f"{g_row[0]} Total_Employees: {a_row[1]} vs {g_row[1]}")
+                # High_School_Count (idx 2), Bachelor_Count (idx 3), Masters_Count (idx 4), PhD_Count (idx 5)
+                for col_idx, col_name in [(2, "High_School_Count"), (3, "Bachelor_Count"),
+                                           (4, "Masters_Count"), (5, "PhD_Count")]:
+                    if len(a_row) > col_idx and len(g_row) > col_idx:
+                        if not num_close(a_row[col_idx], g_row[col_idx], 0):
+                            all_errors.append(
+                                f"{g_row[0]} {col_name}: {a_row[col_idx]} vs {g_row[col_idx]}"
+                            )
                 # Higher_Ed_Pct (index 6)
                 if len(a_row) > 6 and len(g_row) > 6:
-                    if not num_close(a_row[6], g_row[6], 0.5):
+                    if not num_close(a_row[6], g_row[6], 0.2):
                         all_errors.append(f"{g_row[0]} Higher_Ed_Pct: {a_row[6]} vs {g_row[6]}")
             print("    Done.")
 
-    # --- Check 2: GForm exists ---
+    # --- Check 2: GForm exists with correct structure ---
     print("Checking Google Form...")
+    import json as _json
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM gform.forms WHERE LOWER(title) LIKE '%training interest%'")
-        count = cur.fetchone()[0]
+        cur.execute("SELECT id, title FROM gform.forms WHERE LOWER(title) LIKE '%training interest%'")
+        forms = cur.fetchall()
+        if not forms:
+            all_errors.append("Google Form 'Training Interest Survey' not found")
+        else:
+            form_id = forms[0][0]
+            cur.execute("SELECT title, question_type, config FROM gform.questions WHERE form_id=%s ORDER BY position", (form_id,))
+            qs = cur.fetchall()
+            if len(qs) != 4:
+                all_errors.append(f"GForm has {len(qs)} questions, expected 4")
+            q_titles_low = [(q[0] or "").lower() for q in qs]
+            has_dept = any("department" in t for t in q_titles_low)
+            has_edu = any("education" in t for t in q_titles_low)
+            has_interest = any("interest" in t or "area" in t for t in q_titles_low)
+            has_format = any("format" in t or "prefer" in t for t in q_titles_low)
+            if not has_dept: all_errors.append("GForm missing Department question")
+            if not has_edu: all_errors.append("GForm missing Education level question")
+            if not has_interest: all_errors.append("GForm missing training interest question")
+            if not has_format: all_errors.append("GForm missing training format question")
+
+            # Verify option sets for MC questions
+            interest_opts_expected = {"Technical Skills", "Leadership", "Communication", "Data Analysis"}
+            format_opts_expected = {"In-Person Workshop", "Online Self-Paced", "Live Virtual", "On-the-Job Coaching"}
+            for title, qtype, config in qs:
+                t_low = (title or "").lower()
+                try:
+                    cfg = config if isinstance(config, dict) else _json.loads(config) if config else {}
+                    opts = set(str(o).strip() for o in (cfg.get("options") or []))
+                except Exception:
+                    opts = set()
+                if "interest" in t_low or "area" in t_low:
+                    if not interest_opts_expected.issubset(opts):
+                        all_errors.append(f"Training interest options missing: expected {interest_opts_expected}, got {opts}")
+                if "format" in t_low or "prefer" in t_low:
+                    if not format_opts_expected.issubset(opts):
+                        all_errors.append(f"Training format options missing: expected {format_opts_expected}, got {opts}")
         cur.close()
         conn.close()
-        if count == 0:
-            all_errors.append("Google Form 'Training Interest Survey' not found in gform.forms")
-        else:
-            print(f"    GForm found ({count} matching forms)")
     except Exception as e:
         all_errors.append(f"Error checking GForm: {e}")
 
@@ -150,16 +189,25 @@ def main():
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
         cur.execute("""
-            SELECT COUNT(*) FROM email.messages
+            SELECT subject, body_text FROM email.messages
             WHERE to_addr::text ILIKE '%training@company.com%'
         """)
-        count = cur.fetchone()[0]
+        rows = cur.fetchall()
         cur.close()
         conn.close()
-        if count == 0:
+        if not rows:
             all_errors.append("No email sent to training@company.com")
         else:
-            print(f"    Email found ({count} messages)")
+            # Subject or body must mention education/analysis/training findings
+            valid = False
+            for subj, body in rows:
+                txt = ((subj or "") + " " + (body or "")).lower()
+                if ("education" in txt or "training" in txt) and ("analysis" in txt or "finding" in txt or "distribution" in txt or "insight" in txt):
+                    valid = True
+                    break
+            if not valid:
+                all_errors.append("Email does not mention education analysis/findings/insights in subject or body")
+            print(f"    Email found ({len(rows)} messages)")
     except Exception as e:
         all_errors.append(f"Error checking email: {e}")
 

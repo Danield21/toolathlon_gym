@@ -41,16 +41,40 @@ def check_gcal_events(cur):
     # Check events span at least 7 distinct calendar dates (in any timezone representation)
     if events:
         days = set()
-        for _, summary, start_dt, _ in events:
+        # Duration should be 1 hour per event
+        bad_durations = 0
+        # Meal time bands (hours UTC or local)
+        breakfast_count = 0
+        lunch_count = 0
+        dinner_count = 0
+        for _, summary, start_dt, end_dt in events:
             if start_dt:
-                # Use the date from the stored datetime; timezone shifts may move some
-                # events to adjacent dates, so we just need at least 7 distinct dates
                 if hasattr(start_dt, 'date'):
                     days.add(start_dt.date())
                 else:
                     days.add(str(start_dt)[:10])
+            if start_dt and end_dt:
+                try:
+                    dur = (end_dt - start_dt).total_seconds() / 3600.0
+                    if abs(dur - 1.0) > 0.1:
+                        bad_durations += 1
+                except Exception:
+                    pass
+            # Hour buckets: breakfast 7AM, lunch 11:30AM, dinner 6PM (any TZ form)
+            if start_dt and hasattr(start_dt, 'hour'):
+                h = start_dt.hour
+                # Accept UTC offset variations. America/New_York is -5 (EST) or -4 (EDT)
+                # local 7AM -> 11 or 12 UTC; local 11:30 -> 15:30 or 16:30; local 18:00 -> 22 or 23 UTC
+                if h in (7, 11, 12) or h == 7:
+                    breakfast_count += 1
+                elif h == 11 or h in (15, 16):
+                    lunch_count += 1
+                elif h in (18, 22, 23):
+                    dinner_count += 1
         if len(days) < 7:
             errors.append(f"Events span {len(days)} days, expected at least 7")
+        if bad_durations > 2:
+            errors.append(f"{bad_durations} events do not have 1-hour duration")
 
     return errors
 
@@ -91,8 +115,9 @@ def check_excel(workspace):
             errors.append("Shopping List sheet missing Ingredient header")
 
         data_rows = sum(1 for row in ws.iter_rows(min_row=2) if row[0].value is not None)
-        if data_rows < 5:
-            errors.append(f"Shopping List has {data_rows} ingredients, expected at least 5")
+        # 21 recipes should yield at least 15 unique ingredients (trivial floor was 5)
+        if data_rows < 15:
+            errors.append(f"Shopping List has {data_rows} ingredients, expected at least 15")
 
     return errors
 

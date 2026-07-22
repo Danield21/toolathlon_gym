@@ -21,21 +21,36 @@ def num_close(a, b, tol=1.0):
 
 def extract_pdf_text(path):
     """Extract text from PDF using available libraries."""
-    try:
-        from pypdf import PdfReader
-        reader = PdfReader(path)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() or ""
-        return text
-    except ImportError:
-        pass
+    for mod_name, klass in [
+        ("pypdf", "PdfReader"),
+        ("PyPDF2", "PdfReader"),
+    ]:
+        try:
+            mod = __import__(mod_name)
+            cls = getattr(mod, klass)
+            reader = cls(path)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() or ""
+            return text
+        except (ImportError, AttributeError):
+            continue
     try:
         import pdfplumber
         text = ""
         with pdfplumber.open(path) as pdf:
             for page in pdf.pages:
                 text += page.extract_text() or ""
+        return text
+    except ImportError:
+        pass
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(path)
+        text = ""
+        for page in doc:
+            text += page.get_text() or ""
+        doc.close()
         return text
     except ImportError:
         pass
@@ -98,17 +113,35 @@ def main():
     grand_total = sum(float(r[2]) for r in db_regions)
     top_region = max(db_regions, key=lambda x: float(x[2]))
 
+    # Format-tolerant numeric matching: PDF text may have commas/$ signs
+    text_normalized = text.replace(",", "").replace("$", "")
+
     # Check that order counts appear in the PDF
     for r in db_regions:
         region_name = r[0]
         order_count = str(r[1])
-        if order_count not in text:
+        if order_count not in text_normalized:
             all_errors.append(f"PDF missing order count {order_count} for {region_name}")
 
     # Check total orders
     total_orders = str(sum(r[1] for r in db_regions))
-    if total_orders not in text:
+    if total_orders not in text_normalized:
         all_errors.append(f"PDF missing total orders: {total_orders}")
+
+    # Check revenue per region appears (format-tolerant)
+    for r in db_regions:
+        region_name = r[0]
+        revenue_int = str(int(round(float(r[2]))))
+        # Look for either exact 2-decimal or integer match
+        revenue_dec = f"{float(r[2]):.2f}".replace(",", "")
+        if revenue_dec not in text_normalized and revenue_int not in text_normalized:
+            all_errors.append(f"PDF missing revenue ~{revenue_dec} for {region_name}")
+
+    # Check total revenue appears
+    grand_total_int = str(int(round(grand_total)))
+    grand_total_dec = f"{grand_total:.2f}".replace(",", "")
+    if grand_total_dec not in text_normalized and grand_total_int not in text_normalized:
+        all_errors.append(f"PDF missing grand total revenue ~{grand_total_dec}")
 
     # Check top region mentioned
     if top_region[0].lower() not in text:
@@ -117,27 +150,35 @@ def main():
     if not all_errors:
         print("    PASS")
 
-    # --- Non-blocking: Check Google Sheet in DB ---
-    print("  Checking Google Sheet (non-blocking)...")
+    # --- BLOCKING: Check Google Sheet in DB ---
+    print("  Checking Google Sheet...")
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
-        cur.execute("SELECT id, title FROM gsheet.spreadsheets WHERE LOWER(title) LIKE '%regional%sales%'")
+        cur.execute("""
+            SELECT id, title FROM gsheet.spreadsheets
+            WHERE LOWER(title) = LOWER('Regional Sales Dashboard')
+               OR LOWER(title) LIKE '%regional sales dashboard%'
+        """)
         sheets = cur.fetchall()
-        if sheets:
-            print(f"    Found spreadsheet: {sheets[0][1]}")
-            # Check for overview sheet
-            cur.execute("SELECT id, title FROM gsheet.sheets WHERE spreadsheet_id = %s AND LOWER(title) = 'overview'", (sheets[0][0],))
-            overview = cur.fetchall()
-            if overview:
-                print("    Found 'Overview' sheet")
-            else:
-                print("    WARNING: 'Overview' sheet not found (non-blocking)")
+        if not sheets:
+            all_errors.append("Google Sheet 'Regional Sales Dashboard' not found")
         else:
-            print("    WARNING: Regional Sales Dashboard spreadsheet not found (non-blocking)")
+            sid = sheets[0][0]
+            cur.execute("SELECT id, title FROM gsheet.sheets WHERE spreadsheet_id = %s AND LOWER(title) = 'overview'", (sid,))
+            overview = cur.fetchall()
+            if not overview:
+                all_errors.append("Google Sheet 'Overview' tab not found")
+            else:
+                tab_id = overview[0][0]
+                cur.execute("SELECT COUNT(*) FROM gsheet.cells WHERE sheet_id = %s", (tab_id,))
+                cell_count = cur.fetchone()[0]
+                # 5 regions * 6 cols = 30 + header 6 = 36 minimum cells expected
+                if cell_count < 30:
+                    all_errors.append(f"Google Sheet 'Overview' has only {cell_count} cells (expected >=30)")
         conn.close()
     except Exception as e:
-        print(f"    WARNING: GSheet DB check error: {e} (non-blocking)")
+        all_errors.append(f"GSheet DB check error: {e}")
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

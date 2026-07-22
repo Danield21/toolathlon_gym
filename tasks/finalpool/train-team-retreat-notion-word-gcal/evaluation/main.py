@@ -26,6 +26,44 @@ PASS_COUNT = 0
 FAIL_COUNT = 0
 
 
+def get_valid_train_codes():
+    """Query the rail mock for valid train codes on the retreat dates/routes.
+
+    Returns a dict with keys 'outbound' and 'return', each mapping to a set of
+    accepted train codes (lowercased, e.g. {'g235', 'g168'}). The two telecode
+    pairs (VNP=Beijing, SHH=Shanghai) and (QFB=Qufu) are static for the mock.
+    Falls back to the hardcoded set if DB is unavailable.
+    """
+    fallback = {
+        "outbound": {"g235", "g168"},
+        "return": {"g236", "g167"},
+    }
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT lower(station_train_code) FROM train.trains "
+            "WHERE depart_date = '2026-03-12' "
+            "  AND from_station_telecode IN ('VNP','SHH') "
+            "  AND to_station_telecode = 'QFB'"
+        )
+        outbound = {r[0] for r in cur.fetchall() if r[0]}
+        cur.execute(
+            "SELECT lower(station_train_code) FROM train.trains "
+            "WHERE depart_date = '2026-03-15' "
+            "  AND from_station_telecode = 'QFB' "
+            "  AND to_station_telecode IN ('VNP','SHH')"
+        )
+        retn = {r[0] for r in cur.fetchall() if r[0]}
+        cur.close()
+        conn.close()
+        if outbound and retn:
+            return {"outbound": outbound, "return": retn}
+    except Exception:
+        pass
+    return fallback
+
+
 def record(name, passed, detail=""):
     global PASS_COUNT, FAIL_COUNT
     if passed:
@@ -56,32 +94,41 @@ def check_word(agent_workspace):
 
     full_text = "\n".join(p.text for p in doc.paragraphs).lower()
 
-    # Check sections
-    has_overview = "retreat overview" in full_text or "overview" in full_text
-    has_outbound = "outbound" in full_text
-    has_return = "return" in full_text
-    has_notes = "schedule" in full_text or "notes" in full_text
-    record("Document has Retreat Overview section", has_overview, "Missing 'Retreat Overview'")
-    record("Document has Outbound Journey section", has_outbound, "Missing 'Outbound'")
-    record("Document has Return Journey section", has_return, "Missing 'Return'")
-    record("Document has Schedule Notes section", has_notes, "Missing 'Schedule Notes'")
+    # Check sections (require both keywords from each section title)
+    has_overview = "retreat overview" in full_text
+    has_outbound = "outbound journey" in full_text
+    has_return = "return journey" in full_text
+    has_notes = "schedule notes" in full_text
+    record("Document has 'Retreat Overview' section", has_overview, "Missing exact 'Retreat Overview'")
+    record("Document has 'Outbound Journey' section", has_outbound, "Missing 'Outbound Journey'")
+    record("Document has 'Return Journey' section", has_return, "Missing 'Return Journey'")
+    record("Document has 'Schedule Notes' section", has_notes, "Missing 'Schedule Notes'")
 
-    # Check participant names
-    has_alice = "alice" in full_text or "alice chen" in full_text
-    has_bob = "bob" in full_text or "bob liu" in full_text
-    has_david = "david" in full_text or "david zhang" in full_text
-    record("Document mentions team members (Alice, Bob, David)", has_alice and has_bob and has_david,
-           f"Alice:{has_alice}, Bob:{has_bob}, David:{has_david}")
+    # All FIVE participant names must be present
+    expected_names = [
+        ("Alice Chen", "alice"), ("Bob Liu", "bob"), ("Carol Wang", "carol"),
+        ("David Zhang", "david"), ("Emma Li", "emma"),
+    ]
+    for full_name, key in expected_names:
+        record(f"Document mentions {full_name}", key in full_text,
+               f"Looking for '{key}'")
 
-    # Check train codes
-    has_g235 = "g235" in full_text
-    has_g168 = "g168" in full_text
-    has_g236 = "g236" in full_text
-    has_g167 = "g167" in full_text
-    record("Document mentions outbound train codes (G235, G168)", has_g235 and has_g168,
-           f"G235:{has_g235}, G168:{has_g168}")
-    record("Document mentions return train codes (G236, G167)", has_g236 and has_g167,
-           f"G236:{has_g236}, G167:{has_g167}")
+    # Train codes: dynamically query rail mock for valid codes on the routes.
+    # Agent must mention at least one outbound code per departure-city route
+    # and at least one return code per return-city route.
+    codes = get_valid_train_codes()
+    out_present = sum(1 for c in codes["outbound"] if c in full_text)
+    ret_present = sum(1 for c in codes["return"] if c in full_text)
+    record(
+        f"Document mentions outbound train codes (any of {sorted(codes['outbound'])})",
+        out_present >= max(1, len(codes["outbound"])),
+        f"matched {out_present}/{len(codes['outbound'])} outbound codes",
+    )
+    record(
+        f"Document mentions return train codes (any of {sorted(codes['return'])})",
+        ret_present >= max(1, len(codes["return"])),
+        f"matched {ret_present}/{len(codes['return'])} return codes",
+    )
 
     # Check destination
     has_qufu = "qufu" in full_text
@@ -93,9 +140,10 @@ def check_notion():
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
+    # Strict: require exact title 'Team Retreat March 2026' (case-insensitive whole phrase)
     cur.execute("""
         SELECT id, properties FROM notion.pages
-        WHERE properties::text ILIKE '%Team Retreat%' OR properties::text ILIKE '%retreat march%'
+        WHERE properties::text ILIKE '%Team Retreat March 2026%'
     """)
     pages = cur.fetchall()
     cur.close()
@@ -118,8 +166,16 @@ def check_notion():
         record("Notion page has content blocks", has_content, f"Found {len(blocks)} blocks")
 
         if has_content:
-            has_train = "g235" in block_text or "g168" in block_text or "qufu" in block_text
-            record("Notion page mentions train codes or Qufu", has_train, block_text[:200])
+            # Tighter: require Qufu AND at least 2 valid train codes (dynamic).
+            valid_codes = get_valid_train_codes()
+            all_codes = valid_codes["outbound"] | valid_codes["return"]
+            train_codes = sum(1 for code in all_codes if code in block_text)
+            record("Notion page mentions Qufu", "qufu" in block_text, block_text[:200])
+            record("Notion page mentions at least 2 train codes",
+                   train_codes >= 2, f"Found {train_codes} train codes (valid set: {sorted(all_codes)}); text: {block_text[:200]}")
+            # Require all 5 participant names
+            for key in ("alice", "bob", "carol", "david", "emma"):
+                record(f"Notion page mentions {key}", key in block_text, block_text[:200])
 
 
 def check_gcal():
@@ -137,22 +193,53 @@ def check_gcal():
     cur.close()
     conn.close()
 
-    record("At least 2 retreat calendar events", len(events) >= 2,
+    record("Exactly 2 retreat calendar events", len(events) == 2,
            f"Found {len(events)} events")
 
     depart_events = [e for e in events if "depart" in (e[0] or "").lower()]
-    return_events = [e for e in events if "return" in (e[0] or "").lower() or "returns" in (e[0] or "").lower()]
+    return_events = [e for e in events if "return" in (e[0] or "").lower()]
     record("'Team Retreat Departs' event exists", len(depart_events) >= 1,
            f"Found: {[e[0] for e in events]}")
     record("'Team Retreat Returns' event exists", len(return_events) >= 1,
            f"Found: {[e[0] for e in events]}")
 
+    # Validate exact start/end datetimes per task.md
+    def fmt_dt(dt):
+        try:
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return str(dt) if dt else ""
+
     if depart_events:
         ev = depart_events[0]
-        desc = (ev[3] or "").lower()
-        has_names = "alice" in desc or "bob" in desc or "carol" in desc
-        record("Depart event description mentions team members", has_names,
-               f"Description: {desc[:200]}")
+        summary, start_dt, end_dt, desc = ev
+        record("Depart event title is exactly 'Team Retreat Departs'",
+               (summary or "").strip() == "Team Retreat Departs",
+               f"Got: {summary}")
+        record("Depart event start = 2026-03-12 17:00:00",
+               fmt_dt(start_dt) == "2026-03-12 17:00:00", f"Got: {fmt_dt(start_dt)}")
+        record("Depart event end = 2026-03-12 20:00:00",
+               fmt_dt(end_dt) == "2026-03-12 20:00:00", f"Got: {fmt_dt(end_dt)}")
+        desc_low = (desc or "").lower()
+        # Description must mention all FIVE team members
+        for key in ("alice", "bob", "carol", "david", "emma"):
+            record(f"Depart description mentions {key}",
+                   key in desc_low, f"Description: {desc_low[:200]}")
+
+    if return_events:
+        ev = return_events[0]
+        summary, start_dt, end_dt, desc = ev
+        record("Return event title is exactly 'Team Retreat Returns'",
+               (summary or "").strip() == "Team Retreat Returns",
+               f"Got: {summary}")
+        record("Return event start = 2026-03-15 14:00:00",
+               fmt_dt(start_dt) == "2026-03-15 14:00:00", f"Got: {fmt_dt(start_dt)}")
+        record("Return event end = 2026-03-15 18:00:00",
+               fmt_dt(end_dt) == "2026-03-15 18:00:00", f"Got: {fmt_dt(end_dt)}")
+        desc_low = (desc or "").lower()
+        for key in ("alice", "bob", "carol", "david", "emma"):
+            record(f"Return description mentions {key}",
+                   key in desc_low, f"Description: {desc_low[:200]}")
 
 
 def check_email():
@@ -160,23 +247,40 @@ def check_email():
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
+    # Strict: must be sent to hr@company.com AND have exact subject
     cur.execute("""
         SELECT to_addr, subject, body_text FROM email.messages
-        WHERE subject ILIKE '%retreat%' OR subject ILIKE '%travel confirmed%'
+        WHERE to_addr::text ILIKE '%hr@company.com%'
     """)
-    messages = cur.fetchall()
+    recipient_msgs = cur.fetchall()
     cur.close()
     conn.close()
 
-    all_msgs = list(messages)
-    record("Email about retreat sent", len(all_msgs) >= 1,
-           f"Found {len(all_msgs)} matching emails")
+    record("Email sent to hr@company.com",
+           len(recipient_msgs) >= 1,
+           f"Found {len(recipient_msgs)} emails to hr@company.com")
 
-    if all_msgs:
-        to_raw = all_msgs[0][0]
-        to_str = str(to_raw).lower() if to_raw else ""
-        record("Email addressed to hr@company.com", "hr@company.com" in to_str,
-               f"To: {to_str[:100]}")
+    target = None
+    for to_addr, subject, body in recipient_msgs:
+        if (subject or "").strip() == "Team Retreat Travel Confirmed":
+            target = (to_addr, subject, body)
+            break
+    record("Email subject is exactly 'Team Retreat Travel Confirmed'",
+           target is not None,
+           f"Subjects: {[m[1] for m in recipient_msgs]}")
+
+    if target:
+        to_addr, subject, body = target
+        body_low = (body or "").lower()
+        # Body must mention all 5 participants and at least 2 train codes
+        for key in ("alice", "bob", "carol", "david", "emma"):
+            record(f"Email body mentions {key}", key in body_low, f"Body: {body_low[:200]}")
+        valid_codes = get_valid_train_codes()
+        all_codes = valid_codes["outbound"] | valid_codes["return"]
+        train_codes = sum(1 for code in all_codes if code in body_low)
+        record("Email body mentions at least 2 train codes",
+               train_codes >= 2,
+               f"Found {train_codes} (valid set: {sorted(all_codes)}); body: {body_low[:200]}")
 
 
 def main():
@@ -210,11 +314,11 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:
-        print("FAIL")
+        print(f"FAIL: {FAIL_COUNT} check(s) failed")
         sys.exit(1)
 
 

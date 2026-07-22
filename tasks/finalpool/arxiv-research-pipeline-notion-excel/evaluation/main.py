@@ -63,50 +63,239 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                         if h:
                             check(f"{sheet_name} has {h} column", h in headers, f"headers: {headers[:10]}")
                     # Check row count
-                    gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
-                    data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-                    min_rows = max(1, len(gt_rows) - 2)
-                    check(f"{sheet_name} has >= {min_rows} data rows", len(data_rows) >= min_rows, f"got {len(data_rows)}")
+                    gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True)
+                               if any(c is not None for c in r)]
+                    data_rows = [r for r in ws.iter_rows(min_row=2, values_only=True)
+                                 if any(c is not None for c in r)]
 
-                    # Cell value comparison against groundtruth
-                    header_map = {h: i for i, h in enumerate(headers)}
-                    gt_header_map = {h: i for i, h in enumerate(gt_headers)}
-                    for ri in range(min(3, len(gt_rows), len(data_rows))):
-                        gt_row = gt_rows[ri]
-                        agent_row = data_rows[ri]
-                        for ci, gt_h in enumerate(gt_headers):
-                            if not gt_h or ci >= len(gt_row):
+                    sn_lower = sheet_name.lower()
+                    if "research_gap" in sn_lower or "research gap" in sn_lower:
+                        # Task: at least 4 identified gaps.
+                        check(f"{sheet_name} has >= 4 data rows", len(data_rows) >= 4,
+                              f"got {len(data_rows)}")
+                        # Validate Priority column values are in expected enum.
+                        header_map = {h: i for i, h in enumerate(headers)}
+                        prio_idx = header_map.get("priority", -1)
+                        if prio_idx >= 0:
+                            valid_priorities = {"critical", "important", "nice-to-have"}
+                            invalid = []
+                            for r in data_rows:
+                                if prio_idx < len(r) and r[prio_idx] is not None:
+                                    val = str(r[prio_idx]).strip().lower()
+                                    if val and val not in valid_priorities:
+                                        invalid.append(val)
+                            check(f"{sheet_name} Priority values are in {{Critical,Important,Nice-to-have}}",
+                                  not invalid, f"invalid: {invalid[:5]}")
+                        # Verify all rows have non-empty Gap_Area, Current_State,
+                        # Opportunity, Priority.
+                        non_empty_ok = True
+                        for h in ["gap_area", "current_state", "opportunity", "priority"]:
+                            idx = header_map.get(h, -1)
+                            if idx < 0:
                                 continue
-                            gv = gt_row[ci]
-                            agent_ci = header_map.get(gt_h)
-                            if agent_ci is None or agent_ci >= len(agent_row):
+                            for r in data_rows:
+                                if idx >= len(r) or r[idx] is None or str(r[idx]).strip() == "":
+                                    non_empty_ok = False
+                                    break
+                            if not non_empty_ok:
+                                break
+                        check(f"{sheet_name} all rows non-empty in core columns",
+                              non_empty_ok, "")
+                    elif "paper_catalog" in sn_lower or "paper catalog" in sn_lower:
+                        # Task: at least 5 relevant papers. GT has only 3 rows
+                        # (illustrative). Validate >= 5 rows here.
+                        check(f"{sheet_name} has >= 5 data rows (task: at least 5 relevant papers)",
+                              len(data_rows) >= 5, f"got {len(data_rows)}")
+                        # Validate columns Paper_ID, Title, Authors, Year are non-empty.
+                        header_map = {h: i for i, h in enumerate(headers)}
+                        non_empty_ok = True
+                        for h in ["paper_id", "title", "authors", "year"]:
+                            idx = header_map.get(h, -1)
+                            if idx < 0:
                                 continue
-                            av = agent_row[agent_ci]
-                            gf = safe_float(gv)
-                            af = safe_float(av)
-                            if gf is not None and af is not None:
-                                tol = max(0.5, abs(gf) * 0.15)
-                                check(f"{sheet_name} R{ri+2} {gt_h} ~{gf:.1f}",
-                                      abs(gf - af) <= tol, f"got {af}")
-                            elif gv is not None and av is not None:
-                                gs = str(gv).strip().lower()
-                                avs = str(av).strip().lower()
-                                if gs:
-                                    check(f"{sheet_name} R{ri+2} {gt_h} text",
-                                          gs == avs or gs in avs or avs in gs,
-                                          f"expected {gs[:50]}, got {avs[:50]}")
+                            for r in data_rows:
+                                if idx >= len(r) or r[idx] is None or str(r[idx]).strip() == "":
+                                    non_empty_ok = False
+                                    break
+                            if not non_empty_ok:
+                                break
+                        check(f"{sheet_name} all rows non-empty in Paper_ID/Title/Authors/Year",
+                              non_empty_ok, "")
+                        # Validate sort order: Citation_Count descending.
+                        ci_idx = header_map.get("citation_count", -1)
+                        if ci_idx >= 0 and len(data_rows) >= 2:
+                            sort_ok = True
+                            prev = None
+                            for r in data_rows:
+                                if ci_idx >= len(r):
+                                    continue
+                                v = safe_float(r[ci_idx])
+                                if v is None:
+                                    continue
+                                if prev is not None and v > prev + 0.001:
+                                    sort_ok = False
+                                    break
+                                prev = v
+                            check(f"{sheet_name} sorted by Citation_Count descending",
+                                  sort_ok, "")
+                        # Anti-fabrication: Paper_IDs must match real injected
+                        # arxiv IDs (the 5 relevant ones). Reject the 2 noise
+                        # papers (Quantum/Ocean) and any fabricated IDs.
+                        pid_idx = header_map.get("paper_id", -1)
+                        if pid_idx >= 0:
+                            relevant_ids = {
+                                "2301.00001",  # LLM Reasoning Survey
+                                "2302.00002",  # Prompt Engineering Guide
+                                "2303.00003",  # In-Context Learning Theory
+                                "2304.00004",  # Chain-of-Thought Reasoning
+                                "2305.00005",  # Survey of In-Context Learning
+                            }
+                            noise_ids = {"2304.99901", "2305.99902"}
+                            seen_pids = []
+                            for r in data_rows:
+                                if pid_idx < len(r) and r[pid_idx] is not None:
+                                    seen_pids.append(str(r[pid_idx]).strip())
+                            included_relevant = relevant_ids & set(seen_pids)
+                            included_noise = noise_ids & set(seen_pids)
+                            check(
+                                f"{sheet_name} includes the 5 relevant arxiv IDs (no fabricated catalog)",
+                                len(included_relevant) == 5,
+                                f"included relevant: {included_relevant}, all seen: {seen_pids}",
+                            )
+                            check(
+                                f"{sheet_name} excludes noise papers (Quantum Computing, Ocean Modeling)",
+                                len(included_noise) == 0,
+                                f"noise leaked: {included_noise}",
+                            )
+                    elif "method_comparison" in sn_lower or "method comparison" in sn_lower:
+                        # GT has 3 illustrative methods - any valid method choices
+                        # acceptable. Just verify >=3 rows and required columns
+                        # are populated.
+                        check(f"{sheet_name} has >= 3 data rows", len(data_rows) >= 3,
+                              f"got {len(data_rows)}")
+                        header_map = {h: i for i, h in enumerate(headers)}
+                        non_empty_ok = True
+                        for h in ["method_name", "paper_source", "key_innovation", "applicability"]:
+                            idx = header_map.get(h, -1)
+                            if idx < 0:
+                                continue
+                            for r in data_rows:
+                                if idx >= len(r) or r[idx] is None or str(r[idx]).strip() == "":
+                                    non_empty_ok = False
+                                    break
+                            if not non_empty_ok:
+                                break
+                        check(f"{sheet_name} all rows non-empty in Method/Paper/Innovation/Applicability",
+                              non_empty_ok, "")
+                        # Validate Applicability enum
+                        ap_idx = header_map.get("applicability", -1)
+                        if ap_idx >= 0:
+                            valid_ap = {"high", "medium", "low"}
+                            invalid_ap = []
+                            for r in data_rows:
+                                if ap_idx < len(r) and r[ap_idx] is not None:
+                                    val = str(r[ap_idx]).strip().lower()
+                                    if val and val not in valid_ap:
+                                        invalid_ap.append(val)
+                            check(f"{sheet_name} Applicability values in {{High,Medium,Low}}",
+                                  not invalid_ap, f"invalid: {invalid_ap[:5]}")
+                    else:
+                        # Default: >= GT row count.
+                        check(f"{sheet_name} has >= {len(gt_rows)} data rows",
+                              len(data_rows) >= len(gt_rows), f"got {len(data_rows)}")
 
-    # Check Python script exists (terminal usage)
-    py_files = [f for f in os.listdir(agent_workspace) if f.endswith(".py")]
-    check("Python analysis script exists", len(py_files) >= 1, f"found: {py_files}")
+    # Check the specifically-named Python script and JSON outputs exist.
+    workspace_files = set(os.listdir(agent_workspace))
+    check(
+        "research_synthesizer.py exists",
+        "research_synthesizer.py" in workspace_files,
+        f"workspace: {sorted(workspace_files)[:25]}",
+    )
+    check(
+        "papers_metadata.json exists",
+        "papers_metadata.json" in workspace_files,
+        f"workspace: {sorted(workspace_files)[:25]}",
+    )
+    check(
+        "paper_contents.json exists",
+        "paper_contents.json" in workspace_files,
+        f"workspace: {sorted(workspace_files)[:25]}",
+    )
+    check(
+        "research_synthesis.json exists",
+        "research_synthesis.json" in workspace_files,
+        f"workspace: {sorted(workspace_files)[:25]}",
+    )
 
-    # Database checks
+    # Database checks - validate Notion title and heading content.
     try:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM notion.pages WHERE archived = false")
-        page_count = cur.fetchone()[0]
-        check("Notion page created", page_count >= 1, f"page count: {page_count}")
+        cur.execute("SELECT id, properties FROM notion.pages WHERE archived = false")
+        page_rows = cur.fetchall()
+
+        page_count = len(page_rows)
+        check("At least one non-archived Notion page exists", page_count >= 1,
+              f"page count: {page_count}")
+
+        # Find the page titled 'LLM Research Hub' (or similar).
+        hub_page_id = None
+        titles_seen = []
+        for pid, props in page_rows:
+            title = ""
+            try:
+                if isinstance(props, dict):
+                    title_obj = props.get("title", {})
+                    if isinstance(title_obj, dict):
+                        title_list = title_obj.get("title", [])
+                        if isinstance(title_list, list):
+                            for t in title_list:
+                                if isinstance(t, dict):
+                                    title += t.get("text", {}).get("content", "")
+            except Exception:
+                title = ""
+            titles_seen.append(title)
+            tl = title.lower()
+            if ("llm" in tl or "large language" in tl) and (
+                "research hub" in tl or "research" in tl
+            ):
+                hub_page_id = pid
+                break
+
+        check(
+            "Notion page 'LLM Research Hub' exists",
+            hub_page_id is not None,
+            f"Titles seen: {titles_seen[:10]}",
+        )
+
+        # Look for heading 'Large Language Model Research Dashboard' anywhere
+        # in notion.blocks under that page (or any block).
+        cur.execute(
+            """
+            SELECT parent_id, type, block_data FROM notion.blocks
+            WHERE archived = false
+            """
+        )
+        blocks = cur.fetchall()
+        joined = " ".join(json.dumps(c) if c is not None else "" for _, _, c in blocks).lower()
+        check(
+            "Notion contains 'Large Language Model Research Dashboard' heading",
+            "large language model research dashboard" in joined,
+            f"sample: {joined[:200]}",
+        )
+        # Heuristic: page should mention each of 4 topics from task.md.
+        # Use phrase-level matches (not loose substrings) to reduce false-positives.
+        for topic, kw in [
+            ("research landscape", "landscape"),
+            ("key papers", "key paper"),
+            ("methodology comparison", "methodology"),
+            ("research gaps", "research gap"),
+        ]:
+            check(
+                f"Notion page mentions topic: {topic}",
+                kw in joined,
+                f"sample: {joined[:200]}",
+            )
         conn.close()
     except Exception as e:
         check("DB checks", False, str(e))

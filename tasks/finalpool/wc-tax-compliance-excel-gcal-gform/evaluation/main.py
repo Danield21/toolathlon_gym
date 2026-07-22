@@ -130,8 +130,8 @@ def check_excel(agent_workspace, groundtruth_workspace):
                     if a_comp is not None and g_comp is not None and abs(a_comp - g_comp) > 5.0:
                         ss_mismatches += 1
 
-                if ss_mismatches > 3:
-                    errors.append(f"State Summary: {ss_mismatches} state mismatches (>3 threshold)")
+                if ss_mismatches > 1:
+                    errors.append(f"State Summary: {ss_mismatches} state mismatches (>1 threshold)")
 
         # --- Sheet 3: Compliance Overview ---
         agent_co = load_sheet_rows(wb_agent, "Compliance Overview")
@@ -183,23 +183,31 @@ def check_gcal():
 
         if len(rows) < 4:
             errors.append(f"Expected 4 tax filing deadline events in GCal, found {len(rows)}")
-        else:
-            # Check that Q1-Q4 labels are present
-            summaries = " ".join(str(r[0]) for r in rows).lower()
-            for q in ["q1", "q2", "q3", "q4"]:
-                if q not in summaries:
-                    errors.append(f"Missing '{q}' in calendar event summaries")
+            return errors
 
-            # Check dates (2026)
-            dates = [r[1] for r in rows]
-            from datetime import date
-            expected_dates = [date(2026, 4, 15), date(2026, 7, 15), date(2026, 10, 15), date(2026, 1, 15)]
-            for ed in expected_dates:
-                if ed not in dates:
-                    # Allow +/- 1 day tolerance
-                    close = any(abs((d - ed).days) <= 1 for d in dates)
-                    if not close:
-                        errors.append(f"Missing calendar event for date {ed}")
+        from datetime import date
+        # Enforce specific quarter label -> date mapping.
+        expected = {
+            "q1": date(2026, 4, 15),
+            "q2": date(2026, 7, 15),
+            "q3": date(2026, 10, 15),
+            "q4": date(2026, 1, 15),
+        }
+        import re
+        for q, ed in expected.items():
+            matched = False
+            for summary, dt in rows:
+                s_lower = (summary or "").lower()
+                # Require whole-word 'qN' in summary
+                if not re.search(r"\b" + q + r"\b", s_lower):
+                    continue
+                if dt is None:
+                    continue
+                if abs((dt - ed).days) <= 1:
+                    matched = True
+                    break
+            if not matched:
+                errors.append(f"No '{q.upper()}' event on {ed} (+/- 1 day) found in GCal")
 
     except Exception as e:
         errors.append(f"Error checking GCal: {e}")
@@ -238,9 +246,57 @@ def check_gform():
 
         # Check for key question topics
         q_titles = " ".join(str(q[0]) for q in questions).lower()
-        for keyword in ["vendor", "tax id", "state", "exempt"]:
+        for keyword in ["vendor", "tax id", "state", "exempt", "certificate"]:
             if keyword not in q_titles and keyword.replace(" ", "") not in q_titles.replace(" ", ""):
                 errors.append(f"Missing question about '{keyword}' in vendor form")
+
+        # Validate question type distribution
+        q_types = [str(q[1] or "").upper() for q in questions]
+        has_choice = any(t in ("RADIO", "CHOICEQUESTION", "MULTIPLE_CHOICE", "CHOICE") for t in q_types)
+        has_text = any(t in ("TEXT", "TEXTQUESTION", "SHORT_ANSWER") for t in q_types)
+        if not has_choice:
+            errors.append(f"No radio/choice question found. Types: {q_types}")
+        if not has_text:
+            errors.append(f"No short-text question found. Types: {q_types}")
+
+        # The tax-exempt question must offer Yes/No options (if an options table exists)
+        conn2 = psycopg2.connect(**DB)
+        cur2 = conn2.cursor()
+        try:
+            cur2.execute("""
+                SELECT table_name FROM information_schema.tables
+                WHERE table_schema='gform' AND table_name IN ('options', 'choices', 'question_options')
+            """)
+            opts_tbls = [r[0] for r in cur2.fetchall()]
+        except Exception:
+            opts_tbls = []
+        if opts_tbls:
+            opts_tbl = opts_tbls[0]
+            # Find the tax-exempt question id
+            exempt_q_id = None
+            cur2.execute(
+                f"SELECT id, title FROM gform.questions WHERE form_id = %s",
+                (form_id,),
+            )
+            for qid, qtitle in cur2.fetchall():
+                if "exempt" in (qtitle or "").lower():
+                    exempt_q_id = qid
+                    break
+            if exempt_q_id is not None:
+                try:
+                    cur2.execute(
+                        f"SELECT value FROM gform.{opts_tbl} WHERE question_id = %s",
+                        (exempt_q_id,),
+                    )
+                    vals = [str(r[0] or "").strip().lower() for r in cur2.fetchall()]
+                    has_yes = any(v == "yes" for v in vals)
+                    has_no = any(v == "no" for v in vals)
+                    if not (has_yes and has_no):
+                        errors.append(f"Tax-exempt question must offer Yes and No options; got: {vals}")
+                except Exception:
+                    pass
+        cur2.close()
+        conn2.close()
 
     except Exception as e:
         errors.append(f"Error checking GForm: {e}")

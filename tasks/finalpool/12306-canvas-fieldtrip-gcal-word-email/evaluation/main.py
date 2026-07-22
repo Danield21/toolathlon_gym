@@ -43,22 +43,25 @@ def record(name, passed, detail=""):
 
 def check_word_doc(agent_workspace):
     print("\n=== Check 1: Field_Trip_Notice.docx ===")
-    import glob
 
-    pattern = os.path.join(agent_workspace, "*.docx")
-    all_docx = glob.glob(pattern)
-    trip_docs = [f for f in all_docx if any(
-        kw in os.path.basename(f).lower()
-        for kw in ["field", "trip", "notice", "qufu", "fieldtrip"]
-    )]
+    # Require exact filename Field_Trip_Notice.docx (case-insensitive match
+    # to allow minor casing variations) per task spec line 9.
+    target_basename = "field_trip_notice.docx"
+    doc_path = None
+    try:
+        for fname in os.listdir(agent_workspace):
+            if fname.lower() == target_basename:
+                doc_path = os.path.join(agent_workspace, fname)
+                break
+    except Exception:
+        pass
 
-    if not trip_docs:
-        record("Field trip notice docx exists", False,
-               f"No matching docx found in {agent_workspace}")
+    if not doc_path:
+        record("Field_Trip_Notice.docx exists with exact filename", False,
+               f"Required exact filename Field_Trip_Notice.docx not found in {agent_workspace}")
         return
-    record("Field trip notice docx exists", True)
+    record("Field_Trip_Notice.docx exists with exact filename", True)
 
-    doc_path = trip_docs[0]
     try:
         import docx
         doc = docx.Document(doc_path)
@@ -68,26 +71,47 @@ def check_word_doc(agent_workspace):
     record("Word doc readable", True)
 
     headings = [p for p in doc.paragraphs if p.style.name.startswith("Heading")]
-    record("Word doc has at least 4 headings", len(headings) >= 4,
-           f"Found {len(headings)} headings")
+    heading_texts_lower = [p.text.strip().lower() for p in headings]
+    required_headings = ["trip overview", "schedule", "student requirements", "cost information"]
+    missing = [h for h in required_headings if not any(h in ht for ht in heading_texts_lower)]
+    record(
+        "Word doc has all 4 required headings (Trip Overview, Schedule, Student Requirements, Cost Information)",
+        len(missing) == 0,
+        f"Headings found: {heading_texts_lower}; missing: {missing}",
+    )
 
     full_text = " ".join(p.text for p in doc.paragraphs).lower()
 
+    # Tighten train number check: require both G235 and G236 (the
+    # outbound and return train numbers) - departure times alone are
+    # too coincidental to qualify as evidence of train numbers.
     has_g235 = "g235" in full_text
     has_g236 = "g236" in full_text
-    has_times = "17:30" in full_text and "15:00" in full_text
-    record("Contains G235 and G236 train numbers (or departure times)",
-           (has_g235 and has_g236) or has_times,
-           f"G235:{has_g235}, G236:{has_g236}, times:{has_times}")
+    record("Contains both G235 and G236 train numbers",
+           has_g235 and has_g236,
+           f"G235:{has_g235}, G236:{has_g236}")
 
     has_qufu = "qufu" in full_text
     has_beijing = "beijing" in full_text
     record("Contains Qufu and Beijing", has_qufu and has_beijing,
            f"Qufu:{has_qufu}, Beijing:{has_beijing}")
 
-    has_cost = "1106" in full_text
-    record("Contains round-trip cost 1106", has_cost,
-           f"Text snippet: {full_text[:300]}")
+    # Cost check: 1106 as round-trip total. Require it to appear in
+    # vicinity of the words 'total', 'round', 'cost', or 'per student'
+    # to avoid generic '1106' substring coincidences (e.g. dates, page nums).
+    cost_ok = False
+    for p in doc.paragraphs:
+        t = p.text.lower()
+        if ("1106" in t or "1,106" in t) and (
+            "total" in t or "round" in t or "cost" in t or "per student" in t
+        ):
+            cost_ok = True
+            break
+    record(
+        "Contains round-trip cost 1106 (with cost/total/round-trip context)",
+        cost_ok,
+        f"Text snippet: {full_text[:300]}",
+    )
 
 
 def check_gcal():
@@ -95,19 +119,74 @@ def check_gcal():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     cur.execute("""
-        SELECT summary, start_datetime FROM gcal.events
-        WHERE (
-            (start_datetime >= '2026-03-12' AND start_datetime < '2026-03-13')
-            OR (start_datetime >= '2026-03-15' AND start_datetime < '2026-03-16')
-        )
+        SELECT summary, start_datetime, end_datetime FROM gcal.events
+        WHERE start_datetime >= '2026-03-12' AND start_datetime < '2026-03-13'
         AND summary NOT ILIKE '%regular class%'
         ORDER BY start_datetime
     """)
-    events = cur.fetchall()
+    depart_events = cur.fetchall()
+    cur.execute("""
+        SELECT summary, start_datetime, end_datetime FROM gcal.events
+        WHERE start_datetime >= '2026-03-15' AND start_datetime < '2026-03-16'
+        AND summary NOT ILIKE '%regular class%'
+        ORDER BY start_datetime
+    """)
+    return_events = cur.fetchall()
     cur.close()
     conn.close()
-    record("At least 2 new field trip calendar events", len(events) >= 2,
-           f"Found {len(events)} events: {[e[0] for e in events]}")
+
+    # Outbound: G235 17:30 Beijing -> 19:16 Qufu (per GT doc).
+    # Spec: 1 hr before departure (16:30) to 1 hr after arrival (20:16).
+    # Tolerance: 15 min slack on each side.
+    has_depart = False
+    for s, st, et in depart_events:
+        if not s or not st or not et:
+            continue
+        sl = s.lower()
+        title_ok = ("field trip" in sl) and ("depart" in sl or "outbound" in sl or "qufu" in sl)
+        if not title_ok:
+            continue
+        try:
+            start_min = st.hour * 60 + st.minute
+            end_min = et.hour * 60 + et.minute
+        except Exception:
+            continue
+        # Dep 17:30 (1050), 1 hr before = 16:30 (990).
+        # Arr 19:16 (1156), 1 hr after = 20:16 (1216).
+        if start_min <= 990 + 15 and end_min >= 1216 - 15:
+            has_depart = True
+            break
+    record(
+        "Calendar 'Field Trip: Depart for Qufu' on Mar 12 covers ~16:30 to ~20:16 window",
+        has_depart,
+        f"Mar 12 events: {[(e[0], str(e[1]), str(e[2])) for e in depart_events]}",
+    )
+
+    # Return: G236 15:00 Qufu -> 16:46 Beijing (per GT doc).
+    # Window: 1 hr before departure (14:00) to 1 hr after arrival (17:46).
+    has_return = False
+    for s, st, et in return_events:
+        if not s or not st or not et:
+            continue
+        sl = s.lower()
+        title_ok = ("field trip" in sl) and ("return" in sl or "back" in sl or "beijing" in sl)
+        if not title_ok:
+            continue
+        try:
+            start_min = st.hour * 60 + st.minute
+            end_min = et.hour * 60 + et.minute
+        except Exception:
+            continue
+        # Dep 15:00 (900), 1 hr before = 14:00 (840).
+        # Arr 16:46 (1006), 1 hr after = 17:46 (1066).
+        if start_min <= 840 + 15 and end_min >= 1066 - 15:
+            has_return = True
+            break
+    record(
+        "Calendar 'Field Trip: Return to Beijing' on Mar 15 covers ~14:00 to ~17:46 window",
+        has_return,
+        f"Mar 15 events: {[(e[0], str(e[1]), str(e[2])) for e in return_events]}",
+    )
 
 
 def check_canvas_announcement():
@@ -115,18 +194,22 @@ def check_canvas_announcement():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     try:
+        # Tighten: title MUST contain 'field trip' (not just 'qufu') so that
+        # the check is not tautologically satisfied by 'qufu' appearing in
+        # both title and content. Content must include the train number AND
+        # the travel date for substantive evidence.
         cur.execute("""
             SELECT COUNT(*) FROM canvas.announcements
-            WHERE title ILIKE '%field%'
-               OR title ILIKE '%qufu%'
-               OR title ILIKE '%trip%'
-               OR title ILIKE '%travel%'
-               OR message ILIKE '%qufu%'
-               OR message ILIKE '%g235%'
+            WHERE title ILIKE '%field%trip%'
+            AND (message ILIKE '%g235%' OR message ILIKE '%g236%')
+            AND (message ILIKE '%march 12%' OR message ILIKE '%2026-03-12%' OR message ILIKE '%03/12%')
         """)
         cnt = cur.fetchone()[0]
-        record("Canvas announcement for field trip created", cnt >= 1,
-               f"Found {cnt} matching announcements")
+        record(
+            "Canvas announcement for field trip created (title 'field trip' AND content has train number AND travel date)",
+            cnt >= 1,
+            f"Found {cnt} matching announcements",
+        )
     except Exception as e:
         # Canvas may not have this table in test env
         record("Canvas announcement check (canvas table query)", False, str(e))
@@ -136,17 +219,20 @@ def check_canvas_announcement():
 
 def check_email():
     print("\n=== Check 4: Email to students@university.edu ===")
-    cnt = 0
-    sent = 0
+    # Tighten: require the email body mentions departure train, return train,
+    # AND the round-trip cost (1106). Just count >=1 with any subject is
+    # too lax. Use tables email.messages (outbound from professor) and
+    # email.sent_log if present.
+    matching_emails = []
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
         cur.execute(
-            "SELECT COUNT(*) FROM email.messages"
+            "SELECT subject, body_text FROM email.messages"
             " WHERE to_addr::text ILIKE '%students@university.edu%'"
             "   AND from_addr NOT ILIKE '%students@university.edu%'"
         )
-        cnt = cur.fetchone()[0]
+        matching_emails.extend(cur.fetchall())
         cur.close()
         conn.close()
     except Exception:
@@ -155,16 +241,54 @@ def check_email():
         conn2 = psycopg2.connect(**DB_CONFIG)
         cur2 = conn2.cursor()
         cur2.execute(
-            "SELECT COUNT(*) FROM email.sent_log"
+            "SELECT subject, body FROM email.sent_log"
             " WHERE to_addr::text ILIKE '%students@university.edu%'"
         )
-        sent = cur2.fetchone()[0]
+        matching_emails.extend(cur2.fetchall())
         cur2.close()
         conn2.close()
     except Exception:
         pass
-    record("Email sent to students@university.edu", cnt >= 1 or sent >= 1,
-           f"messages: {cnt}, sent_log: {sent}")
+
+    # Email exists?
+    record("Email sent to students@university.edu",
+           len(matching_emails) >= 1,
+           f"matching count: {len(matching_emails)}")
+
+    # Body mentions both train numbers AND the round-trip cost
+    body_ok = False
+    for subj, body in matching_emails:
+        full = ((subj or "") + " " + (body or "")).lower()
+        has_g235 = "g235" in full
+        has_g236 = "g236" in full
+        has_cost = "1106" in full or "1,106" in full
+        if has_g235 and has_g236 and has_cost:
+            body_ok = True
+            break
+    record("Email body contains both train numbers (G235, G236) and round-trip cost (1106)",
+           body_ok,
+           f"emails inspected: {len(matching_emails)}")
+
+    # Attachment check - per task line 15 'attaching the field trip notice'
+    att_count = 0
+    try:
+        conn3 = psycopg2.connect(**DB_CONFIG)
+        cur3 = conn3.cursor()
+        # Try email.attachments joined with email.messages
+        cur3.execute("""
+            SELECT COUNT(*) FROM email.attachments a
+            JOIN email.messages m ON a.message_id = m.id
+            WHERE m.to_addr::text ILIKE '%students@university.edu%'
+              AND m.from_addr NOT ILIKE '%students@university.edu%'
+        """)
+        att_count = cur3.fetchone()[0]
+        cur3.close()
+        conn3.close()
+    except Exception:
+        pass
+    record("Email to students has at least one attachment",
+           att_count >= 1,
+           f"attachments: {att_count}")
 
 
 def main():
@@ -189,7 +313,7 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0 and PASS_COUNT > 0:
         print("PASS")
         sys.exit(0)
     else:

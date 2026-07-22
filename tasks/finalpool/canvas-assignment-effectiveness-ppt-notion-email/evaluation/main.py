@@ -89,9 +89,9 @@ def check_excel(agent_workspace, gt_workspace):
             metrics_ws = wb[sheet_names[0]]
 
         rows = list(metrics_ws.iter_rows(values_only=True))
-        check("Assignment Metrics has header + data rows",
-              len(rows) >= 40,
-              f"Found {len(rows)} rows (expected ~52)")
+        check("Assignment Metrics has header + data rows (== 52)",
+              len(rows) == 52,
+              f"Found {len(rows)} rows (expected 52)")
 
         # Check data content
         if len(rows) > 1:
@@ -118,9 +118,9 @@ def check_excel(agent_workspace, gt_workspace):
             gt_rows = list(gt_metrics.iter_rows(values_only=True))
             agent_rows = rows
 
-            # Check row count matches (within tolerance)
-            check("Assignment count matches groundtruth",
-                  abs(len(agent_rows) - len(gt_rows)) <= 3,
+            # Check row count matches GT exactly.
+            check("Assignment count matches groundtruth exactly",
+                  len(agent_rows) == len(gt_rows),
                   f"Agent: {len(agent_rows)}, GT: {len(gt_rows)}")
 
             # Spot-check a few DI values
@@ -132,21 +132,27 @@ def check_excel(agent_workspace, gt_workspace):
 
             matches = 0
             total_checked = 0
+            mismatches = []
             for row in agent_rows[1:]:
                 if row[0] and row[1]:
                     key = (str(row[0]).strip(), str(row[1]).strip())
                     if key in gt_data:
                         total_checked += 1
                         gt_row = gt_data[key]
-                        # Check DI (col 7, 0-indexed)
+                        # Check DI (col 7, 0-indexed). Tighten tolerance to 0.02.
                         if len(row) > 7 and len(gt_row) > 7:
-                            if di_close(row[7], gt_row[7], tol=0.1):
+                            if di_close(row[7], gt_row[7], tol=0.02):
                                 matches += 1
+                            else:
+                                mismatches.append((key, gt_row[7], row[7]))
+            # Require ALL DIs to match (FAIL_COUNT==0 spirit). Allow up to 1 drift
+            # to tolerate one possible numerical-rounding edge case.
             if total_checked > 0:
-                match_rate = matches / total_checked
-                check(f"DI values match groundtruth (>= 70%)",
-                      match_rate >= 0.7,
-                      f"{matches}/{total_checked} = {match_rate:.1%}")
+                check(
+                    "DI values match groundtruth exactly (within 0.02)",
+                    (total_checked - matches) == 0,
+                    f"{matches}/{total_checked}; first mismatches: {mismatches[:3]}",
+                )
             else:
                 check("DI spot-check feasible", False, "No matching rows found")
 
@@ -158,8 +164,8 @@ def check_excel(agent_workspace, gt_workspace):
                 break
         if summary_ws:
             summary_rows = list(summary_ws.iter_rows(values_only=True))
-            check("Course Summary has 7 courses + header",
-                  len(summary_rows) >= 7,
+            check("Course Summary has 8 rows (header + 7 courses)",
+                  len(summary_rows) == 8,
                   f"Found {len(summary_rows)} rows")
 
         # Check Revision Needed sheet
@@ -170,9 +176,9 @@ def check_excel(agent_workspace, gt_workspace):
                 break
         if revision_ws:
             revision_rows = list(revision_ws.iter_rows(values_only=True))
-            check("Revision Needed has entries",
-                  len(revision_rows) >= 10,
-                  f"Found {len(revision_rows)} rows (expected ~18)")
+            check("Revision Needed has 18 rows (header + 17 entries)",
+                  len(revision_rows) == 18,
+                  f"Found {len(revision_rows)} rows (expected 18)")
 
     except ImportError:
         check("openpyxl available", False, "Cannot parse Excel without openpyxl")
@@ -276,9 +282,9 @@ def check_notion():
                   AND (in_trash IS NULL OR in_trash = false)
             """, (f'%{db_id}%',))
             pages = cur.fetchall()
-            check("Notion has entries for revision-needed assignments (>= 10)",
-                  len(pages) >= 10,
-                  f"Found {len(pages)} pages (expected ~17)")
+            check("Notion has entries for all revision-needed assignments (== 17)",
+                  len(pages) == 17,
+                  f"Found {len(pages)} pages (expected 17)")
 
             # Check some page content
             if pages:
@@ -312,9 +318,6 @@ def check_email():
             SELECT id, subject, from_addr, to_addr, body_text
             FROM email.messages
             WHERE to_addr::text ILIKE '%%curriculum_committee@university.edu%%'
-               OR to_addr::text ILIKE '%%curriculum%%committee%%'
-               OR subject ILIKE '%%assignment%%effectiveness%%'
-               OR subject ILIKE '%%fall 2014%%assignment%%'
         """)
         emails = cur.fetchall()
         check("Email to curriculum_committee@university.edu found",

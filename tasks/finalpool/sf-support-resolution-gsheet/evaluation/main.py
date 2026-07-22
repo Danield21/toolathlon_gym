@@ -1,26 +1,31 @@
 """Evaluation for sf-support-resolution-gsheet."""
 import argparse
+import json
 import os
 import sys
 import psycopg2
 
-DB = {"host": os.environ.get("PGHOST", "localhost"), "port": 5432, "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
-
-EXPECTED_ISSUE_TYPES = {
-    "Bug":               {"total": 6804, "resolved": 0, "avg_res_hrs": 16.0, "avg_sat": 2.96},
-    "Performance Issue": {"total": 8128, "resolved": 0, "avg_res_hrs": 15.2, "avg_sat": 3.38},
-    "Technical Issue":   {"total": 1515, "resolved": 0, "avg_res_hrs": 14.7, "avg_sat": 3.35},
-    "Maintenance":       {"total": 1558, "resolved": 0, "avg_res_hrs": 14.7, "avg_sat": 3.33},
-    "Incident":          {"total": 4463, "resolved": 0, "avg_res_hrs": 14.6, "avg_sat": 3.31},
-    "Feature Request":   {"total": 6118, "resolved": 0, "avg_res_hrs": 14.6, "avg_sat": 3.31},
-    "Service Request":   {"total": 3002, "resolved": 0, "avg_res_hrs": 14.3, "avg_sat": 3.31},
+DB = {
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": 5432,
+    "dbname": "toolathlon_gym",
+    "user": "eigent",
+    "password": "camel",
 }
 
-EXPECTED_PRIORITIES = {
-    "High":   {"count": 6466,  "avg_response": 6.2,  "sla_pct": 100.0},
-    "Low":    {"count": 9348,  "avg_response": 25.8, "sla_pct": 100.0},
-    "Medium": {"count": 15774, "avg_response": 12.3, "sla_pct": 100.0},
-}
+PASS_COUNT = 0
+FAIL_COUNT = 0
+
+
+def check(name, condition, detail=""):
+    global PASS_COUNT, FAIL_COUNT
+    if condition:
+        PASS_COUNT += 1
+        print(f"  [PASS] {name}")
+    else:
+        FAIL_COUNT += 1
+        detail_str = f": {str(detail)[:300]}" if detail else ""
+        print(f"  [FAIL] {name}{detail_str}")
 
 
 def num_close(a, b, tol=1.0):
@@ -30,193 +35,275 @@ def num_close(a, b, tol=1.0):
         return False
 
 
-def str_contains(haystack, needle):
-    if haystack is None or needle is None:
-        return False
-    return needle.lower() in str(haystack).lower()
+def get_expected():
+    conn = psycopg2.connect(**DB)
+    cur = conn.cursor()
+    cur.execute(
+        """
+    SELECT "ISSUE_TYPE",
+           COUNT(*),
+           COUNT(CASE WHEN "STATUS" = 'Closed' THEN 1 END),
+           ROUND(AVG(CASE WHEN "RESOLVED_AT" IS NOT NULL THEN EXTRACT(EPOCH FROM ("RESOLVED_AT" - "CREATED_AT"))/3600.0 END)::numeric, 1),
+           ROUND(AVG("CUSTOMER_SATISFACTION")::numeric, 2)
+    FROM sf_data."SUPPORT_CENTER__PUBLIC__TICKETS"
+    GROUP BY "ISSUE_TYPE"
+    """
+    )
+    issue_stats = {}
+    for r in cur.fetchall():
+        issue_stats[r[0]] = {
+            "total": int(r[1]),
+            "resolved": int(r[2]),
+            "avg_res_hrs": float(r[3]) if r[3] is not None else None,
+            "avg_sat": float(r[4]),
+        }
+    cur.execute(
+        """
+    SELECT "PRIORITY",
+           COUNT(*),
+           ROUND(AVG("RESPONSE_TIME_HOURS")::numeric, 1),
+           ROUND( (COUNT(CASE WHEN "RESPONSE_TIME_HOURS" <= "SLA_HOURS" THEN 1 END)::numeric / COUNT(*)) * 100, 1)
+    FROM sf_data."SUPPORT_CENTER__PUBLIC__TICKETS"
+    GROUP BY "PRIORITY"
+    """
+    )
+    priority_stats = {}
+    for r in cur.fetchall():
+        priority_stats[r[0]] = {
+            "count": int(r[1]),
+            "avg_response": float(r[2]),
+            "sla_pct": float(r[3]),
+        }
+    cur.close()
+    conn.close()
+    # Issue type with longest avg resolution
+    longest_issue = max(issue_stats.keys(), key=lambda k: issue_stats[k]["avg_res_hrs"] or 0)
+    return {"issue": issue_stats, "priority": priority_stats, "longest_issue": longest_issue}
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--agent_workspace", required=False)
-    parser.add_argument("--groundtruth_workspace", required=False)
-    parser.add_argument("--launch_time", required=False)
-    parser.add_argument("--res_log_file", required=False)
-    args = parser.parse_args()
-
-    # All checks for this task are DB-based (gsheet + email).
-    file_errors = []
-    db_errors = []
-
+def check_gsheet(expected):
+    print("\n=== Checking Google Sheet ===")
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
-    except Exception as e:
-        db_errors.append(f"Could not connect to PostgreSQL: {e}")
-        print(f"\n=== SUMMARY ===")
-        print(f"  File errors: {len(file_errors)}")
-        print(f"  DB errors:   {len(db_errors)} (not blocking)")
-        for e2 in db_errors:
-            print(f"    [DB] {e2}")
-        print(f"  Overall: PASS")
-        sys.exit(0)
+    except psycopg2.Error as e:
+        check("DB connect", False, str(e))
+        return
 
-    # 1. Check Google Sheet exists
-    cur.execute("SELECT id FROM gsheet.spreadsheets WHERE title ILIKE '%Support Resolution Analysis%'")
+    cur.execute("SELECT id, title FROM gsheet.spreadsheets WHERE LOWER(title) LIKE '%%support resolution analysis%%'")
     ss_rows = cur.fetchall()
+    check("Spreadsheet 'Support Resolution Analysis' exists", len(ss_rows) >= 1, f"Found {len(ss_rows)}")
     if not ss_rows:
-        db_errors.append("No spreadsheet titled 'Support Resolution Analysis' found")
         cur.close()
         conn.close()
-        print(f"\n=== SUMMARY ===")
-        print(f"  File errors: {len(file_errors)}")
-        print(f"  DB errors:   {len(db_errors)} (not blocking)")
-        for e in db_errors:
-            print(f"    [DB] {e}")
-        print(f"  Overall: PASS")
-        sys.exit(0)
-
+        return
     ss_id = ss_rows[0][0]
 
-    # 2. Check "By Issue Type" sheet
-    print("  Checking By Issue Type...")
-    cur.execute("SELECT id FROM gsheet.sheets WHERE spreadsheet_id = %s AND title ILIKE '%Issue Type%'", (ss_id,))
-    sheet_rows = cur.fetchall()
-    if not sheet_rows:
-        db_errors.append("Sheet 'By Issue Type' not found")
-    else:
-        sheet_id = sheet_rows[0][0]
-        cur.execute("""
-            SELECT row_index, col_index, value FROM gsheet.cells
-            WHERE spreadsheet_id = %s AND sheet_id = %s
-            ORDER BY row_index, col_index
-        """, (ss_id, sheet_id))
+    # By Issue Type
+    cur.execute("SELECT id, title FROM gsheet.sheets WHERE spreadsheet_id=%s", (ss_id,))
+    sheet_list = cur.fetchall()
+    issue_sheet = next((s for s, t in sheet_list if t and t.strip().lower() == "by issue type"), None)
+    priority_sheet = next((s for s, t in sheet_list if t and t.strip().lower() == "by priority"), None)
+    check("Sheet 'By Issue Type' present", issue_sheet is not None, f"got {[t for _, t in sheet_list]}")
+    check("Sheet 'By Priority' present", priority_sheet is not None, f"got {[t for _, t in sheet_list]}")
+
+    if issue_sheet is not None:
+        cur.execute("SELECT row_index, col_index, value FROM gsheet.cells WHERE sheet_id=%s ORDER BY row_index, col_index", (issue_sheet,))
         cells = cur.fetchall()
         grid = {}
-        for row_idx, col_idx, value in cells:
-            grid.setdefault(row_idx, {})[col_idx] = value
+        for r, c, v in cells:
+            grid.setdefault(r, {})[c] = str(v).strip() if v is not None else ""
+        # Header row
+        header_row = None
+        for r in sorted(grid.keys()):
+            joined = " ".join(grid[r].values()).lower()
+            if "issue_type" in joined.replace(" ", "_") or ("issue" in joined and "type" in joined):
+                if "total" in joined and "tickets" in joined:
+                    header_row = r
+                    break
+        check("By Issue Type header found", header_row is not None)
+        if header_row is not None:
+            col_map = {}
+            for col, val in grid[header_row].items():
+                v = val.strip().lower().replace(" ", "_")
+                if v == "issue_type":
+                    col_map["type"] = col
+                elif v == "total_tickets":
+                    col_map["total"] = col
+                elif v == "resolved_count":
+                    col_map["resolved"] = col
+                elif v == "avg_resolution_hours":
+                    col_map["avg_res"] = col
+                elif v == "avg_satisfaction":
+                    col_map["avg_sat"] = col
 
-        sorted_rows = sorted(grid.keys())
-        data_rows = sorted_rows[1:] if len(sorted_rows) > 1 else []
+            data_rows = [grid[r] for r in sorted(grid.keys()) if r > header_row]
+            # Sort order: by Avg_Resolution_Hours descending
+            res_hours = []
+            for row in data_rows:
+                try:
+                    res_hours.append(float(row.get(col_map.get("avg_res", -1), "0")))
+                except (TypeError, ValueError):
+                    pass
+            check("By Issue Type sorted by Avg_Resolution_Hours descending",
+                  res_hours == sorted(res_hours, reverse=True),
+                  f"got {res_hours}")
 
-        found_types = set()
-        for row_idx in data_rows:
-            row = grid[row_idx]
-            cols = sorted(row.keys())
-            if len(cols) < 5:
-                continue
-            issue_type = str(row[cols[0]] or "")
+            by_type = {}
+            for row in data_rows:
+                t = row.get(col_map.get("type", -1), "").strip()
+                if t:
+                    by_type[t] = row
+            for itype, exp in expected["issue"].items():
+                row = by_type.get(itype)
+                check(f"GSheet Issue Type '{itype}' present", row is not None)
+                if row is None:
+                    continue
+                try:
+                    total = int(float(row.get(col_map.get("total", -1), "0")))
+                except (TypeError, ValueError):
+                    total = None
+                try:
+                    resolved = int(float(row.get(col_map.get("resolved", -1), "0")))
+                except (TypeError, ValueError):
+                    resolved = None
+                try:
+                    avg_res = float(row.get(col_map.get("avg_res", -1), "0"))
+                except (TypeError, ValueError):
+                    avg_res = None
+                try:
+                    avg_sat = float(row.get(col_map.get("avg_sat", -1), "0"))
+                except (TypeError, ValueError):
+                    avg_sat = None
+                check(f"  {itype}.Total_Tickets == {exp['total']}", total == exp["total"], f"got {total}")
+                check(f"  {itype}.Resolved_Count == {exp['resolved']}", resolved == exp["resolved"], f"got {resolved}")
+                if exp["avg_res_hrs"] is not None:
+                    check(f"  {itype}.Avg_Resolution_Hours ≈ {exp['avg_res_hrs']}",
+                          avg_res is not None and abs(avg_res - exp["avg_res_hrs"]) <= 0.1,
+                          f"got {avg_res}")
+                check(f"  {itype}.Avg_Satisfaction ≈ {exp['avg_sat']}",
+                      avg_sat is not None and abs(avg_sat - exp["avg_sat"]) <= 0.05,
+                      f"got {avg_sat}")
 
-            for exp_type, exp_vals in EXPECTED_ISSUE_TYPES.items():
-                if str_contains(issue_type, exp_type):
-                    found_types.add(exp_type)
-                    if not num_close(row[cols[1]], exp_vals["total"], 50):
-                        db_errors.append(f"Issue '{exp_type}' total: {row[cols[1]]} vs {exp_vals['total']}")
-                    if not num_close(row[cols[3]], exp_vals["avg_res_hrs"], 1.0):
-                        db_errors.append(f"Issue '{exp_type}' avg_res_hrs: {row[cols[3]]} vs {exp_vals['avg_res_hrs']}")
-                    if not num_close(row[cols[4]], exp_vals["avg_sat"], 0.1):
-                        db_errors.append(f"Issue '{exp_type}' avg_sat: {row[cols[4]]} vs {exp_vals['avg_sat']}")
-
-        missing = set(EXPECTED_ISSUE_TYPES.keys()) - found_types
-        if missing:
-            db_errors.append(f"Missing issue types: {missing}")
-
-    # 3. Check "By Priority" sheet
-    print("  Checking By Priority...")
-    cur.execute("SELECT id FROM gsheet.sheets WHERE spreadsheet_id = %s AND title ILIKE '%Priority%'", (ss_id,))
-    sheet_rows = cur.fetchall()
-    if not sheet_rows:
-        db_errors.append("Sheet 'By Priority' not found")
-    else:
-        sheet_id = sheet_rows[0][0]
-        cur.execute("""
-            SELECT row_index, col_index, value FROM gsheet.cells
-            WHERE spreadsheet_id = %s AND sheet_id = %s
-            ORDER BY row_index, col_index
-        """, (ss_id, sheet_id))
+    if priority_sheet is not None:
+        cur.execute("SELECT row_index, col_index, value FROM gsheet.cells WHERE sheet_id=%s ORDER BY row_index, col_index", (priority_sheet,))
         cells = cur.fetchall()
         grid = {}
-        for row_idx, col_idx, value in cells:
-            grid.setdefault(row_idx, {})[col_idx] = value
+        for r, c, v in cells:
+            grid.setdefault(r, {})[c] = str(v).strip() if v is not None else ""
+        header_row = None
+        for r in sorted(grid.keys()):
+            joined = " ".join(grid[r].values()).lower()
+            if "priority" in joined and ("ticket_count" in joined.replace(" ", "_") or ("ticket" in joined and "count" in joined)):
+                header_row = r
+                break
+        check("By Priority header found", header_row is not None)
+        if header_row is not None:
+            col_map = {}
+            for col, val in grid[header_row].items():
+                v = val.strip().lower().replace(" ", "_")
+                if v == "priority":
+                    col_map["priority"] = col
+                elif v == "ticket_count":
+                    col_map["count"] = col
+                elif v == "avg_response_hours":
+                    col_map["resp"] = col
+                elif v == "sla_compliance_pct":
+                    col_map["sla"] = col
 
-        sorted_rows = sorted(grid.keys())
-        data_rows = sorted_rows[1:] if len(sorted_rows) > 1 else []
+            data_rows = [grid[r] for r in sorted(grid.keys()) if r > header_row]
+            priorities = [row.get(col_map.get("priority", -1), "").strip() for row in data_rows]
+            check("By Priority sorted alphabetically", priorities == sorted(priorities), f"got {priorities}")
 
-        found_priorities = set()
-        for row_idx in data_rows:
-            row = grid[row_idx]
-            cols = sorted(row.keys())
-            if len(cols) < 4:
-                continue
-            priority = str(row[cols[0]] or "")
-
-            for exp_pri, exp_vals in EXPECTED_PRIORITIES.items():
-                if str_contains(priority, exp_pri):
-                    found_priorities.add(exp_pri)
-                    if not num_close(row[cols[1]], exp_vals["count"], 50):
-                        db_errors.append(f"Priority '{exp_pri}' count: {row[cols[1]]} vs {exp_vals['count']}")
-                    if not num_close(row[cols[2]], exp_vals["avg_response"], 1.0):
-                        db_errors.append(f"Priority '{exp_pri}' avg_response: {row[cols[2]]} vs {exp_vals['avg_response']}")
-                    if not num_close(row[cols[3]], exp_vals["sla_pct"], 2.0):
-                        db_errors.append(f"Priority '{exp_pri}' sla_pct: {row[cols[3]]} vs {exp_vals['sla_pct']}")
-
-        missing = set(EXPECTED_PRIORITIES.keys()) - found_priorities
-        if missing:
-            db_errors.append(f"Missing priorities: {missing}")
-
-    # 4. Check email
-    print("  Checking email...")
-    cur.execute("""
-        SELECT subject, to_addr, body_text FROM email.messages
-        WHERE to_addr::text ILIKE '%support-lead@company.com%'
-           OR subject ILIKE '%Support Resolution%'
-        LIMIT 5
-    """)
-    email_rows = cur.fetchall()
-    if not email_rows:
-        cur.execute("SELECT COUNT(*) FROM email.messages")
-        total = cur.fetchone()[0]
-        db_errors.append(f"No email to support-lead@company.com found (total: {total})")
+            by_p = {p.lower(): row for p, row in zip(priorities, data_rows) if p}
+            for prio, exp in expected["priority"].items():
+                row = by_p.get(prio.lower())
+                check(f"GSheet Priority '{prio}' present", row is not None)
+                if row is None:
+                    continue
+                try:
+                    cnt = int(float(row.get(col_map.get("count", -1), "0")))
+                except (TypeError, ValueError):
+                    cnt = None
+                try:
+                    resp = float(row.get(col_map.get("resp", -1), "0"))
+                except (TypeError, ValueError):
+                    resp = None
+                try:
+                    sla = float(row.get(col_map.get("sla", -1), "0"))
+                except (TypeError, ValueError):
+                    sla = None
+                check(f"  {prio}.Ticket_Count == {exp['count']}", cnt == exp["count"], f"got {cnt}")
+                check(f"  {prio}.Avg_Response_Hours ≈ {exp['avg_response']}",
+                      resp is not None and abs(resp - exp["avg_response"]) <= 0.1, f"got {resp}")
+                check(f"  {prio}.SLA_Compliance_Pct ≈ {exp['sla_pct']}",
+                      sla is not None and abs(sla - exp["sla_pct"]) <= 0.5, f"got {sla}")
 
     cur.close()
     conn.close()
 
-    # 5. Check XLSX content
-    print("  Checking XLSX content...")
-    agent_ws = args.agent_workspace or os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    xlsx_path = os.path.join(agent_ws, "Support_Resolution_Analysis.xlsx")
-    if not os.path.exists(xlsx_path):
-        file_errors.append("Support_Resolution_Analysis.xlsx not found")
-    else:
-        try:
-            import openpyxl
-            wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-            if len(wb.worksheets) < 1:
-                file_errors.append("XLSX has no sheets")
-            for ws in wb.worksheets:
-                rows = list(ws.iter_rows(values_only=True))
-                if len(rows) < 2:
-                    file_errors.append(f"XLSX sheet '{ws.title}' has only {len(rows)} rows (need >= 2)")
-            wb.close()
-            print(f"    XLSX OK ({len(wb.worksheets)} sheets)")
-        except Exception as e:
-            file_errors.append(f"Error reading XLSX: {e}")
 
-    # Final result: only file_errors block pass
+def check_email(expected):
+    print("\n=== Checking Email ===")
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+    except psycopg2.Error as e:
+        check("DB connect", False, str(e))
+        return
+    cur.execute("SELECT subject, from_addr, to_addr, body_text FROM email.messages")
+    all_emails = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    found = None
+    for subject, from_addr, to_addr, body in all_emails:
+        to_str = ""
+        if isinstance(to_addr, list):
+            to_str = " ".join(str(r).lower() for r in to_addr)
+        else:
+            try:
+                parsed = json.loads(str(to_addr))
+                to_str = " ".join(str(r).lower() for r in parsed) if isinstance(parsed, list) else str(to_addr).lower()
+            except (json.JSONDecodeError, TypeError):
+                to_str = str(to_addr).lower()
+        if "support-lead@company.com" in to_str:
+            found = (subject, from_addr, to_addr, body)
+            break
+    check("Email sent to support-lead@company.com", found is not None)
+    if found is None:
+        return
+    subject, from_addr, to_addr, body = found
+    check("Email subject == 'Support Resolution Performance Report'",
+          (subject or "").strip().lower() == "support resolution performance report",
+          f"got: {subject}")
+    body_lower = (body or "").lower()
+    longest = expected["longest_issue"].lower()
+    check(f"Email body mentions longest-resolution issue type '{expected['longest_issue']}'",
+          longest in body_lower, f"missing {expected['longest_issue']}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--agent_workspace", required=False, default=".")
+    parser.add_argument("--groundtruth_workspace", required=False, default=".")
+    parser.add_argument("--launch_time", required=False)
+    parser.add_argument("--res_log_file", required=False)
+    args = parser.parse_args()
+
+    expected = get_expected()
+    check_gsheet(expected)
+    check_email(expected)
+
     print(f"\n=== SUMMARY ===")
-    print(f"  File errors: {len(file_errors)}")
-    print(f"  DB errors:   {len(db_errors)} (not blocking)")
-    if db_errors:
-        for e in db_errors[:15]:
-            print(f"    [DB] {e}")
-    if file_errors:
-        for e in file_errors[:15]:
-            print(f"    [FILE] {e}")
-        print(f"  Overall: FAIL")
-        sys.exit(1)
-    else:
-        print(f"  Overall: PASS")
-        sys.exit(0)
+    print(f"  Passed: {PASS_COUNT}")
+    print(f"  Failed: {FAIL_COUNT}")
+    all_ok = FAIL_COUNT == 0
+    print(f"  Overall: {'PASS' if all_ok else 'FAIL'}")
+    if args.res_log_file:
+        with open(args.res_log_file, "w") as f:
+            json.dump({"passed": PASS_COUNT, "failed": FAIL_COUNT, "success": all_ok}, f)
+    sys.exit(0 if all_ok else 1)
 
 
 if __name__ == "__main__":

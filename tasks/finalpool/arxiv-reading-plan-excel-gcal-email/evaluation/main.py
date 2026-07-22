@@ -75,8 +75,8 @@ def check_excel(agent_ws, groundtruth_ws="."):
         # Check arxiv IDs appear
         all_text = " ".join(str(c) for row in non_empty for c in row if c is not None)
         found_ids = sum(1 for arxiv_id in ARXIV_IDS if arxiv_id in all_text)
-        check(f"Papers sheet contains at least 6 of 8 arXiv IDs",
-              found_ids >= 6, f"Found {found_ids}/8 IDs in: {all_text[:200]}")
+        check(f"Papers sheet contains all 8 arXiv IDs",
+              found_ids == 8, f"Found {found_ids}/8 IDs in: {all_text[:200]}")
 
         # Check required columns exist in header row
         header_row = list(papers_ws.iter_rows(min_row=1, max_row=1, values_only=True))[0]
@@ -235,6 +235,7 @@ def main():
     print("=== Evaluation: arxiv-reading-plan-excel-gcal-email ===")
 
     check_excel(args.agent_workspace, args.groundtruth_workspace)
+    excel_failures = FAIL_COUNT  # capture failures so far (Excel only)
     check_gcal()
     check_email()
 
@@ -244,7 +245,14 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump({"pass": PASS_COUNT, "fail": FAIL_COUNT}, f)
 
-    sys.exit(0 if FAIL_COUNT == 0 else 1)
+    # Require >=85% accuracy (tolerates GCal/Email runtime-only failures but catches
+    # real errors). Excel (local file) portion must have zero failures.
+    total = PASS_COUNT + FAIL_COUNT
+    accuracy = (PASS_COUNT / total * 100) if total else 0
+    excel_ok = excel_failures == 0
+    overall_ok = excel_ok and accuracy >= 85
+    print(f"Excel failures: {excel_failures}; accuracy: {accuracy:.1f}%")
+    sys.exit(0 if overall_ok else 1)
 
 
 if __name__ == "__main__":

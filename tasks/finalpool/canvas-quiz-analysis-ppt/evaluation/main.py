@@ -147,6 +147,9 @@ def main():
                     title_text += shape.text_frame.text.lower() + " "
             if "fall 2014" not in title_text or "quiz" not in title_text:
                 all_errors.append(f"Title slide missing expected text. Found: {title_text[:100]}")
+            # Check subtitle 'Faculty Meeting Summary'
+            if "faculty meeting summary" not in title_text and "faculty meeting" not in title_text:
+                all_errors.append(f"Title slide missing 'Faculty Meeting Summary' subtitle. Found: {title_text[:100]}")
 
             # Check last slide mentions key takeaways
             last_text = ""
@@ -158,21 +161,49 @@ def main():
                 if "summary" not in last_text and "conclusion" not in last_text:
                     all_errors.append(f"Last slide missing takeaways content")
 
-            # Check that course names appear somewhere in the presentation
-            all_ppt_text = ""
+            # Collect per-slide text
+            per_slide_text = []
             for slide in slides:
+                txt = ""
                 for shape in slide.shapes:
                     if shape.has_text_frame:
-                        all_ppt_text += shape.text_frame.text.lower() + " "
+                        txt += shape.text_frame.text.lower() + " "
+                per_slide_text.append(txt)
+            all_ppt_text = " ".join(per_slide_text)
+
+            # Each course should have a dedicated slide (exclusive or primary)
             for course in ["creative computing", "foundations of finance", "global governance"]:
                 if course not in all_ppt_text:
                     all_errors.append(f"PPT missing course: {course}")
+                else:
+                    # Count slides where this course is the primary subject (appears in slide's first 150 chars)
+                    primary_slides = sum(1 for t in per_slide_text[1:] if course in t[:150])
+                    if primary_slides == 0:
+                        all_errors.append(f"PPT missing dedicated slide for course: {course}")
 
-            # Check highest/lowest mentioned
-            if "global governance" not in last_text:
-                all_errors.append("Last slide should mention Global Governance (highest avg)")
-            if "creative computing" not in last_text:
-                all_errors.append("Last slide should mention Creative Computing (lowest avg)")
+            # Dynamically derive highest/lowest course from GT Course Summary sheet
+            try:
+                g_cs = load_sheet_rows(gt_wb, "Course Summary")
+                if g_cs and len(g_cs) > 1:
+                    highest_c = None; lowest_c = None
+                    highest_v = float("-inf"); lowest_v = float("inf")
+                    for g_row in g_cs[1:]:
+                        if g_row and g_row[0] is not None and len(g_row) > 3 and g_row[3] is not None:
+                            try:
+                                v = float(g_row[3])
+                            except (TypeError, ValueError):
+                                continue
+                            c = str(g_row[0]).lower()
+                            if v > highest_v:
+                                highest_v = v; highest_c = c
+                            if v < lowest_v:
+                                lowest_v = v; lowest_c = c
+                    if highest_c and " ".join(highest_c.split()[:2]) not in last_text:
+                        all_errors.append(f"Last slide should mention highest-avg course '{highest_c}'")
+                    if lowest_c and " ".join(lowest_c.split()[:2]) not in last_text:
+                        all_errors.append(f"Last slide should mention lowest-avg course '{lowest_c}'")
+            except Exception as e:
+                print(f"  [WARN] Could not derive highest/lowest dynamically: {e}")
 
         if not any("PPT" in e or "ppt" in e.lower() or "slide" in e.lower() for e in all_errors):
             print("    PASS")

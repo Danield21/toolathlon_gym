@@ -10,7 +10,7 @@ Sheet named Underperformers with columns: Department, Count_Low_Rating, Avg_Sala
 
 Sheet named Summary with two columns: Metric and Value. Include rows for Total_Top_Performers (total count of all top performers across all departments), Total_Underperformers (total count of all underperformers across all departments), and Overall_Avg_Rating (the average performance rating across all employees, rounded to 2 decimal places).
 
-Schedule a Google Calendar event titled Annual Performance Review Board Meeting exactly 21 days after the launch time. The event should last 2 hours and include a description referencing the performance review data.
+Schedule a shared calendar event titled Annual Performance Review Board Meeting exactly 21 days after the launch time. The event should last 2 hours and include a description referencing the performance review data.
 
 Send an email from hr@company.example.com to executives@company.example.com with subject Annual Performance Review Summary - Action Required. The body should include the total number of top performers and underperformers, and note the overall average rating.
 

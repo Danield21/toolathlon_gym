@@ -115,9 +115,12 @@ def check_gsheet():
                   len(data_rows) >= expected_subject_rows,
                   f"Found {len(data_rows)} data rows")
 
+            # Check that Heavy AND Light/Medium ratings are present (not just Heavy)
             all_values = [str(v).lower() for _, _, v in cells if v]
             has_heavy = any("heavy" in v for v in all_values)
+            has_light_or_med = any(("light" in v) or ("medium" in v) or ("normal" in v) or ("moderate" in v) for v in all_values)
             check("Subject_Summary has Heavy rating", has_heavy, f"Values sample: {all_values[:15]}")
+            check("Subject_Summary has at least one non-Heavy rating", has_light_or_med, f"Values sample: {all_values[:15]}")
 
         cur.close()
         conn.close()
@@ -137,8 +140,40 @@ def check_word(agent_workspace):
         text = " ".join(p.text for p in doc.paragraphs).lower()
         check("Word has substantial content", len(text) > 300, f"length: {len(text)}")
         check("Word mentions workload", "workload" in text)
-        check("Word mentions subjects", "finance" in text or "biochem" in text)
+        # Dynamically query subjects from Canvas DB instead of hardcoding
+        try:
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute(r"SELECT regexp_replace(name, ' \(.*\)$', '') AS subj FROM canvas.courses GROUP BY subj")
+            subjects = [r[0].lower() for r in cur.fetchall()]
+            cur.close(); conn.close()
+        except Exception:
+            subjects = ["finance", "biochem"]
+        # Require mention of >=3 distinct subjects (Subject Analysis section requirement)
+        subject_hits = sum(1 for s in subjects if any(kw in text for kw in s.split() if len(kw) > 4))
+        check(f"Word mentions >=3 distinct subjects", subject_hits >= 3,
+              f"hits={subject_hits} of {len(subjects)} subjects")
         check("Word mentions recommendations", "recommend" in text)
+        # Required sections from task.md
+        section_keywords = {
+            "overview": ["overview", "total courses"],
+            "subject analysis": ["subject analysis"],
+            "high workload areas": ["high workload"],
+            "recommendations": ["recommendations"],
+        }
+        for sec_label, kws in section_keywords.items():
+            has_section = any(kw in text for kw in kws)
+            check(f"Word has '{sec_label}' section", has_section,
+                  f"section keywords {kws} not found")
+        # At least 3 actionable recommendations - look for indicator words in 'recommend' area
+        rec_idx = text.find("recommend")
+        rec_segment = text[rec_idx:rec_idx + 2000] if rec_idx >= 0 else ""
+        rec_indicators = ["redistribut", "teaching assistant", "ta ", "ta\n", "balanc", "reduc",
+                          "increase", "hire", "expand", "review", "rebalanc", "address",
+                          "improve", "consider", "implement"]
+        rec_hits = sum(1 for k in rec_indicators if k in rec_segment)
+        check("Word recommendations section has >=3 actionable items", rec_hits >= 3,
+              f"indicator hits={rec_hits}")
 
 
 def check_emails():
@@ -146,18 +181,42 @@ def check_emails():
     try:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT subject, to_addr FROM email.messages WHERE subject ILIKE %s",
-                    ('%faculty%workload%',))
+        # Email 1: subject "Faculty Workload Analysis Complete" to department-chairs@university.edu
+        cur.execute("""SELECT subject, to_addr, body_text FROM email.messages
+                       WHERE subject ILIKE '%faculty workload analysis complete%'""")
         emails = cur.fetchall()
-        check("Faculty workload email sent", len(emails) >= 1, f"found {len(emails)}")
+        check("Email 'Faculty Workload Analysis Complete' sent", len(emails) >= 1, f"found {len(emails)}")
         if emails:
-            check("Email to department-chairs", "department-chairs" in str(emails[0][1]).lower() or "chair" in str(emails[0][1]).lower(),
+            to_str = str(emails[0][1] or "").lower()
+            check("Email 1 to department-chairs@university.edu",
+                  "department-chairs@university.edu" in to_str,
                   f"to: {emails[0][1]}")
+            body = (emails[0][2] or "").lower()
+            # Total course count, Heavy subjects, top recommendation
+            check("Email 1 mentions courses analyzed",
+                  "courses" in body and ("22" in body or "all" in body),
+                  f"body sample: {body[:200]}")
+            check("Email 1 mentions heavy workload subjects",
+                  "heavy" in body, f"body sample: {body[:200]}")
+            check("Email 1 mentions a recommendation",
+                  "recommend" in body, f"body sample: {body[:200]}")
 
-        cur.execute("SELECT subject, to_addr FROM email.messages WHERE subject ILIKE %s",
-                    ('%workload%standards%compliance%',))
+        # Email 2: subject "Workload Standards Compliance Report" to academic-affairs@university.edu
+        cur.execute("""SELECT subject, to_addr, body_text FROM email.messages
+                       WHERE subject ILIKE '%workload standards compliance report%'""")
         compliance = cur.fetchall()
-        check("Compliance report email sent", len(compliance) >= 1, f"found {len(compliance)}")
+        check("Email 'Workload Standards Compliance Report' sent",
+              len(compliance) >= 1, f"found {len(compliance)}")
+        if compliance:
+            to_str2 = str(compliance[0][1] or "").lower()
+            check("Email 2 to academic-affairs@university.edu",
+                  "academic-affairs@university.edu" in to_str2,
+                  f"to: {compliance[0][1]}")
+            body2 = (compliance[0][2] or "").lower()
+            check("Email 2 mentions compliance vs exceed",
+                  ("comply" in body2 or "compliant" in body2 or "compliance" in body2)
+                  and ("exceed" in body2 or "noncompliant" in body2 or "non-compliant" in body2),
+                  f"body sample: {body2[:200]}")
 
         cur.close()
         conn.close()
@@ -169,6 +228,19 @@ def check_script(agent_workspace):
     print("\n=== Checking Terminal Script ===")
     check("workload_analyzer.py exists",
           os.path.exists(os.path.join(agent_workspace, "workload_analyzer.py")))
+    # Verify intermediate JSON outputs explicitly referenced in task.md
+    for fname in ("course_data.json", "standards.json", "workload_analysis.json"):
+        fp = os.path.join(agent_workspace, fname)
+        check(f"{fname} exists", os.path.exists(fp))
+        if os.path.exists(fp):
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                check(f"{fname} is valid non-empty JSON",
+                      isinstance(data, (list, dict)) and len(data) > 0,
+                      f"len={len(data) if hasattr(data, '__len__') else 0}")
+            except Exception as e:
+                check(f"{fname} is valid non-empty JSON", False, str(e)[:120])
 
 
 def check_reverse_validation(agent_workspace):

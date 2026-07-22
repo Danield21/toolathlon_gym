@@ -4,7 +4,7 @@ import argparse, json, os, sys, shutil, tarfile, subprocess, time
 from datetime import datetime, timedelta
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -27,10 +27,12 @@ def clear_writable_schemas():
     conn.close()
 
 def inject_data(launch_time):
+    """Preprocess injects nothing into gsheet — agent creates it.
+    Note: V1 verification is run after groundtruth setup, where the test harness
+    populates gsheet from the GT workspace artifacts. Here we leave the schema empty.
+    """
     conn = get_conn()
     cur = conn.cursor()
-    launch_dt = datetime.strptime(launch_time, "%Y-%m-%d %H:%M:%S")
-    pass
     conn.commit()
     cur.close()
     conn.close()
@@ -54,7 +56,10 @@ def setup_mock_server(port=30313):
     tar_path = os.path.join(files_dir, "mock_pages.tar.gz")
     if os.path.exists(tar_path):
         with tarfile.open(tar_path, "r:gz") as tar:
-            tar.extractall(path=tmp_dir)
+            try:
+                tar.extractall(path=tmp_dir, filter="data")
+            except TypeError:
+                tar.extractall(path=tmp_dir)
 
     # Start HTTP server
     mock_dir = os.path.join(tmp_dir, "mock_pages")

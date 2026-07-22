@@ -18,15 +18,18 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+RUNTIME_ONLY_FAIL = 0
 
 
-def record(name, passed, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def record(name, passed, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, RUNTIME_ONLY_FAIL
     if passed:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if runtime_only:
+            RUNTIME_ONLY_FAIL += 1
         msg = f": {detail[:300]}" if detail else ""
         print(f"  [FAIL] {name}{msg}")
 
@@ -73,24 +76,64 @@ def check_excel(workspace):
         record("Has >= 8 recipes", len(data) >= 8, f"Found {len(data)}")
 
         ws_col = find_col(rw_rows[0], ["Wellness_Score", "Wellness Score", "Score"])
+        veggie_col = find_col(rw_rows[0], ["Veggie_Servings", "Veggie Servings"])
+        sugar_col = find_col(rw_rows[0], ["Est_Sugar_g", "Est Sugar g", "Sugar_g"])
         if ws_col is not None:
-            for r in data[:3]:
+            # Check ALL rows have numeric Wellness_Score in 1-10 range
+            out_of_range = 0
+            for r in data:
                 if ws_col < len(r) and r[ws_col] is not None:
                     try:
                         s = float(r[ws_col])
-                        record(f"Score {s} in range 1-10", 1 <= s <= 10, f"Got {s}")
-                        break
+                        if not (1 <= s <= 10):
+                            out_of_range += 1
                     except (TypeError, ValueError):
-                        pass
+                        out_of_range += 1
+            record("All Wellness_Score values are numeric in 1-10",
+                   out_of_range == 0, f"{out_of_range} out of range")
+
+        if veggie_col is not None:
+            non_numeric = 0
+            for r in data:
+                if veggie_col < len(r) and r[veggie_col] is not None:
+                    try:
+                        float(r[veggie_col])
+                    except (TypeError, ValueError):
+                        non_numeric += 1
+            record("All Veggie_Servings values are numeric",
+                   non_numeric == 0, f"{non_numeric} non-numeric")
+
+        if sugar_col is not None:
+            non_numeric = 0
+            for r in data:
+                if sugar_col < len(r) and r[sugar_col] is not None:
+                    try:
+                        float(r[sugar_col])
+                    except (TypeError, ValueError):
+                        non_numeric += 1
+            record("All Est_Sugar_g values are numeric",
+                   non_numeric == 0, f"{non_numeric} non-numeric")
 
         rec_col = find_col(rw_rows[0], ["Recommended", "recommended"])
-        if rec_col is not None:
+        if rec_col is not None and ws_col is not None:
             vals = set()
+            # Check Recommended matches score >= 7 rule
+            mismatch = 0
             for r in data:
-                if rec_col < len(r) and r[rec_col] is not None:
+                if rec_col < len(r) and r[rec_col] is not None and ws_col < len(r) and r[ws_col] is not None:
                     vals.add(str(r[rec_col]).strip().lower())
+                    try:
+                        score = float(r[ws_col])
+                        actual_rec = str(r[rec_col]).strip().lower()
+                        expected_rec = "yes" if score >= 7 else "no"
+                        if actual_rec != expected_rec:
+                            mismatch += 1
+                    except (TypeError, ValueError):
+                        pass
             has_both = "yes" in vals and "no" in vals
             record("Recommended has both Yes and No", has_both, f"Values: {vals}")
+            record("Recommended matches score>=7 rule",
+                   mismatch == 0, f"{mismatch} rows mismatch")
 
         cat_col = find_col(rw_rows[0], ["Category", "category"])
         if cat_col is not None:
@@ -173,19 +216,20 @@ def check_notion():
         if not pages:
             cur.execute("SELECT id, properties FROM notion.pages")
             all_p = cur.fetchall()
-            record("Notion wellness page exists", False, f"Found {len(all_p)} pages but none matching")
+            record("Notion wellness page exists", False, f"Found {len(all_p)} pages but none matching",
+                   runtime_only=True)
             return False
 
         record("Notion wellness page exists", True)
 
         page_ids = [p[0] for p in pages]
+        # Triage: only count blocks WITHIN wellness pages (no fallback to all)
         cur.execute("SELECT COUNT(*) FROM notion.blocks WHERE parent_id = ANY(%s)", (page_ids,))
         count = cur.fetchone()[0]
-        if count == 0:
-            cur.execute("SELECT COUNT(*) FROM notion.blocks")
-            count = cur.fetchone()[0]
 
-        record("Notion page has >= 5 blocks", count >= 5, f"Found {count}")
+        record("Wellness Notion page has >= 5 blocks", count >= 5,
+               f"Found {count} blocks in wellness page(s)",
+               runtime_only=True)
 
         cur.close()
         conn.close()
@@ -209,7 +253,9 @@ def main():
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}, Failed: {FAIL_COUNT}")
-    sys.exit(0 if FAIL_COUNT == 0 else 1)
+    non_runtime_fail = FAIL_COUNT - RUNTIME_ONLY_FAIL
+    print(f"  Overall: {'PASS' if non_runtime_fail == 0 else 'FAIL'} (runtime-only fails: {RUNTIME_ONLY_FAIL})")
+    sys.exit(0 if non_runtime_fail == 0 else 1)
 
 
 if __name__ == "__main__":

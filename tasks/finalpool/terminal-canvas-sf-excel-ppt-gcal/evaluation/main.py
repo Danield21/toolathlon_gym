@@ -70,7 +70,10 @@ def check_excel(workspace):
         all_text2 = " ".join(str(c) for r in rows2 for c in r if c).lower()
         check("Contains Engineering department", "engineering" in all_text2, f"Text: {all_text2[:120]}")
 
-    # Gap_Matrix sheet
+    # Gap_Matrix sheet — validate per-row data against config:
+    #   industry_demand must equal gap_analysis_config.industry_benchmarks[skill_area];
+    #   priority must be derived from gap_score per thresholds (>=3.0 -> Critical,
+    #   >=1.5 -> High, else Moderate/Low).
     gm_idx = next((i for i, s in enumerate(sheets_lower) if "gap" in s or "matrix" in s), 2)
     if gm_idx < len(sheets):
         ws3 = wb[sheets[gm_idx]]
@@ -81,6 +84,85 @@ def check_excel(workspace):
         check("Contains Quantitative Analysis", "quantitative" in all_text3, f"Text: {all_text3[:120]}")
         check("Contains priority levels", "critical" in all_text3 or "high" in all_text3,
               f"Text: {all_text3[:120]}")
+
+        # Load config (sits in initial_workspace next to agent's run-time copy)
+        try:
+            config_path = os.path.join(workspace, "gap_analysis_config.json")
+            if not os.path.exists(config_path):
+                # Fallback to initial_workspace
+                config_path = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "initial_workspace",
+                    "gap_analysis_config.json",
+                )
+            with open(config_path, "r", encoding="utf-8") as cf:
+                cfg = json.load(cf)
+            benchmarks = cfg.get("industry_benchmarks", {})
+            thresholds = cfg.get("thresholds", {})
+            crit_t = float(thresholds.get("critical_gap", 3.0))
+            high_t = float(thresholds.get("high_gap", 1.5))
+        except Exception as _e:
+            cfg = None
+            benchmarks = {}
+            crit_t = 3.0
+            high_t = 1.5
+
+        # Header map: skill_area, curriculum_score, industry_demand, gap_score, priority
+        if rows3:
+            headers = [str(c or "").strip().lower() for c in rows3[0]]
+            def col(name):
+                for i, h in enumerate(headers):
+                    if h == name:
+                        return i
+                return -1
+            ia = col("skill_area")
+            ic = col("curriculum_score")
+            id_ = col("industry_demand")
+            ig = col("gap_score")
+            ip = col("priority")
+            for r in data_rows3:
+                if not r or ia < 0 or ia >= len(r) or r[ia] is None:
+                    continue
+                skill = str(r[ia]).strip()
+                # industry_demand consistent with config
+                if id_ >= 0 and id_ < len(r) and skill in benchmarks:
+                    try:
+                        ind_val = float(r[id_])
+                        ref_val = float(benchmarks[skill])
+                        check(
+                            f"Gap_Matrix '{skill}' industry_demand ~{ref_val}",
+                            abs(ind_val - ref_val) <= 0.1,
+                            f"got {ind_val}",
+                        )
+                    except (TypeError, ValueError):
+                        check(
+                            f"Gap_Matrix '{skill}' industry_demand parseable", False,
+                            f"value: {r[id_]}"
+                        )
+                # priority consistent with gap_score thresholds
+                if ig >= 0 and ip >= 0 and ig < len(r) and ip < len(r):
+                    try:
+                        gs = float(r[ig])
+                        prio = str(r[ip] or "").strip().lower()
+                        if gs >= crit_t:
+                            expected_prio = "critical"
+                        elif gs >= high_t:
+                            expected_prio = "high"
+                        else:
+                            expected_prio = ("moderate", "low")
+                        if isinstance(expected_prio, tuple):
+                            ok_prio = prio in expected_prio
+                            shown = "moderate/low"
+                        else:
+                            ok_prio = prio == expected_prio
+                            shown = expected_prio
+                        check(
+                            f"Gap_Matrix '{skill}' priority={shown} for gap {gs}",
+                            ok_prio,
+                            f"got '{prio}'",
+                        )
+                    except (TypeError, ValueError):
+                        pass
 
     # Recommendations sheet
     rec_idx = next((i for i, s in enumerate(sheets_lower) if "recommend" in s), 3)
@@ -135,15 +217,35 @@ def check_gcal():
     check("At least 3 advisory board events", len(events) >= 3, f"Found {len(events)} events")
 
     if events:
-        summaries = " ".join(str(e[0]) for e in events).lower()
-        check("Events mention curriculum or review", "curriculum" in summaries or "review" in summaries,
-              f"Summaries: {summaries[:150]}")
-        check("Events mention workforce or data or findings",
-              "workforce" in summaries or "data" in summaries or "finding" in summaries,
-              f"Summaries: {summaries[:150]}")
-        check("Events mention recommendation or gap",
-              "recommend" in summaries or "gap" in summaries,
-              f"Summaries: {summaries[:150]}")
+        # Required: 3 specific events on March 16 (Mon 10:00, 2h), 18 (Wed 14:00, 1.5h), 20 (Fri 09:00, 2h)
+        # Each event must contain "Advisory Board" + topic keyword
+        required = [
+            ("2026-03-16", "10", "12", ["curriculum", "review"]),
+            ("2026-03-18", "14", "15", ["workforce", "data", "finding"]),
+            ("2026-03-20", "09", "11", ["gap", "recommend"]),
+        ]
+        # Build map by date
+        events_by_date = {}
+        for e in events:
+            sdt = str(e[1] or "")
+            edt = str(e[2] or "") if len(e) > 2 else ""
+            day = sdt[:10]
+            events_by_date.setdefault(day, []).append((sdt, edt, str(e[0] or "")))
+        for date, start_h, end_h_min, kws in required:
+            day_events = events_by_date.get(date, [])
+            matched_event = None
+            for sdt, edt, summary in day_events:
+                # Check start hour
+                if sdt[11:13] != start_h:
+                    continue
+                # Check summary contains "Advisory Board" + at least one topic keyword
+                summary_l = summary.lower()
+                if "advisory board" in summary_l and any(kw in summary_l for kw in kws):
+                    matched_event = (sdt, edt, summary)
+                    break
+            check(f"Advisory Board event on {date} at {start_h}:00 (topic: {kws[0]})",
+                  matched_event is not None,
+                  f"Day events: {day_events}")
 
     cur.close()
     conn.close()
@@ -211,7 +313,7 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

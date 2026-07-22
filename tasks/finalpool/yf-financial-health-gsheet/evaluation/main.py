@@ -30,13 +30,42 @@ SYMBOLS = ["AMZN", "GOOGL", "JNJ", "JPM", "XOM"]
 # Credit ratings come from the mock web portal (http://localhost:PORT).
 # Cannot be queried from PostgreSQL at evaluation time because yf schema
 # has no credit rating table. Values must match preprocess mock page data.
-CREDIT_RATINGS = {
-    "AMZN": ("AA", "Stable"),
-    "GOOGL": ("AA+", "Stable"),
-    "JNJ": ("AAA", "Positive"),
-    "JPM": ("A+", "Stable"),
-    "XOM": ("AA-", "Negative"),
-}
+# Parse credit ratings from mock portal HTML at eval time to avoid maintenance coupling.
+def _load_credit_ratings():
+    import re as _re
+    import os as _os
+    portal = _os.path.join(_os.path.dirname(__file__), '..', 'files', 'mock_pages', 'index.html')
+    if not _os.path.exists(portal):
+        # Fallback hardcode (keeps original behavior)
+        return {
+            "AMZN": ("AA", "Stable"), "GOOGL": ("AA+", "Stable"),
+            "JNJ": ("AAA", "Positive"), "JPM": ("A+", "Stable"),
+            "XOM": ("AA-", "Negative"),
+        }
+    try:
+        with open(portal, 'r', encoding='utf-8') as f:
+            html = f.read()
+        # Match <tr>...<td>SYMBOL</td>...<td>Name</td>...<td>Rating</td>...<td>Outlook</td>...</tr>
+        parsed = {}
+        pattern = _re.compile(
+            r"<tr>\s*<td>\s*([A-Z]{2,5})\s*</td>\s*<td>[^<]*</td>\s*<td>\s*([^<]+)\s*</td>\s*<td>\s*([^<]+)\s*</td>",
+            _re.IGNORECASE | _re.DOTALL,
+        )
+        for m in pattern.finditer(html):
+            sym = m.group(1).strip().upper()
+            rating = m.group(2).strip()
+            outlook = m.group(3).strip()
+            parsed[sym] = (rating, outlook)
+        if parsed:
+            return parsed
+    except Exception:
+        pass
+    return {
+        "AMZN": ("AA", "Stable"), "GOOGL": ("AA+", "Stable"),
+        "JNJ": ("AAA", "Positive"), "JPM": ("A+", "Stable"),
+        "XOM": ("AA-", "Negative"),
+    }
+CREDIT_RATINGS = _load_credit_ratings()
 
 PCT_TOLERANCE = 1.0      # absolute tolerance for percentage values
 MONEY_TOLERANCE = 5.0    # absolute tolerance for revenue/income in millions
@@ -186,7 +215,9 @@ def check_local_excel(workspace, expected_rows, expected_summary):
     path = os.path.join(workspace, "financial_health_report.xlsx")
     if not os.path.exists(path):
         print(f"FAIL: financial_health_report.xlsx not found at {path}")
-        return 0, 1
+        # Charge full expected check count to denominator so missing file doesn't shrink it
+        # Estimate: 5 symbols * (5 income + 5 balance + 4 ratios + 1 row presence) + 5 summary rows ~= 80
+        return 0, 80
 
     wb = openpyxl.load_workbook(path, data_only=True)
     total_checks = 0
@@ -321,7 +352,8 @@ def check_gsheet(expected_rows):
         print("FAIL: No spreadsheet found with title containing 'Financial Health Dashboard'")
         cur.close()
         conn.close()
-        return 0, 1
+        # Same: charge full expected check count to denominator
+        return 0, 80
     passed_checks += 1
     spreadsheet_id = ss_rows[0][0]
     print(f"  Found spreadsheet: id={spreadsheet_id}, title={ss_rows[0][1]}")

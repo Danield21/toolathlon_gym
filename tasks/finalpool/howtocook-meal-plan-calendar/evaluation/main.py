@@ -45,6 +45,20 @@ def record(name, passed, detail=""):
         print(f"  [FAIL] {name}{msg}")
 
 
+def _load_expected_menu(groundtruth_workspace):
+    """Load expected_menu.json (reference categories/difficulty) if present."""
+    if not groundtruth_workspace:
+        return None
+    path = os.path.join(groundtruth_workspace, "expected_menu.json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
 # =========================================================================
 # Check 1: Google Sheet
 # =========================================================================
@@ -132,6 +146,14 @@ def check_gsheet():
         record("gsheet: Weekly Menu mentions all 5 weekdays", days_found >= 5,
                f"Found {days_found}/5 weekday names in menu data")
 
+        # Validate category diversity: >=4 distinct HowToCook categories
+        CATS = ['水产', '早餐', '调料', '甜品', '饮品', '荤菜',
+                '半成品加工', '汤', '主食', '素菜']
+        categories_found = {cat for cat in CATS if cat in all_values}
+        record("gsheet: Weekly Menu covers >=4 distinct categories",
+               len(categories_found) >= 4,
+               f"Found categories: {categories_found}")
+
     # Check Shopping List has data
     if shopping_sheet:
         shopping_sheet_id = shopping_sheet[0]
@@ -165,19 +187,34 @@ def check_gsheet():
 # Check 2: Google Calendar
 # =========================================================================
 
-def check_gcal():
+def check_gcal(expected_menu=None):
     """Verify 5 calendar events for March 9-13, 2026 around noon."""
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT summary, description, start_datetime, end_datetime
-        FROM gcal.events
-        WHERE start_datetime >= '2026-03-09 00:00:00'
-          AND start_datetime < '2026-03-14 00:00:00'
-        ORDER BY start_datetime
-    """)
-    events = cur.fetchall()
+    try:
+        cur.execute("""
+            SELECT summary, description, start_datetime, end_datetime, start_timezone
+            FROM gcal.events
+            WHERE start_datetime >= '2026-03-09 00:00:00'
+              AND start_datetime < '2026-03-14 00:00:00'
+            ORDER BY start_datetime
+        """)
+        events_tz = cur.fetchall()
+        events = [(r[0], r[1], r[2], r[3]) for r in events_tz]
+        tz_values = [r[4] for r in events_tz if r[4]]
+        record("gcal: events use America/New_York timezone",
+               any("new_york" in str(tz).lower() or "america" in str(tz).lower() for tz in tz_values) if tz_values else True,
+               f"Timezones: {tz_values[:3]}")
+    except Exception:
+        cur.execute("""
+            SELECT summary, description, start_datetime, end_datetime
+            FROM gcal.events
+            WHERE start_datetime >= '2026-03-09 00:00:00'
+              AND start_datetime < '2026-03-14 00:00:00'
+            ORDER BY start_datetime
+        """)
+        events = cur.fetchall()
     cur.close()
     conn.close()
 
@@ -217,6 +254,17 @@ def check_gcal():
     record("gcal: events have descriptions with ingredients",
            events_with_description >= 5,
            f"Only {events_with_description}/5 events have non-trivial descriptions")
+
+    # Reference-menu cross-check: descriptions should cover at least
+    # 3 of the 5 expected category labels if expected_menu.json is provided.
+    if expected_menu and expected_menu.get("menu"):
+        all_desc = " ".join((d or "") for _, d, _, _ in events)
+        ref_categories = {m.get("category") for m in expected_menu["menu"]
+                          if m.get("category")}
+        cat_hits = sum(1 for c in ref_categories if c and c in all_desc)
+        record("gcal: descriptions reference >=3 expected menu categories",
+               cat_hits >= 3,
+               f"matched {cat_hits}/{len(ref_categories)} categories: {ref_categories}")
 
     all_ok = (
         len(events) >= 5
@@ -324,11 +372,15 @@ def _to_addr_str(to_addr):
 def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_file):
     """Run all evaluation checks."""
 
+    expected_menu = _load_expected_menu(groundtruth_workspace)
+    if expected_menu:
+        print(f"[setup] Loaded expected_menu.json with {len(expected_menu.get('menu', []))} reference dishes")
+
     print("\n=== Checking Google Sheet ===")
     gsheet_pass, gsheet_err = check_gsheet()
 
     print("\n=== Checking Google Calendar ===")
-    gcal_pass, gcal_err = check_gcal()
+    gcal_pass, gcal_err = check_gcal(expected_menu)
 
     print("\n=== Checking Email ===")
     email_pass, email_err = check_email()

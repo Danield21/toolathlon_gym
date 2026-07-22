@@ -77,9 +77,9 @@ def main():
                 all_errors.append(f"Missing row in Compliance: {g_row[0]}")
                 continue
 
-            # Total_Tickets (col 1)
+            # Total_Tickets (col 1) - exact count, tol=2
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 10):
+                if not num_close(a_row[1], g_row[1], 2):
                     all_errors.append(f"{key}.Total_Tickets: {a_row[1]} vs {g_row[1]}")
 
             # Avg_Response_Hours (col 2)
@@ -92,14 +92,14 @@ def main():
                 if not num_close(a_row[3], g_row[3], 0.5):
                     all_errors.append(f"{key}.SLA_Target_Hours: {a_row[3]} vs {g_row[3]}")
 
-            # Compliant_Count (col 4)
+            # Compliant_Count (col 4) - exact count, tol=2
             if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 10):
+                if not num_close(a_row[4], g_row[4], 2):
                     all_errors.append(f"{key}.Compliant_Count: {a_row[4]} vs {g_row[4]}")
 
-            # Compliance_Rate (col 5)
+            # Compliance_Rate (col 5) - percent, tol=0.5
             if len(a_row) > 5 and len(g_row) > 5:
-                if not num_close(a_row[5], g_row[5], 1.0):
+                if not num_close(a_row[5], g_row[5], 0.5):
                     all_errors.append(f"{key}.Compliance_Rate: {a_row[5]} vs {g_row[5]}")
 
         if not all_errors:

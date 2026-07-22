@@ -156,6 +156,38 @@ def check_google_form():
         if not course_q_found:
             errors.append("No course selection question found with 7 options")
 
+        # Check for satisfaction question: exactly 5 options covering 1..5
+        satisfaction_q_found = False
+        for q in questions:
+            q_title = (q[1] or "").lower()
+            config = q[3] if isinstance(q[3], dict) else (json.loads(q[3]) if q[3] else {})
+            if q[2] == "choiceQuestion" and ("satisf" in q_title or "rate" in q_title or "score" in q_title or "rating" in q_title or "1-5" in q_title or "1 to 5" in q_title):
+                options = config.get("options", [])
+                opt_texts = [str(o).strip() for o in options]
+                # Require exactly 5 options and all of 1..5 present
+                if len(options) == 5:
+                    opts_combined = " ".join(opt_texts)
+                    has_all_5 = all(str(v) in opts_combined for v in [1, 2, 3, 4, 5])
+                    if has_all_5:
+                        satisfaction_q_found = True
+                        break
+        if not satisfaction_q_found:
+            errors.append("Satisfaction question must have exactly 5 options (1, 2, 3, 4, 5)")
+
+        # Check for recommendation question: exactly 3 options Yes/No/Maybe
+        recommend_q_found = False
+        for q in questions:
+            q_title = (q[1] or "").lower()
+            config = q[3] if isinstance(q[3], dict) else (json.loads(q[3]) if q[3] else {})
+            if q[2] == "choiceQuestion" and ("recommend" in q_title):
+                options = config.get("options", [])
+                opt_texts_lower = " ".join(str(o).lower() for o in options)
+                if len(options) == 3 and ("yes" in opt_texts_lower and "no" in opt_texts_lower and "maybe" in opt_texts_lower):
+                    recommend_q_found = True
+                    break
+        if not recommend_q_found:
+            errors.append("Recommendation question must have exactly 3 options (Yes, No, Maybe)")
+
         if errors:
             return False, errors
 
@@ -165,6 +197,48 @@ def check_google_form():
     finally:
         cur.close()
         conn.close()
+
+
+def load_expected_courses_from_db():
+    """Query Canvas DB for Fall 2014 courses with enrollment/avg_score/assignment_count/quiz_count. Fallback if hardcoded EXPECTED_COURSES diverges."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT c.course_code, c.name,
+                   (SELECT COUNT(*) FROM canvas.enrollments e WHERE e.course_id = c.id AND e.type = 'StudentEnrollment') as enrollment,
+                   (SELECT ROUND(AVG(user_avg)::numeric, 2) FROM (
+                       SELECT s.user_id, AVG(s.score) AS user_avg
+                       FROM canvas.submissions s
+                       JOIN canvas.assignments a ON s.assignment_id = a.id
+                       WHERE a.course_id = c.id AND s.score IS NOT NULL
+                       GROUP BY s.user_id
+                   ) u) as avg_score,
+                   (SELECT COUNT(*) FROM canvas.assignments a WHERE a.course_id = c.id) as assignment_count,
+                   (SELECT COUNT(*) FROM canvas.quizzes q WHERE q.course_id = c.id) as quiz_count
+            FROM canvas.courses c
+            WHERE c.course_code LIKE '%%2014J%%'
+            ORDER BY c.course_code
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        out = []
+        for r in rows:
+            code, name, enr, avg, ac, qc = r
+            out.append({
+                "Course_Code": code,
+                "Course_Name": name,
+                "Enrollment": int(enr) if enr else 0,
+                "Avg_Score": float(avg) if avg else 0.0,
+                "Assignment_Count": int(ac) if ac else 0,
+                "Quiz_Count": int(qc) if qc else 0,
+                "Total_Assessments": (int(ac) if ac else 0) + (int(qc) if qc else 0),
+            })
+        return out
+    except Exception as e:
+        print(f"[eval] Warning: could not load courses from DB: {e}")
+        return None
 
 
 def check_excel(agent_workspace):
@@ -236,8 +310,16 @@ def check_excel(agent_workspace):
         errors.append(f"Expected 7 data rows, found {len(data_rows)}")
         return False, errors
 
+    # Try DB fallback if available (resilient to data updates)
+    db_courses = load_expected_courses_from_db()
+    expected_list = EXPECTED_COURSES
+    if db_courses and len(db_courses) == 7:
+        # Only use DB data if we got all 7 courses
+        expected_list = db_courses
+        print(f"  Using DB-derived expected data for {len(db_courses)} courses")
+
     # Check each course
-    for expected in EXPECTED_COURSES:
+    for expected in expected_list:
         code = expected["Course_Code"]
         found = False
         for row in data_rows:

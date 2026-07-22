@@ -1,0 +1,5 @@
+name,arxiv_id,email,focus_area,time_commitment
+"Lee, S.",2401.12345,lee@inst.edu,Transformer Optimization,30%
+"Wang, T.",2312.54321,wang@inst.edu,Few-Shot Learning,25%
+"Kumar, R.",2311.98765,kumar@inst.edu,Vision Transformers,20%
+"Zhang, Q.",2310.11111,zhang@inst.edu,Prompt Engineering,15%

@@ -33,6 +33,64 @@ def load_sheet_rows(wb, sheet_name):
     return None
 
 
+def query_total_tickets():
+    """Query total ticket count from Snowflake — fall back to baked value if DB unavailable."""
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM sf_data."SUPPORT_CENTER__PUBLIC__TICKETS"')
+        v = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        return int(v)
+    except Exception:
+        return 31588
+
+
+def query_priorities_met_sla():
+    """Query priority counts where avg response time <= SLA target — derived from data."""
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        # SLA targets: High 4h, Medium 8h, Low 24h (typical support SLA tiers used by GT)
+        cur.execute('''
+            SELECT "PRIORITY", AVG("RESPONSE_TIME_HOURS")::float AS avg_h
+            FROM sf_data."SUPPORT_CENTER__PUBLIC__TICKETS"
+            WHERE "PRIORITY" IS NOT NULL
+            GROUP BY "PRIORITY"
+        ''')
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        sla_targets = {"high": 4.0, "medium": 8.0, "low": 24.0, "critical": 1.0}
+        met = 0
+        for pri, avg_h in rows:
+            t = sla_targets.get(str(pri).lower())
+            if t is not None and avg_h is not None and float(avg_h) <= t:
+                met += 1
+        return met
+    except Exception:
+        return 0
+
+
+def query_most_common_priority():
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT "PRIORITY", COUNT(*) AS cnt
+            FROM sf_data."SUPPORT_CENTER__PUBLIC__TICKETS"
+            WHERE "PRIORITY" IS NOT NULL
+            GROUP BY "PRIORITY" ORDER BY cnt DESC LIMIT 1
+        ''')
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return str(row[0]) if row else "Medium"
+    except Exception:
+        return "Medium"
+
+
 def check_excel(agent_workspace, gt_dir):
     errors = []
     try:
@@ -92,26 +150,30 @@ def check_excel(agent_workspace, gt_dir):
         a_sum_data = {str(r[0]).strip().lower(): r[1] for r in (a_sum[1:] if len(a_sum) > 1 else []) if r and r[0]}
         g_sum_data = {str(r[0]).strip().lower(): r[1] for r in (g_sum[1:] if g_sum and len(g_sum) > 1 else []) if r and r[0]}
 
+        expected_total = query_total_tickets()
+        expected_met = query_priorities_met_sla()
+        expected_mcp = query_most_common_priority()
+
         # Total_Tickets
         tt = a_sum_data.get("total_tickets")
         if tt is None:
             errors.append("Summary missing Total_Tickets")
-        elif not num_close(tt, 31588, 10):
-            errors.append(f"Total_Tickets: got {tt}, expected 31588 (tol=10)")
+        elif not num_close(tt, expected_total, 10):
+            errors.append(f"Total_Tickets: got {tt}, expected {expected_total} (tol=10)")
 
         # Priorities_Met_SLA
         pm = a_sum_data.get("priorities_met_sla")
         if pm is None:
             errors.append("Summary missing Priorities_Met_SLA")
-        elif not num_close(pm, 0, 0):
-            errors.append(f"Priorities_Met_SLA: got {pm}, expected 0")
+        elif not num_close(pm, expected_met, 0):
+            errors.append(f"Priorities_Met_SLA: got {pm}, expected {expected_met}")
 
         # Most_Common_Priority
         mcp = a_sum_data.get("most_common_priority")
         if mcp is None:
             errors.append("Summary missing Most_Common_Priority")
-        elif not str_match(mcp, "Medium"):
-            errors.append(f"Most_Common_Priority: got '{mcp}', expected 'Medium'")
+        elif not str_match(mcp, expected_mcp):
+            errors.append(f"Most_Common_Priority: got '{mcp}', expected '{expected_mcp}'")
 
     return errors
 
@@ -122,9 +184,9 @@ def check_gcal():
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
         cur.execute("""
-            SELECT id, summary, start_datetime
+            SELECT id, summary, start_datetime, end_datetime
             FROM gcal.events
-            WHERE (LOWER(summary) LIKE '%sla review%' OR LOWER(summary) LIKE '%support%review%')
+            WHERE (LOWER(summary) LIKE '%sla review%' OR LOWER(summary) LIKE '%support%review%' OR LOWER(summary) LIKE '%monthly support%')
             AND start_datetime >= '2026-04-01T00:00:00'
         """)
         events = cur.fetchall()
@@ -132,6 +194,33 @@ def check_gcal():
         conn.close()
         if len(events) < 3:
             errors.append(f"Expected at least 3 SLA review gcal events, found {len(events)}")
+            return errors
+        # Required first Mondays of April, May, June 2026 (April 6, May 4, June 1)
+        required_dates = {"2026-04-06", "2026-05-04", "2026-06-01"}
+        found_dates = set()
+        for ev in events:
+            sdt = ev[2]
+            edt = ev[3]
+            if sdt is None:
+                continue
+            sdt_str = str(sdt)
+            day = sdt_str[:10]
+            if day in required_dates:
+                # Check 9:00 start
+                hh_mm = sdt_str[11:16] if len(sdt_str) >= 16 else ""
+                if hh_mm not in ("09:00", "9:00 ", "09:00:"):
+                    # Allow slight format variants (e.g., 09:00:00)
+                    if not sdt_str[11:13] == "09":
+                        errors.append(f"Event on {day} expected 9:00 start, got {hh_mm}")
+                # Check ~1h duration if end_datetime present
+                if edt is not None:
+                    edt_str = str(edt)
+                    if edt_str[11:13] not in ("10",):
+                        errors.append(f"Event on {day} expected 10:00 end, got {edt_str[11:16]}")
+                found_dates.add(day)
+        for rd in required_dates:
+            if rd not in found_dates:
+                errors.append(f"Missing required SLA review event on {rd} (first Monday)")
     except Exception as e:
         errors.append(f"GCal DB check error: {e}")
     return errors
@@ -142,24 +231,29 @@ def check_email():
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
+        # Require to=support.leads@company.com AND subject references march 2026 support review
         cur.execute("""
             SELECT subject, to_addr
             FROM email.messages
-            WHERE LOWER(subject) LIKE '%support%' OR LOWER(subject) LIKE '%sla%'
+            WHERE LOWER(to_addr::text) LIKE '%support.leads@company.com%'
         """)
         emails = cur.fetchall()
         cur.close()
         conn.close()
         if not emails:
-            errors.append("No email related to support or SLA found")
+            errors.append("No email sent to support.leads@company.com")
         else:
-            found_to = False
+            # Subject must reference March 2026 support review per task.md
+            found_subject = False
             for em in emails:
-                if "support.leads" in str(em[1]).lower():
-                    found_to = True
+                subj = str(em[0] or "").lower()
+                # Accept subjects that reference 'march 2026' AND ('support'|'review'|'sla'),
+                # or both 'march' and 'support'/'sla' clearly
+                if ("march" in subj and "2026" in subj) or ("march" in subj and ("support" in subj or "review" in subj or "sla" in subj)):
+                    found_subject = True
                     break
-            if not found_to:
-                errors.append("No email sent to support.leads@company.com")
+            if not found_subject:
+                errors.append("Email subject does not reference March 2026 support review")
     except Exception as e:
         errors.append(f"Email DB check error: {e}")
     return errors
@@ -175,10 +269,25 @@ def check_word(agent_workspace):
         from docx import Document
         doc = Document(docx_path)
         text = " ".join(p.text for p in doc.paragraphs).lower()
-        if len(text.strip()) < 30:
+        # Include table cells in text
+        table_text = ""
+        for t in doc.tables:
+            for r in t.rows:
+                for c in r.cells:
+                    table_text += " " + (c.text or "")
+        full_text = (text + " " + table_text).lower()
+        if len(full_text.strip()) < 100:
             errors.append("SLA_Report.docx has too little content")
-        for kw in ["sla", "medium"]:
-            if kw not in text:
+        # Required heading per task.md
+        if "support sla analysis" not in full_text:
+            errors.append("SLA_Report.docx missing 'Support SLA Analysis' heading")
+        # All three priorities must appear (priority breakdown)
+        for kw in ["high", "medium", "low"]:
+            if kw not in full_text:
+                errors.append(f"SLA_Report.docx missing priority: {kw}")
+        # Must reference SLA + breach
+        for kw in ["sla"]:
+            if kw not in full_text:
                 errors.append(f"SLA_Report.docx missing keyword: {kw}")
     except ImportError:
         if os.path.getsize(docx_path) < 100:

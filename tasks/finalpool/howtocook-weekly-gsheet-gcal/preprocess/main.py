@@ -15,7 +15,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -153,8 +153,9 @@ def main():
     conn = psycopg2.connect(**DB_CONFIG)
     try:
         clear_tables(conn)
-        inject_gsheet(conn)
-        inject_gcal_events(conn)
+        # IMPORTANT: do NOT inject gsheet or gcal events here.
+        # The task asks the AGENT to create them; pre-populating was a data leak.
+        # The MEAL_PLAN constant remains as evaluation reference only.
         ensure_email_folder(conn)
     finally:
         conn.close()

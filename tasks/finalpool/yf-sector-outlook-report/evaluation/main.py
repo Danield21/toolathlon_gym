@@ -19,12 +19,36 @@ def load_sheet_rows(wb, sheet_name):
     return None
 
 
-def check_excel(agent_workspace):
+def check_excel(agent_workspace, groundtruth_workspace=None):
     errors = []
     import openpyxl
     path = os.path.join(agent_workspace, "Sector_Outlook.xlsx")
     if not os.path.exists(path):
         return ["Sector_Outlook.xlsx not found"]
+
+    # Load groundtruth values (preferred) for comparison
+    gt_path = None
+    if groundtruth_workspace:
+        cand = os.path.join(groundtruth_workspace, "Sector_Outlook.xlsx")
+        if os.path.exists(cand):
+            gt_path = cand
+    gt_perf_lookup = {}  # stock -> (sector, current_price, price_1y_ago, return_1y_pct, outlook, growth_forecast, risk_level)
+    gt_summary = {}
+    if gt_path:
+        try:
+            gt_wb = openpyxl.load_workbook(gt_path, data_only=True)
+            gt_perf_rows = load_sheet_rows(gt_wb, "Sector Performance") or []
+            for r in gt_perf_rows[1:]:
+                if r and len(r) > 7 and r[1]:
+                    gt_perf_lookup[str(r[1]).strip().upper()] = tuple(r)
+            gt_summary_rows = load_sheet_rows(gt_wb, "Cross-Sector Summary") or []
+            for r in gt_summary_rows[1:]:
+                if r and r[0] is not None:
+                    gt_summary[str(r[0]).strip().lower()] = r[1]
+        except Exception as e:
+            errors.append(f"Error loading GT excel: {e}")
+            return errors
+
     try:
         wb = openpyxl.load_workbook(path, data_only=True)
 
@@ -35,16 +59,38 @@ def check_excel(agent_workspace):
             data_rows = [r for r in rows[1:] if r and r[0] is not None]
             if len(data_rows) < 5:
                 errors.append(f"Sector Performance has {len(data_rows)} rows, expected 5")
-            # Check stocks present
-            stocks = {str(r[1]).strip().upper() for r in data_rows if r and len(r) > 1 and r[1]}
-            for sym in ["GOOGL", "AMZN", "JPM", "JNJ", "XOM"]:
-                if sym not in stocks:
-                    errors.append(f"Stock {sym} missing from Sector Performance")
-            # Check GOOGL return
+            # Check stocks present and validate each per groundtruth
+            agent_lookup = {}
             for r in data_rows:
-                if len(r) > 4 and r[1] and str(r[1]).strip().upper() == "GOOGL":
-                    if not num_close(r[4], 74.57, abs_tol=2.0):
-                        errors.append(f"GOOGL Return_1Y_Pct={r[4]}, expected ~74.57")
+                if len(r) > 1 and r[1]:
+                    agent_lookup[str(r[1]).strip().upper()] = r
+
+            for sym in ["GOOGL", "AMZN", "JPM", "JNJ", "XOM"]:
+                if sym not in agent_lookup:
+                    errors.append(f"Stock {sym} missing from Sector Performance")
+                    continue
+                a_row = agent_lookup[sym]
+                gt_row = gt_perf_lookup.get(sym)
+                if gt_row is None:
+                    continue
+                # Sector (col 0)
+                if str(a_row[0]).strip().lower() != str(gt_row[0]).strip().lower():
+                    errors.append(f"{sym} Sector: '{a_row[0]}' vs expected '{gt_row[0]}'")
+                # Current_Price (col 2)
+                if not num_close(a_row[2], gt_row[2], abs_tol=1.0, rel_tol=0.02):
+                    errors.append(f"{sym} Current_Price={a_row[2]} vs expected {gt_row[2]}")
+                # Return_1Y_Pct (col 4)
+                if not num_close(a_row[4], gt_row[4], abs_tol=2.0, rel_tol=0.05):
+                    errors.append(f"{sym} Return_1Y_Pct={a_row[4]} vs expected {gt_row[4]}")
+                # Outlook (col 5)
+                if str(a_row[5]).strip().lower() != str(gt_row[5]).strip().lower():
+                    errors.append(f"{sym} Outlook: '{a_row[5]}' vs expected '{gt_row[5]}'")
+                # Growth_Forecast (col 6)
+                if not num_close(a_row[6], gt_row[6], abs_tol=0.5):
+                    errors.append(f"{sym} Growth_Forecast={a_row[6]} vs expected {gt_row[6]}")
+                # Risk_Level (col 7)
+                if str(a_row[7]).strip().lower() != str(gt_row[7]).strip().lower():
+                    errors.append(f"{sym} Risk_Level: '{a_row[7]}' vs expected '{gt_row[7]}'")
 
         rows2 = load_sheet_rows(wb, "Cross-Sector Summary")
         if rows2 is None:
@@ -52,15 +98,30 @@ def check_excel(agent_workspace):
         else:
             data_rows2 = [r for r in rows2[1:] if r and r[0] is not None]
             lookup = {str(r[0]).strip().lower(): r[1] for r in data_rows2 if r[0]}
-            if "positive_outlook_count" in lookup:
-                if not num_close(lookup["positive_outlook_count"], 3, abs_tol=0):
-                    errors.append(f"Positive_Outlook_Count={lookup['positive_outlook_count']}, expected 3")
-            if "high_risk_count" in lookup:
-                if not num_close(lookup["high_risk_count"], 1, abs_tol=0):
-                    errors.append(f"High_Risk_Count={lookup['high_risk_count']}, expected 1")
-            if "avg_1y_return" in lookup:
-                if not num_close(lookup["avg_1y_return"], 39.16):
-                    errors.append(f"Avg_1Y_Return={lookup['avg_1y_return']}, expected ~39.16")
+            # Use groundtruth values as canonical
+            for key in ("best_1y_sector", "worst_1y_sector"):
+                if key in gt_summary:
+                    if key not in lookup:
+                        errors.append(f"Cross-Sector Summary missing {key}")
+                    elif str(lookup[key]).strip().lower() != str(gt_summary[key]).strip().lower():
+                        errors.append(
+                            f"{key}: '{lookup[key]}' vs expected '{gt_summary[key]}'"
+                        )
+            for key in ("positive_outlook_count", "high_risk_count"):
+                if key in gt_summary:
+                    if key not in lookup:
+                        errors.append(f"Cross-Sector Summary missing {key}")
+                    elif not num_close(lookup[key], gt_summary[key], abs_tol=0):
+                        errors.append(
+                            f"{key}={lookup[key]} vs expected {gt_summary[key]}"
+                        )
+            if "avg_1y_return" in gt_summary:
+                if "avg_1y_return" not in lookup:
+                    errors.append("Cross-Sector Summary missing avg_1y_return")
+                elif not num_close(lookup["avg_1y_return"], gt_summary["avg_1y_return"], abs_tol=2.0):
+                    errors.append(
+                        f"Avg_1Y_Return={lookup['avg_1y_return']} vs expected {gt_summary['avg_1y_return']}"
+                    )
 
     except Exception as e:
         errors.append(f"Error reading Excel: {e}")
@@ -76,11 +137,24 @@ def check_word(agent_workspace):
         from docx import Document
         doc = Document(path)
         text = "\n".join([p.text for p in doc.paragraphs]).lower()
-        if len(text) < 200:
-            errors.append(f"Sector_Report.docx too short ({len(text)} chars)")
-        for kw in ["sector", "outlook", "technology", "energy"]:
+        if len(text) < 400:
+            errors.append(f"Sector_Report.docx too short ({len(text)} chars, need >=400)")
+        # All 4 sectors must be discussed
+        for kw in ["technology", "healthcare", "energy", "financial"]:
             if kw not in text:
-                errors.append(f"Sector_Report.docx missing keyword '{kw}'")
+                errors.append(f"Sector_Report.docx missing sector '{kw}'")
+        # All 5 stock tickers must be mentioned
+        text_upper = "\n".join([p.text for p in doc.paragraphs]).upper()
+        for sym in ["GOOGL", "AMZN", "JPM", "JNJ", "XOM"]:
+            if sym not in text_upper:
+                errors.append(f"Sector_Report.docx missing stock symbol '{sym}'")
+        # Document should include at least one numeric return value (digit + % or .)
+        import re
+        if not re.search(r"[-]?\d+\.\d+\s*%?", text):
+            errors.append("Sector_Report.docx missing numeric return values")
+        # Conclusion / synthesis section must appear
+        if not any(kw in text for kw in ("recommend", "allocation", "conclu", "synth")):
+            errors.append("Sector_Report.docx missing recommendation/conclusion section")
     except Exception as e:
         errors.append(f"Error reading Word doc: {e}")
     return errors
@@ -92,11 +166,30 @@ def check_notion():
         conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM notion.pages")
-        count = cur.fetchone()[0]
-        # Should have at least 2 pages (parent + the created one)
-        if count < 2:
-            errors.append(f"Only {count} Notion pages, expected at least 2 (parent + sector outlook)")
+        # Find pages whose title contains 'Sector Outlook' AND 'Q1 2026'
+        cur.execute(
+            """
+            SELECT id, properties FROM notion.pages
+            WHERE LOWER(properties::text) LIKE '%sector outlook%'
+              AND LOWER(properties::text) LIKE '%q1 2026%'
+            """
+        )
+        rows = cur.fetchall()
+        if len(rows) == 0:
+            errors.append("Notion: no page titled 'Sector Outlook Report - Q1 2026' found")
+        else:
+            # Pick first matching page; verify body mentions sectors and stocks
+            page_id = rows[0][0]
+            cur.execute("""
+                SELECT block_data FROM notion.blocks
+                WHERE parent_id = %s
+            """, (page_id,))
+            blocks = cur.fetchall()
+            body_text = " ".join(str(b[0]) for b in blocks).lower()
+            # Check at least 2 sectors are mentioned in page body
+            sectors_found = sum(1 for s in ("technology", "healthcare", "energy", "financial") if s in body_text)
+            if sectors_found < 2:
+                errors.append(f"Notion 'Sector Outlook' page body discusses only {sectors_found} sectors (need >=2)")
         cur.close()
         conn.close()
     except Exception as e:
@@ -112,11 +205,12 @@ def main():
     parser.add_argument("--res_log_file", required=False)
     args = parser.parse_args()
     agent_ws = args.agent_workspace or os.path.join(os.path.dirname(__file__), "..", "groundtruth_workspace")
+    gt_ws = args.groundtruth_workspace or os.path.join(os.path.dirname(__file__), "..", "groundtruth_workspace")
 
     all_errors = []
 
     print("  Checking Excel file...")
-    errs = check_excel(agent_ws)
+    errs = check_excel(agent_ws, gt_ws)
     if errs:
         all_errors.extend(errs)
         for e in errs[:5]:

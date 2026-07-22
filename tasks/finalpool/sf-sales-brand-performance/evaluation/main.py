@@ -87,20 +87,20 @@ def main():
                     errors.append(f"{key}.Products: {a_row[1]} vs {g_row[1]} (tol=1)")
 
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 5):
-                    errors.append(f"{key}.Orders: {a_row[2]} vs {g_row[2]} (tol=5)")
+                if not num_close(a_row[2], g_row[2], 1):
+                    errors.append(f"{key}.Orders: {a_row[2]} vs {g_row[2]} (tol=1)")
 
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 50.0):
-                    errors.append(f"{key}.Revenue: {a_row[3]} vs {g_row[3]} (tol=50.0)")
+                if not num_close(a_row[3], g_row[3], 5.0):
+                    errors.append(f"{key}.Revenue: {a_row[3]} vs {g_row[3]} (tol=5.0)")
 
             if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 2.0):
-                    errors.append(f"{key}.Avg_Order_Value: {a_row[4]} vs {g_row[4]} (tol=2.0)")
+                if not num_close(a_row[4], g_row[4], 0.5):
+                    errors.append(f"{key}.Avg_Order_Value: {a_row[4]} vs {g_row[4]} (tol=0.5)")
 
             if len(a_row) > 5 and len(g_row) > 5:
-                if not num_close(a_row[5], g_row[5], 0.5):
-                    errors.append(f"{key}.Revenue_Share_Pct: {a_row[5]} vs {g_row[5]} (tol=0.5)")
+                if not num_close(a_row[5], g_row[5], 0.2):
+                    errors.append(f"{key}.Revenue_Share_Pct: {a_row[5]} vs {g_row[5]} (tol=0.2)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -138,8 +138,17 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 50.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=50.0)")
+                # Summary Value: depends on metric type
+                gv = g_row[1]
+                av = a_row[1]
+                # If it looks like a pct / small number, use tight tol
+                try:
+                    gv_f = float(gv)
+                    tol = 5.0 if abs(gv_f) > 100 else 1.0
+                except (TypeError, ValueError):
+                    tol = 5.0
+                if not num_close(av, gv, tol):
+                    errors.append(f"{key}.Value: {av} vs {gv} (tol={tol})")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")

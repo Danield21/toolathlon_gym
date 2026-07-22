@@ -14,7 +14,7 @@ import psycopg2
 
 DB_CONN = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -48,6 +48,18 @@ def main():
             with open(mem_file, "w") as f:
                 json.dump({"entities": [], "relations": []}, f)
         print(f"Memory file ensured at {mem_file}")
+
+        # Cleanup stale Recipe_Comparison.xlsx (avoid agent seeing previous run output)
+        # Only cleanup if workspace is NOT the groundtruth_workspace (safety)
+        ws_abs = os.path.abspath(args.agent_workspace)
+        if "groundtruth" not in ws_abs.lower():
+            stale_xlsx = os.path.join(args.agent_workspace, "Recipe_Comparison.xlsx")
+            if os.path.exists(stale_xlsx):
+                try:
+                    os.remove(stale_xlsx)
+                    print(f"Removed stale {stale_xlsx}")
+                except Exception as e:
+                    print(f"Could not remove stale xlsx: {e}")
 
     print("Preprocessing completed successfully!")
 

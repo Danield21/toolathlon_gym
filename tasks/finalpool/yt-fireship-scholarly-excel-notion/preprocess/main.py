@@ -21,7 +21,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -183,6 +183,7 @@ PAPERS = [
 def clear_tables(conn):
     with conn.cursor() as cur:
         cur.execute("DELETE FROM scholarly.arxiv_papers")
+        cur.execute("DELETE FROM scholarly.scholar_papers")
         cur.execute("DELETE FROM gcal.events")
         cur.execute("DELETE FROM gform.responses")
         cur.execute("DELETE FROM gform.questions")
@@ -200,7 +201,8 @@ def clear_tables(conn):
 
 def inject_scholarly_papers(conn):
     with conn.cursor() as cur:
-        for p in PAPERS:
+        for idx, p in enumerate(PAPERS, start=1):
+            # arxiv_papers: full-text/abstract source (primary)
             cur.execute("""
                 INSERT INTO scholarly.arxiv_papers
                 (id, title, authors, abstract, categories, primary_category,
@@ -217,8 +219,27 @@ def inject_scholarly_papers(conn):
                 f"http://arxiv.org/pdf/{p['arxiv_id']}",
                 f"http://arxiv.org/abs/{p['arxiv_id']}",
             ))
+            # scholar_papers: provides citation_count (matched by title)
+            pub_year = int(str(p["published"])[:4])
+            cur.execute("""
+                INSERT INTO scholarly.scholar_papers
+                (id, title, authors, abstract, pub_year, venue, citation_count, url, eprint_url, pub_url, bib)
+                VALUES (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            """, (
+                idx,
+                p["title"],
+                json.dumps([a["name"] for a in p["authors"]]),
+                p["abstract"],
+                pub_year,
+                "arXiv",
+                p["citation_count"],
+                f"https://scholar.google.com/scholar?q={p['arxiv_id']}",
+                f"http://arxiv.org/pdf/{p['arxiv_id']}",
+                f"http://arxiv.org/abs/{p['arxiv_id']}",
+                json.dumps({"title": p["title"], "year": pub_year, "citations": p["citation_count"]}),
+            ))
     conn.commit()
-    print(f"[preprocess] Injected {len(PAPERS)} papers into scholarly.arxiv_papers")
+    print(f"[preprocess] Injected {len(PAPERS)} papers into scholarly.arxiv_papers and scholarly.scholar_papers (with citations)")
 
 
 def ensure_email_folder(conn):

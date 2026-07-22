@@ -1,0 +1,9 @@
+Ticker,Asset_Class,Sector,Weight_Pct,Cost_Basis_USD,Notes
+AAPL,Equity,Technology,12.0,150000,Large-cap tech
+MSFT,Equity,Technology,14.0,180000,Large-cap tech
+GOOGL,Equity,Technology,12.0,140000,Large-cap tech
+JPM,Equity,Financials,10.0,110000,Large-cap financial
+JNJ,Equity,Healthcare,8.0,90000,Defensive healthcare
+XOM,Equity,Energy,8.0,85000,Energy
+GLD,Commodity_ETF,Commodities,10.0,120000,Gold ETF proxy
+SPY,Equity_ETF,Broad_Market,26.0,300000,Broad equity benchmark

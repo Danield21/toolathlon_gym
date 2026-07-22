@@ -67,18 +67,27 @@ def check_word_doc(agent_workspace):
     record("Word doc has at least 4 sections", len(headings) >= 4,
            f"Found {len(headings)} section-like headings")
 
-    # Check paper keywords
-    has_scaling = "scaling laws" in all_text or "scaling" in all_text
-    has_rlhf = "rlhf" in all_text or "instructgpt" in all_text or "follow instructions" in all_text or "human feedback" in all_text
-    has_opt = "opt" in all_text and ("open pre-trained" in all_text or "open-source" in all_text or "175b" in all_text)
+    # Check paper keywords with stronger matching
+    import re as _re
+    has_scaling = "scaling laws" in all_text or "scaling law" in all_text or "kaplan" in all_text
+    has_rlhf = ("rlhf" in all_text or "instructgpt" in all_text or
+                "follow instructions" in all_text or "human feedback" in all_text or
+                "ouyang" in all_text)
+    # Use word boundary for 'opt' to avoid matching 'option', 'optimal', etc.
+    opt_word = _re.search(r"\bopt\b", all_text) is not None or "open pre-trained" in all_text
+    has_opt = opt_word and ("open pre-trained transformer" in all_text or
+                             "open-source" in all_text or "175b" in all_text or
+                             "zhang" in all_text and "roller" in all_text)
 
     record("Mentions Scaling Laws paper", has_scaling, "No scaling laws content found")
     record("Mentions RLHF/InstructGPT paper", has_rlhf, "No RLHF/InstructGPT content found")
-    record("Mentions OPT paper", has_opt, "No OPT content found")
+    record("Mentions OPT paper (with word-boundary match)", has_opt, "No OPT content found")
 
-    has_comparative = "comparative" in all_text or "comparison" in all_text or "connect" in all_text or "relate" in all_text
-    record("Has comparative analysis section", has_comparative,
-           "No comparative analysis content found")
+    # Tighten Comparative Analysis to require an explicit section title
+    has_comparative_section = ("comparative analysis" in all_text or "comparative summary" in all_text or
+                               "comparison of" in all_text or "comparing" in all_text)
+    record("Has Comparative Analysis section title", has_comparative_section,
+           "No comparative analysis section header found")
 
 
 def check_notion():
@@ -92,27 +101,33 @@ def check_notion():
     cur.close()
     conn.close()
 
+    # Extract clean page titles (with the 'Paper:' prefix from task)
     page_titles = []
     for (props,) in pages:
         if isinstance(props, dict):
-            title_prop = props.get("title", {})
-            if isinstance(title_prop, dict):
-                for item in title_prop.get("title", []):
-                    if isinstance(item, dict):
-                        page_titles.append(item.get("text", {}).get("content", "").lower())
-        page_titles.append(str(props).lower())
+            for key, val in props.items():
+                if isinstance(val, dict) and val.get("type") == "title":
+                    title_arr = val.get("title", [])
+                    title_text = "".join(t.get("plain_text") or t.get("text", {}).get("content", "")
+                                          for t in title_arr if isinstance(t, dict))
+                    if title_text:
+                        page_titles.append(title_text.lower())
+                        break
 
-    all_page_text = " ".join(page_titles)
-    has_scaling = "scaling" in all_page_text
-    has_instruct = "instruct" in all_page_text or "human feedback" in all_page_text or "rlhf" in all_page_text
-    has_opt = "opt" in all_page_text and ("pre-trained" in all_page_text or "transformer" in all_page_text)
+    # Need at least 3 pages with the 'Paper:' prefix per task
+    paper_pages = [t for t in page_titles if t.strip().startswith("paper:")]
+    record("At least 3 Notion 'Paper:' pages exist", len(paper_pages) >= 3,
+           f"Found {len(paper_pages)} 'Paper:' pages out of {len(pages)}")
 
-    paper_pages_found = sum([has_scaling, has_instruct, has_opt])
-    record("Notion has pages for all 3 papers", paper_pages_found >= 3,
-           f"Found: scaling={has_scaling}, instruct={has_instruct}, opt={has_opt}. Total pages: {len(pages)}")
+    all_titles = " ".join(page_titles)
+    has_scaling = "scaling" in all_titles
+    has_instruct = "instruct" in all_titles or "human feedback" in all_titles or "rlhf" in all_titles
+    has_opt = ("opt" in all_titles and ("pre-trained" in all_titles or "transformer" in all_titles))
 
-    record("At least 3 Notion pages created", len(pages) >= 3,
-           f"Found {len(pages)} pages total")
+    record("Notion page covers Scaling Laws", has_scaling,
+           f"titles: {page_titles[:5]}")
+    record("Notion page covers InstructGPT/RLHF", has_instruct)
+    record("Notion page covers OPT", has_opt)
 
 
 def check_email():
@@ -147,15 +162,24 @@ def check_email():
            f"Messages found: {len(messages)}")
 
     if matching:
+        import re as _re_em
         subject, _, _, body_text = matching
         subject_lower = (subject or "").lower()
         body_lower = (body_text or "").lower()
-        has_paper_ref = (
-            "paper" in subject_lower or "analysis" in subject_lower or "report" in subject_lower or
-            "scaling" in body_lower or "rlhf" in body_lower or "opt" in body_lower
+        # Require subject-level paper/analysis/report context AND body-level
+        # paper-specific keyword (word-boundary 'opt' to avoid 'option/optimal').
+        subj_ok = (
+            "paper" in subject_lower or "analysis" in subject_lower or "report" in subject_lower
         )
-        record("Email mentions paper analysis", has_paper_ref,
-               f"Subject: {subject}, body preview: {body_text[:100] if body_text else ''}")
+        body_kw_ok = (
+            "scaling" in body_lower or "rlhf" in body_lower or "instruct" in body_lower
+            or _re_em.search(r"\bopt\b", body_lower) is not None
+            or "kaplan" in body_lower or "ouyang" in body_lower or "transformer" in body_lower
+        )
+        record("Email mentions paper analysis (subject context)", subj_ok,
+               f"Subject: {subject}")
+        record("Email body mentions paper-specific keyword", body_kw_ok,
+               f"body preview: {body_text[:100] if body_text else ''}")
 
 
 def main():
@@ -188,11 +212,11 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:
-        print("FAIL")
+        print(f"FAIL ({FAIL_COUNT} checks failed)")
         sys.exit(1)
 
 

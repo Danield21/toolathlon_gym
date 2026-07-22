@@ -34,7 +34,7 @@ def check_notion():
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
 
-    # Look for a database with "market" and "news" in the title
+    # Look for a database with title exactly 'Market News Digest'
     cur.execute("SELECT id, title FROM notion.databases")
     dbs = cur.fetchall()
 
@@ -48,45 +48,102 @@ def check_notion():
                     title_str += item.get("plain_text", item.get("text", {}).get("content", ""))
         elif isinstance(title_json, str):
             title_str = title_json
-        if "market" in title_str.lower() and "news" in title_str.lower():
+        ts_lower = title_str.lower()
+        if "market news digest" in ts_lower or ("market" in ts_lower and "news" in ts_lower and "digest" in ts_lower):
             found_db_id = db_id
             found_db_title = title_str
             break
 
-    check("Notion database with 'Market News' in title exists",
+    check("Notion database titled 'Market News Digest' exists",
           found_db_id is not None,
-          f"Found DBs: {[(str(r[0])[:20], str(r[1])[:50]) for r in dbs]}")
+          f"Found DBs: {[(str(r[0])[:20], str(r[1])[:80]) for r in dbs]}")
 
-    if found_db_id:
-        # Count pages in this database
-        cur.execute("""
-            SELECT COUNT(*) FROM notion.pages
-            WHERE parent::text LIKE %s OR parent::text LIKE %s
-        """, (f'%{found_db_id}%', '%database%'))
-        # Also count all pages if parent matching is tricky
-        cur.execute("SELECT COUNT(*) FROM notion.pages")
-        total_pages = cur.fetchone()[0]
-        check("At least 5 news entries in Notion", total_pages >= 5,
-              f"Total pages: {total_pages}")
+    if found_db_id is None:
+        cur.close()
+        conn.close()
+        return
 
-        # Check pages have relevant properties
-        cur.execute("SELECT properties FROM notion.pages LIMIT 10")
-        page_props = cur.fetchall()
-        has_symbol = False
-        for (props,) in page_props:
-            props_str = str(props).lower() if props else ""
-            if any(sym.lower() in props_str for sym in ["googl", "amzn", "jpm", "jnj", "xom"]):
-                has_symbol = True
-                break
-        check("Notion pages contain stock symbol data", has_symbol,
-              "No pages with GOOGL/AMZN/JPM/JNJ/XOM in properties")
-    else:
-        # Check if there are any pages at all
-        cur.execute("SELECT COUNT(*) FROM notion.pages")
-        page_count = cur.fetchone()[0]
-        check("At least 5 news entries in Notion", page_count >= 5,
-              f"Total notion pages: {page_count}")
-        check("Notion pages contain stock symbol data", False, "No Market News database found")
+    # Filter pages by parent database id (correctly - not all pages)
+    cur.execute("""
+        SELECT id, properties FROM notion.pages
+        WHERE parent::text LIKE %s
+    """, (f"%{found_db_id}%",))
+    db_pages = cur.fetchall()
+    check("At least 5 news entries in Market News Digest DB",
+          len(db_pages) >= 5,
+          f"Total pages in DB: {len(db_pages)}")
+
+    # Check pages cover required stock symbols (at least 3 of 5)
+    symbols = ["GOOGL", "AMZN", "JPM", "JNJ", "XOM"]
+    found_symbols = set()
+    summary_violations = 0
+
+    def _extract_text_from_prop(v):
+        """Extract plain text from a Notion property value."""
+        text = ""
+        if isinstance(v, dict):
+            # rich_text or title
+            for key in ("rich_text", "title"):
+                rt = v.get(key)
+                if isinstance(rt, list):
+                    for piece in rt:
+                        if isinstance(piece, dict):
+                            text += piece.get("plain_text", "")
+                            inner = piece.get("text") or {}
+                            if isinstance(inner, dict):
+                                text += inner.get("content", "")
+            # select
+            sel = v.get("select")
+            if isinstance(sel, dict):
+                text += str(sel.get("name") or "")
+            # multi_select
+            ms = v.get("multi_select")
+            if isinstance(ms, list):
+                for item in ms:
+                    if isinstance(item, dict):
+                        text += " " + str(item.get("name") or "")
+            # plain string fallback
+        elif isinstance(v, str):
+            text = v
+        return text
+
+    for pid, props in db_pages:
+        # Extract symbol property value precisely
+        page_symbol_text = ""
+        sum_val = ""
+        if isinstance(props, dict):
+            for k, v in props.items():
+                kl = k.lower()
+                if "symbol" in kl:
+                    page_symbol_text += " " + _extract_text_from_prop(v)
+                if "summary" in kl:
+                    sum_val = _extract_text_from_prop(v)
+        # Match symbols using word boundary approach: symbol must equal or be a token in symbol property text
+        page_sym_upper = page_symbol_text.upper()
+        # tokenize
+        import re as _re
+        tokens = set(_re.findall(r"[A-Z]+", page_sym_upper))
+        for sym in symbols:
+            if sym in tokens:
+                found_symbols.add(sym)
+        if sum_val and len(sum_val) > 200:
+            summary_violations += 1
+    check("Notion pages cover at least 3 of 5 tracked stocks (GOOGL/AMZN/JPM/JNJ/XOM)",
+          len(found_symbols) >= 3,
+          f"Found symbols: {found_symbols}")
+    check("All page Summary properties are <=200 chars",
+          summary_violations == 0,
+          f"{summary_violations} page(s) exceed 200-char limit")
+
+    # Check DB schema/properties
+    cur.execute("SELECT properties FROM notion.databases WHERE id = %s", (found_db_id,))
+    db_props_row = cur.fetchone()
+    if db_props_row and db_props_row[0]:
+        db_props = db_props_row[0]
+        ds = str(db_props).lower() if db_props else ""
+        for prop_name in ["title", "symbol", "publisher", "published_date", "summary"]:
+            check(f"Database has '{prop_name}' property", prop_name.replace("_", "") in ds.replace("_", "") or prop_name in ds,
+                  f"DB properties (sample): {ds[:300]}")
 
     cur.close()
     conn.close()
@@ -104,30 +161,92 @@ def check_gform():
 
     found_form_id = None
     for form_id, title in forms:
-        if "sentiment" in (title or "").lower() or "market" in (title or "").lower() or "investor" in (title or "").lower():
+        tl = (title or "").lower()
+        if "investor" in tl and "market sentiment" in tl and "survey" in tl:
             found_form_id = form_id
             break
-    if found_form_id is None and forms:
-        found_form_id = forms[0][0]
-
-    check("Form with 'Sentiment' or 'Market' or 'Investor' in title found",
+    # Stricter: do not fall back to any form
+    check("Form titled 'Investor Market Sentiment Survey' found",
           found_form_id is not None,
           f"Forms: {[(str(r[0])[:20], r[1]) for r in forms]}")
 
     if found_form_id:
-        cur.execute("SELECT COUNT(*) FROM gform.questions WHERE form_id = %s", (found_form_id,))
-        q_count = cur.fetchone()[0]
-        check("Form has exactly 4 questions", q_count == 4,
-              f"Got {q_count} questions")
+        cur.execute("""
+            SELECT id, title, question_type, config
+            FROM gform.questions WHERE form_id = %s ORDER BY position
+        """, (found_form_id,))
+        questions = cur.fetchall()
+        check("Form has exactly 4 questions", len(questions) == 4,
+              f"Got {len(questions)} questions: {[(q[1] or '')[:60] for q in questions]}")
 
-        cur.execute("SELECT title FROM gform.questions WHERE form_id = %s ORDER BY position", (found_form_id,))
-        questions = [r[0] for r in cur.fetchall()]
-        check("Form has question about market outlook",
-              any("outlook" in q.lower() or "market" in q.lower() for q in questions),
-              f"Questions: {questions}")
-        check("Form has question about sector",
-              any("sector" in q.lower() for q in questions),
-              f"Questions: {questions}")
+        if len(questions) >= 4:
+            titles = [(q[1] or "").lower() for q in questions]
+            types = [(q[2] or "").upper() for q in questions]
+
+            def _choices(cfg):
+                if cfg is None:
+                    return []
+                if isinstance(cfg, str):
+                    try:
+                        cfg = json.loads(cfg)
+                    except (TypeError, ValueError):
+                        return []
+                if isinstance(cfg, dict):
+                    return [str(c).strip().lower() for c in (cfg.get("choices") or cfg.get("options") or [])]
+                return []
+
+            # Q1: market outlook with 5 sentiment options
+            q1_idx = next((i for i, t in enumerate(titles) if "outlook" in t and ("30 day" in t or "next 30" in t)), None)
+            if q1_idx is not None:
+                ch = _choices(questions[q1_idx][3])
+                expected = ["very bullish", "bullish", "neutral", "bearish", "very bearish"]
+                ok = sum(1 for e in expected if any(e == c or e in c for c in ch)) >= 4
+                check("Q1 market outlook has 5 sentiment options", ok,
+                      f"Choices: {ch}")
+            else:
+                check("Q1 about market outlook in next 30 days exists", False,
+                      f"Question titles: {titles}")
+
+            # Q2: sector outperform
+            q2_idx = next((i for i, t in enumerate(titles)
+                           if "sector" in t and "outperform" in t), None)
+            if q2_idx is not None:
+                ch = _choices(questions[q2_idx][3])
+                expected = ["communication services", "consumer cyclical",
+                            "financial services", "healthcare", "energy"]
+                ok = sum(1 for e in expected if any(e in c for c in ch)) >= 4
+                check("Q2 sector outperform has 5 specific sector options", ok,
+                      f"Choices: {ch}")
+            else:
+                check("Q2 about sector outperformance exists", False,
+                      f"Question titles: {titles}")
+
+            # Q3: investment concern
+            q3_idx = next((i for i, t in enumerate(titles)
+                           if "investment concern" in t or "primary concern" in t), None)
+            if q3_idx is not None:
+                ch = _choices(questions[q3_idx][3])
+                expected = ["inflation", "interest rates", "geopolitical risk",
+                            "earnings slowdown", "valuations"]
+                ok = sum(1 for e in expected if any(e in c for c in ch)) >= 4
+                check("Q3 investment concern has 5 specific options", ok,
+                      f"Choices: {ch}")
+            else:
+                check("Q3 about investment concern exists", False,
+                      f"Question titles: {titles}")
+
+            # Q4: equity allocation
+            q4_idx = next((i for i, t in enumerate(titles)
+                           if "equity allocation" in t or "equity allocations" in t), None)
+            if q4_idx is not None:
+                ch = _choices(questions[q4_idx][3])
+                expected = ["very likely", "likely", "neutral", "unlikely", "very unlikely"]
+                ok = sum(1 for e in expected if any(e == c or e in c for c in ch)) >= 4
+                check("Q4 equity allocation has 5 likelihood options", ok,
+                      f"Choices: {ch}")
+            else:
+                check("Q4 about equity allocation exists", False,
+                      f"Question titles: {titles}")
 
     cur.close()
     conn.close()
@@ -138,26 +257,41 @@ def check_email():
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
 
+    # Strictly: to subscribers@newsletter.example.com AND subject has Weekly+Market+Digest
     cur.execute("""
-        SELECT subject, to_addr, from_addr FROM email.messages
-        WHERE (subject ILIKE '%market%' AND subject ILIKE '%digest%')
-           OR (subject ILIKE '%weekly%' AND subject ILIKE '%market%')
-           OR to_addr::text ILIKE '%subscribers%'
-        LIMIT 10
+        SELECT subject, to_addr, from_addr, body_text FROM email.messages
+        WHERE to_addr::text ILIKE '%subscribers@newsletter.example.com%'
     """)
     rows = cur.fetchall()
-    check("Email with 'Market Digest' or 'Weekly Market' in subject found",
-          len(rows) > 0, "No matching email found")
+    check("Email sent to subscribers@newsletter.example.com",
+          len(rows) > 0,
+          f"No email to subscribers@newsletter.example.com")
 
     if rows:
-        to_addrs = [str(r[1]) for r in rows]
-        check("Email sent to subscribers@newsletter.example.com",
-              any("subscribers" in addr for addr in to_addrs),
-              f"To addresses: {to_addrs}")
-        subjects = [r[0] or "" for r in rows]
-        check("Email subject contains 'Digest' or 'Weekly'",
-              any("digest" in s.lower() or "weekly" in s.lower() for s in subjects),
-              f"Subjects: {subjects}")
+        ok_subj = False
+        ok_from = False
+        ok_body = False
+        for subject, to_addr, from_addr, body in rows:
+            sl = (subject or "").lower()
+            bl = (body or "").lower()
+            fl = (from_addr or "").lower()
+            if "weekly" in sl and "market" in sl and "digest" in sl:
+                ok_subj = True
+            if "newsletter@fund.example.com" in fl:
+                ok_from = True
+            # Body must mention >=3 of GOOGL/AMZN/JPM/JNJ/XOM
+            sym_count = sum(1 for s in ["googl", "amzn", "jpm", "jnj", "xom"] if s in bl)
+            if sym_count >= 3:
+                ok_body = True
+        check("Email subject contains 'Weekly' AND 'Market' AND 'Digest'",
+              ok_subj,
+              f"Subjects: {[r[0] for r in rows]}")
+        check("Email from newsletter@fund.example.com",
+              ok_from,
+              f"From: {[r[2] for r in rows]}")
+        check("Email body mentions at least 3 of 5 tracked stocks (GOOGL/AMZN/JPM/JNJ/XOM)",
+              ok_body,
+              f"Body sample: {[(r[3] or '')[:200] for r in rows][:1]}")
 
     cur.close()
     conn.close()

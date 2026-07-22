@@ -11,7 +11,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -60,19 +60,22 @@ def inject_noise(cur):
     noise_emails = [
         ("Weekly Staff Meeting", "admin@company.com", json.dumps(["all@company.com"]), "Meeting tomorrow at 10am."),
         ("Parking Update", "facilities@company.com", json.dumps(["all@company.com"]), "New regulations next month."),
+        ("IT Security Newsletter", "security@company.com", json.dumps(["all@company.com"]), "Please update your passwords this quarter."),
+        ("Holiday Office Closure", "hr@company.com", json.dumps(["all@company.com"]), "Office closed on upcoming federal holiday."),
+        ("Cafeteria Menu Update", "services@company.com", json.dumps(["all@company.com"]), "New menu items available starting next week."),
     ]
     for subj, from_addr, to_addr, body in noise_emails:
         cur.execute("INSERT INTO email.messages (folder_id, message_id, subject, from_addr, to_addr, body_text, is_read, date) VALUES (%s, %s, %s, %s, %s, %s, false, now())",
             (inbox_id, f"noise-{uuid.uuid4()}@company.com", subj, from_addr, to_addr, body))
 
-    # Notion noise
-    page_id = str(uuid.uuid4())
-    props = {"title": {"title": [{"type": "text", "text": {"content": "Unrelated Meeting Notes"}, "plain_text": "Unrelated Meeting Notes"}]}}
-    cur.execute("INSERT INTO notion.pages (id, properties) VALUES (%s, %s::jsonb)", (page_id, json.dumps(props)))
-    bid = str(uuid.uuid4())
-    cur.execute("INSERT INTO notion.blocks (id, parent_type, parent_id, type, block_data, position) VALUES (%s, %s, %s, %s, %s::jsonb, %s)",
-        (bid, "page_id", page_id, "paragraph", json.dumps({"rich_text": [{"type": "text", "text": {"content": "Unrelated content about office supplies"}, "plain_text": "Unrelated content about office supplies"}]}), 0))
-    print("[preprocess] Injected noise data.")
+    # Notion noise (multiple unrelated pages)
+    noise_titles = ["Unrelated Meeting Notes", "Office Supplies Inventory",
+                    "Travel Policy 2024", "Software License Overview", "Holiday Calendar"]
+    for t in noise_titles:
+        pg_id = str(uuid.uuid4())
+        props = {"title": {"title": [{"type": "text", "text": {"content": t}, "plain_text": t}]}}
+        cur.execute("INSERT INTO notion.pages (id, properties) VALUES (%s, %s::jsonb)", (pg_id, json.dumps(props)))
+    print(f"[preprocess] Injected {len(noise_titles)} noise Notion pages.")
 
 
 def inject_survey_responses(cur):
@@ -82,9 +85,11 @@ def inject_survey_responses(cur):
 
     print("[preprocess] Injecting survey responses...")
     form_id = str(uuid.uuid4())
+    # Renamed to be clearly distinct from 'Employee Engagement Survey' (the task target).
+    # Using 'Archived 2023 Workplace Climate Survey' avoids substring collision.
     cur.execute("""
         INSERT INTO gform.forms (id, title, description)
-        VALUES (%s, 'Pre-existing Engagement Survey', 'Old survey data for reference')
+        VALUES (%s, 'Archived 2023 Workplace Climate Survey', 'Legacy survey from prior year, reference only')
     """, (form_id,))
 
     q_ids = []

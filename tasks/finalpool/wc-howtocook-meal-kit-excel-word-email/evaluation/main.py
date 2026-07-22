@@ -1,10 +1,8 @@
 """Evaluation script for wc-howtocook-meal-kit-excel-word-email."""
 import os
-import argparse, json, os, sys
+import argparse, json, sys
 import openpyxl
-
-def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
-    return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
+import psycopg2
 
 
 DB_CONFIG = {
@@ -16,6 +14,7 @@ DB_CONFIG = {
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
+
 def check(name, condition, detail=""):
     global PASS_COUNT, FAIL_COUNT
     if condition:
@@ -23,8 +22,9 @@ def check(name, condition, detail=""):
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
-        detail_str = str(detail)[:200] if detail else ""
+        detail_str = str(detail)[:300] if detail else ""
         print(f"  [FAIL] {name}: {detail_str}")
+
 
 def safe_float(val, default=None):
     try:
@@ -33,112 +33,221 @@ def safe_float(val, default=None):
     except (ValueError, TypeError):
         return default
 
-def get_conn():
-    import psycopg2
-    return psycopg2.connect(**DB_CONFIG)
+
+def num_close(a, b, abs_tol=0.01, rel_tol=0.0):
+    a = safe_float(a)
+    b = safe_float(b)
+    if a is None or b is None:
+        return False
+    return abs(a - b) <= max(abs_tol, abs(b) * rel_tol)
+
+
+def get_sheet(wb, name):
+    for sn in wb.sheetnames:
+        if sn.strip().lower() == name.strip().lower():
+            return wb[sn]
+    return None
+
 
 def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_file):
     global PASS_COUNT, FAIL_COUNT
     PASS_COUNT = 0
     FAIL_COUNT = 0
 
-    # Check Meal_Kit_Report.xlsx
+    kit_names_in_proposals = []
+    kit_proposals_count = 0
+
+    # === Excel ===
     excel_path = os.path.join(agent_workspace, "Meal_Kit_Report.xlsx")
     check("Meal_Kit_Report.xlsx exists", os.path.exists(excel_path))
     if os.path.exists(excel_path):
-        wb = openpyxl.load_workbook(excel_path)
-        gt_path = os.path.join(groundtruth_workspace, "Meal_Kit_Report.xlsx")
-        gt_wb = openpyxl.load_workbook(gt_path) if os.path.exists(gt_path) else None
+        try:
+            wb = openpyxl.load_workbook(excel_path, data_only=True)
+        except Exception as e:
+            check("Excel readable", False, str(e))
+            wb = None
 
-        if gt_wb:
-            for sheet_name in gt_wb.sheetnames:
-                check(f"{sheet_name} sheet exists", sheet_name in wb.sheetnames)
-                if sheet_name in wb.sheetnames:
-                    ws = wb[sheet_name]
-                    gt_ws = gt_wb[sheet_name]
-                    # Check headers
-                    gt_headers = [str(c.value).strip().lower() if c.value else "" for c in gt_ws[1]]
-                    headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-                    for h in gt_headers:
-                        if h:
-                            check(f"{sheet_name} has {h} column", h in headers, f"headers: {headers[:10]}")
-                    # Check row count
-                    gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
-                    data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-                    min_rows = max(1, len(gt_rows) - 2)
-                    check(f"{sheet_name} has >= {min_rows} data rows", len(data_rows) >= min_rows, f"got {len(data_rows)}")
+        if wb is not None:
+            # Required sheet names
+            for sn in ["Product_Catalog", "Recipe_Collection", "Kit_Proposals", "Summary"]:
+                check(f"Sheet '{sn}' exists", get_sheet(wb, sn) is not None,
+                      f"sheets: {wb.sheetnames}")
 
-                    # Cell value comparison against groundtruth
-                    header_map = {h: i for i, h in enumerate(headers)}
-                    gt_header_map = {h: i for i, h in enumerate(gt_headers)}
-                    for ri in range(min(3, len(gt_rows), len(data_rows))):
-                        gt_row = gt_rows[ri]
-                        agent_row = data_rows[ri]
-                        for ci, gt_h in enumerate(gt_headers):
-                            if not gt_h or ci >= len(gt_row):
-                                continue
-                            gv = gt_row[ci]
-                            agent_ci = header_map.get(gt_h)
-                            if agent_ci is None or agent_ci >= len(agent_row):
-                                continue
-                            av = agent_row[agent_ci]
-                            gf = safe_float(gv)
-                            af = safe_float(av)
-                            if gf is not None and af is not None:
-                                tol = max(0.5, abs(gf) * 0.15)
-                                check(f"{sheet_name} R{ri+2} {gt_h} ~{gf:.1f}",
-                                      abs(gf - af) <= tol, f"got {af}")
-                            elif gv is not None and av is not None:
-                                gs = str(gv).strip().lower()
-                                avs = str(av).strip().lower()
-                                if gs:
-                                    check(f"{sheet_name} R{ri+2} {gt_h} text",
-                                          gs == avs or gs in avs or avs in gs,
-                                          f"expected {gs[:50]}, got {avs[:50]}")
+            # Per-sheet column requirements
+            sheet_columns = {
+                "Product_Catalog": ["product_name", "price", "stock", "category"],
+                "Recipe_Collection": ["recipe_name", "category", "difficulty", "ingredient_count"],
+                "Kit_Proposals": ["kit_name", "recipe_name", "estimated_cost",
+                                  "margin_pct", "recommended_price"],
+                "Summary": ["metric", "value"],
+            }
+            for sn, cols in sheet_columns.items():
+                ws = get_sheet(wb, sn)
+                if ws is None:
+                    continue
+                rows = list(ws.iter_rows(values_only=True))
+                if not rows:
+                    check(f"{sn} has rows", False)
+                    continue
+                header = [str(c).strip().lower().replace(" ", "_") if c else "" for c in rows[0]]
+                for c in cols:
+                    check(f"{sn} has column '{c}'",
+                          c in header, f"headers: {header}")
 
-    # Check Meal_Kit_Proposal.docx
+            # Sort by Product_Name
+            ws = get_sheet(wb, "Product_Catalog")
+            if ws is not None:
+                rows = list(ws.iter_rows(min_row=2, values_only=True))
+                rows = [r for r in rows if r and r[0]]
+                names = [str(r[0]).strip().lower() for r in rows]
+                check("Product_Catalog sorted by Product_Name",
+                      names == sorted(names), f"first few: {names[:5]}")
+
+            # Sort by Recipe_Name
+            ws = get_sheet(wb, "Recipe_Collection")
+            if ws is not None:
+                rows = list(ws.iter_rows(min_row=2, values_only=True))
+                rows = [r for r in rows if r and r[0]]
+                names = [str(r[0]).strip().lower() for r in rows]
+                check("Recipe_Collection sorted by Recipe_Name",
+                      names == sorted(names), f"first few: {names[:5]}")
+
+            # Kit_Proposals min 5 rows
+            ws = get_sheet(wb, "Kit_Proposals")
+            if ws is not None:
+                rows = list(ws.iter_rows(min_row=2, values_only=True))
+                data = [r for r in rows if r and r[0]]
+                kit_proposals_count = len(data)
+                check("Kit_Proposals has at least 5 rows", len(data) >= 5,
+                      f"got {len(data)}")
+                # Each row must have all fields (not None) AND numeric sanity
+                for r in data:
+                    name = str(r[0]) if r and r[0] else "?"
+                    kit_names_in_proposals.append(name)
+                    if len(r) >= 5:
+                        check(f"Kit '{name}' has Estimated_Cost, Margin_Pct, Recommended_Price",
+                              all(v is not None for v in [r[2], r[3], r[4]]),
+                              f"row: {r}")
+                        # Numeric sanity
+                        cost = safe_float(r[2])
+                        margin = safe_float(r[3])
+                        price = safe_float(r[4])
+                        check(f"Kit '{name}' cost > 0",
+                              cost is not None and cost > 0,
+                              f"cost={r[2]}")
+                        check(f"Kit '{name}' 0 < margin_pct < 100",
+                              margin is not None and 0 < margin < 100,
+                              f"margin={r[3]}")
+                        check(f"Kit '{name}' recommended_price > cost",
+                              price is not None and cost is not None and price > cost,
+                              f"price={r[4]}, cost={r[2]}")
+
+            # Summary required metrics with sane values
+            ws = get_sheet(wb, "Summary")
+            if ws is not None:
+                rows = list(ws.iter_rows(min_row=2, values_only=True))
+                data = [r for r in rows if r and r[0]]
+                lookup = {str(r[0]).strip().lower(): r[1] if len(r) > 1 else None
+                          for r in data}
+                for m in ["total_products", "total_recipes", "proposed_kits",
+                          "avg_kit_cost", "avg_margin_pct"]:
+                    check(f"Summary has '{m}'", m in lookup, f"keys: {list(lookup.keys())}")
+                # Value sanity: Proposed_Kits should equal len(Kit_Proposals data rows)
+                if "proposed_kits" in lookup:
+                    val = safe_float(lookup["proposed_kits"])
+                    check(
+                        f"Summary Proposed_Kits == Kit_Proposals row count ({kit_proposals_count})",
+                        val is not None and int(val) == kit_proposals_count and val >= 5,
+                        f"got {lookup['proposed_kits']}, expected {kit_proposals_count}",
+                    )
+
+    # === Word doc ===
     docx_path = os.path.join(agent_workspace, "Meal_Kit_Proposal.docx")
     check("Meal_Kit_Proposal.docx exists", os.path.exists(docx_path))
     if os.path.exists(docx_path):
-        from docx import Document
-        doc = Document(docx_path)
-        text = " ".join([p.text for p in doc.paragraphs])
-        check("Meal_Kit_Proposal.docx has content", len(text) > 50, f"text length: {len(text)}")
-        # Check headings match groundtruth
-        headings = [p.text.strip().lower() for p in doc.paragraphs if p.style.name.startswith("Heading")]
-        gt_doc_path = os.path.join(groundtruth_workspace, "Meal_Kit_Proposal.docx")
-        if os.path.exists(gt_doc_path):
-            gt_doc = Document(gt_doc_path)
-            gt_headings = [p.text.strip().lower() for p in gt_doc.paragraphs if p.style.name.startswith("Heading")]
-            for gh in gt_headings:
-                if gh:
-                    found = any(gh in h or h in gh for h in headings)
-                    check(f"Meal_Kit_Proposal.docx has heading \"{gh[:40]}\"", found, f"agent headings: {headings[:5]}")
-        else:
-            check("Meal_Kit_Proposal.docx has headings", len(headings) >= 2, f"found {len(headings)} headings")
+        try:
+            from docx import Document
+            doc = Document(docx_path)
+            text = "\n".join(p.text for p in doc.paragraphs)
+            text_lower = text.lower()
+            check("Document has substantial content", len(text) > 100,
+                  f"length: {len(text)}")
+            check("Document title 'Meal Kit Service Launch Proposal'",
+                  "meal kit service launch proposal" in text_lower,
+                  "")
+            for sec in ["Product Analysis", "Recipe Selection", "Kit Design",
+                        "Financial Projections"]:
+                check(f"Document section '{sec}'",
+                      sec.lower() in text_lower, "")
+        except Exception as e:
+            check("Word doc readable", False, str(e))
 
-    # Check Python script exists (terminal usage)
-    py_files = [f for f in os.listdir(agent_workspace) if f.endswith(".py")]
-    check("Python analysis script exists", len(py_files) >= 1, f"found: {py_files}")
+    # === Python script: meal_kit_designer.py exact filename ===
+    py_path = os.path.join(agent_workspace, "meal_kit_designer.py")
+    check("meal_kit_designer.py exists", os.path.exists(py_path),
+          f"workspace: {os.listdir(agent_workspace)[:20]}")
 
-    # Database checks
+    # === JSON files ===
+    for jf in ["store_products.json", "recipes.json", "meal_kit_plans.json"]:
+        jpath = os.path.join(agent_workspace, jf)
+        check(f"{jf} exists", os.path.exists(jpath), jpath)
+        if os.path.exists(jpath):
+            try:
+                with open(jpath) as f:
+                    json.load(f)
+                check(f"{jf} is valid JSON", True)
+            except json.JSONDecodeError as e:
+                check(f"{jf} valid JSON", False, str(e))
+
+    # === Email checks ===
     try:
-        conn = get_conn()
+        conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
-        cur.execute("SELECT subject, to_addr FROM email.messages WHERE folder_id = (SELECT id FROM email.folders WHERE name = 'Sent' LIMIT 1) AND subject ILIKE '%meal%'")
-        email_row = cur.fetchone()
-        check("Email with correct subject sent", email_row is not None, "no matching email found")
-        if email_row:
-            check("Email has recipient", email_row[1] is not None, f"to_addr: {email_row[1]}")
-        # Reverse verification: noise emails should not be in Sent folder
-        cur.execute("SELECT COUNT(*) FROM email.messages WHERE folder_id = (SELECT id FROM email.folders WHERE name = 'Sent' LIMIT 1) AND subject ILIKE '%newsletter%'")
+        # Look for email with exact subject AND recipient
+        cur.execute("SELECT subject, from_addr, to_addr, body_text, folder_id FROM email.messages")
+        all_emails = cur.fetchall()
+
+        target = None
+        for subj, from_addr, to_addr, body, folder_id in all_emails:
+            if (subj or "").strip().lower() == "meal kit service proposal ready":
+                to_str = json.dumps(to_addr).lower() if isinstance(to_addr, (list, dict)) else str(to_addr or "").lower()
+                if "product-team@company.com" in to_str:
+                    target = (subj, from_addr, to_addr, body)
+                    break
+        check("Email with exact subject + recipient sent",
+              target is not None,
+              f"Subjects: {[(e[0], e[2]) for e in all_emails[:5]]}")
+        if target:
+            import re
+            body = (target[3] or "").lower()
+            # Require 'top 3' word-boundary phrase
+            top3_match = re.search(r"\btop\s+3\b", body) is not None
+            check("Email body mentions 'top 3' (word boundary) and 'kit'",
+                  "kit" in body and top3_match,
+                  f"body head: {body[:200]}")
+            # Both cost AND margin (task says 'estimated costs and margins')
+            check("Email body mentions both cost AND margin",
+                  "cost" in body and "margin" in body,
+                  f"body head: {body[:200]}")
+
+        # Reverse: noise newsletter not in Sent
+        cur.execute("""
+            SELECT COUNT(*) FROM email.messages
+            WHERE folder_id IN (
+                SELECT id FROM email.folders WHERE LOWER(name) LIKE '%sent%'
+            )
+            AND subject ILIKE '%newsletter%'
+        """)
         noise_sent = cur.fetchone()[0]
-        check("No noise emails in Sent folder", noise_sent == 0, f"found {noise_sent} noise emails in Sent")
+        check("No noise/newsletter emails in Sent folder", noise_sent == 0,
+              f"found {noise_sent}")
+
         conn.close()
     except Exception as e:
-        check("DB checks", False, str(e))
+        check("Email DB check error", False, str(e))
 
     return FAIL_COUNT == 0, f"Passed {PASS_COUNT}/{PASS_COUNT + FAIL_COUNT} checks"
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -153,7 +262,11 @@ def main():
         args.launch_time, args.res_log_file
     )
     print(message)
+    if args.res_log_file:
+        with open(args.res_log_file, "w") as f:
+            json.dump({"passed": PASS_COUNT, "failed": FAIL_COUNT, "success": success}, f)
     sys.exit(0 if success else 1)
+
 
 if __name__ == "__main__":
     main()

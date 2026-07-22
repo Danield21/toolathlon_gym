@@ -1,0 +1,7 @@
+{
+  "papers": [
+    {"paper_title": "Recent Advances in Machine Learning", "topic_area": "Machine Learning", "year": 2024, "citations": 150, "relevance": "High"},
+    {"paper_title": "Modern Data Analytics Techniques", "topic_area": "Data Analytics", "year": 2024, "citations": 120, "relevance": "High"},
+    {"paper_title": "Computational Thinking in Education", "topic_area": "CS Education", "year": 2024, "citations": 80, "relevance": "Medium"}
+  ]
+}

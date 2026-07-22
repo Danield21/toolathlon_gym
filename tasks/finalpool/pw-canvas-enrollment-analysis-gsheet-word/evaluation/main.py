@@ -3,6 +3,20 @@ import os
 import argparse, json, os, sys
 import openpyxl
 
+# --- verify_v2 smart primitives ---
+_EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
+_PACK_ROOT = os.path.abspath(os.path.join(_EVAL_DIR, "..", "..", "..", ".."))
+if _PACK_ROOT not in sys.path:
+    sys.path.insert(0, _PACK_ROOT)
+try:
+    from utils.verify_v2 import smart_column_exists
+    from utils.verify_v2.eval_helpers import get_sheet_rows_as_dicts, get_gt_column_values
+    _HAS_VERIFY_V2 = True
+except Exception:
+    _HAS_VERIFY_V2 = False
+
+TASK_NAME = "pw-canvas-enrollment-analysis-gsheet-word"
+
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
@@ -48,63 +62,183 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         gt_path = os.path.join(groundtruth_workspace, "Enrollment_Analysis_Report.xlsx")
         gt_wb = openpyxl.load_workbook(gt_path) if os.path.exists(gt_path) else None
 
-        check("Data_Analysis sheet exists", "Data_Analysis" in wb.sheetnames)
-        if "Data_Analysis" in wb.sheetnames:
-            ws = wb["Data_Analysis"]
-            data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-            check("Data_Analysis has >= 6 rows", len(data_rows) >= 6, f"got {len(data_rows)}")
+        def check_columns(sheet_name, expected_cols, min_rows):
+            """Verify sheet exists, >= min_rows, contains required columns.
+            Uses LLM semantic mapping via verify_v2, falls back to strict
+            header match."""
+            check(f"{sheet_name} sheet exists", sheet_name in wb.sheetnames)
+            if sheet_name not in wb.sheetnames:
+                return
+            _ws = wb[sheet_name]
+            _data_rows = list(_ws.iter_rows(min_row=2, values_only=True))
+            check(f"{sheet_name} has >= {min_rows} rows",
+                  len(_data_rows) >= min_rows, f"got {len(_data_rows)}")
+            if _HAS_VERIFY_V2 and gt_wb is not None:
+                _raw_headers, _agent_rows = get_sheet_rows_as_dicts(wb, sheet_name)
+                for _exp in expected_cols:
+                    _gt_vals = get_gt_column_values(gt_wb, sheet_name, _exp)
+                    _ok, _matched, _reason = smart_column_exists(
+                        expected_col=_exp, agent_headers=_raw_headers,
+                        gt_samples=_gt_vals[:3], agent_rows=_agent_rows,
+                        task_name=TASK_NAME,
+                    )
+                    _detail = _reason
+                    if _ok and _matched and _matched.lower() != _exp.lower():
+                        _detail = f"LLM-mapped to {_matched!r}"
+                    check(f"{sheet_name} has {_exp} column", _ok, _detail)
+            else:
+                _headers = [str(c.value).strip().lower() if c.value else "" for c in _ws[1]]
+                for _exp in expected_cols:
+                    check(f"{sheet_name} has {_exp} column",
+                          _exp.lower() in _headers, f"headers: {_headers[:8]}")
 
-            # Check headers
-            headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-            for expected_col in ['Course', 'Code', 'Enrollment', 'Avg_Score', 'Pass_Rate']:
-                check(f"Data_Analysis has {expected_col} column",
-                      expected_col.lower() in headers, f"headers: {headers[:8]}")
+        check("Data_Analysis sheet exists", "Data_Analysis" in wb.sheetnames)
+        if "Data_Analysis" in wb.sheetnames and gt_wb is not None:
+            ws = wb["Data_Analysis"]
+            gt_ws = gt_wb["Data_Analysis"] if "Data_Analysis" in gt_wb.sheetnames else None
+            data_rows = list(ws.iter_rows(min_row=2, values_only=True))
+            if gt_ws is not None:
+                gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
+                check(f"Data_Analysis has == {len(gt_rows)} rows",
+                      len(data_rows) == len(gt_rows), f"got {len(data_rows)}")
+            check_columns('Data_Analysis', ['Course', 'Code', 'Enrollment', 'Avg_Score', 'Pass_Rate'],
+                          len(gt_rows) if gt_ws is not None else 6)
+            if gt_ws is not None:
+                gt_headers = [str(c.value).strip().lower() if c.value else "" for c in gt_ws[1]]
+                headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
+                header_map = {h: i for i, h in enumerate(headers)}
+                code_idx_gt = gt_headers.index("code") if "code" in gt_headers else 1
+                code_idx_a = header_map.get("code", 1)
+                gt_by_code = {str(r[code_idx_gt]).strip().upper(): r for r in gt_rows if r and r[code_idx_gt]}
+                agent_by_code = {str(r[code_idx_a]).strip().upper(): r for r in data_rows if r and len(r) > code_idx_a and r[code_idx_a]}
+                for code, gt_row in gt_by_code.items():
+                    found = code in agent_by_code
+                    check(f"Data_Analysis course code '{code}' present", found)
+                    if found:
+                        agent_row = agent_by_code[code]
+                        for ci, gt_h in enumerate(gt_headers):
+                            if not gt_h or ci >= len(gt_row) or gt_h == "code":
+                                continue
+                            gv = gt_row[ci]
+                            agent_ci = header_map.get(gt_h)
+                            if agent_ci is None or agent_ci >= len(agent_row):
+                                continue
+                            av = agent_row[agent_ci]
+                            gf = safe_float(gv)
+                            af = safe_float(av)
+                            if gf is not None and af is not None:
+                                tol = max(0.5, abs(gf) * 0.03)
+                                check(f"Data_Analysis '{code}' {gt_h} ~{gf}",
+                                      abs(gf - af) <= tol, f"got {av}")
 
         check("Metrics sheet exists", "Metrics" in wb.sheetnames)
-        if "Metrics" in wb.sheetnames:
+        if "Metrics" in wb.sheetnames and gt_wb is not None:
             ws = wb["Metrics"]
+            gt_ws = gt_wb["Metrics"] if "Metrics" in gt_wb.sheetnames else None
             data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-            check("Metrics has >= 4 rows", len(data_rows) >= 4, f"got {len(data_rows)}")
-
-            # Check headers
-            headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-            for expected_col in ['Metric', 'Value']:
-                check(f"Metrics has {expected_col} column",
-                      expected_col.lower() in headers, f"headers: {headers[:8]}")
+            if gt_ws is not None:
+                gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
+                check(f"Metrics has == {len(gt_rows)} rows",
+                      len(data_rows) == len(gt_rows), f"got {len(data_rows)}")
+            check_columns('Metrics', ['Metric', 'Value'], len(gt_rows) if gt_ws is not None else 4)
+            if gt_ws is not None:
+                gt_metric_map = {str(r[0]).strip().lower(): r[1] for r in gt_rows if r and r[0]}
+                agent_metric_map = {str(r[0]).strip().lower(): r[1] for r in data_rows if r and r[0]}
+                for gt_m, gt_v in gt_metric_map.items():
+                    found = gt_m in agent_metric_map
+                    check(f"Metrics has '{gt_m}'", found)
+                    if found:
+                        av = agent_metric_map[gt_m]
+                        gf = safe_float(gt_v)
+                        af = safe_float(av)
+                        if gf is not None and af is not None:
+                            tol = max(0.5, abs(gf) * 0.03)
+                            check(f"Metrics '{gt_m}' ~{gf}",
+                                  abs(gf - af) <= tol, f"got {av}")
 
         check("Recommendations sheet exists", "Recommendations" in wb.sheetnames)
         if "Recommendations" in wb.sheetnames:
             ws = wb["Recommendations"]
             data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-            check("Recommendations has >= 2 rows", len(data_rows) >= 2, f"got {len(data_rows)}")
+            check_columns('Recommendations', ['Priority', 'Action', 'Course'], 2)
 
-            # Check headers
-            headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-            for expected_col in ['Priority', 'Action', 'Course']:
-                check(f"Recommendations has {expected_col} column",
-                      expected_col.lower() in headers, f"headers: {headers[:8]}")
+    # GSheet: title equals 'Course Enrollment Tracker' (case-insensitive trim) AND has content rows.
+    # Hoisted out of excel-exists guard so missing workbook doesn't collapse all checks.
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, title FROM gsheet.spreadsheets "
+            "WHERE LOWER(TRIM(title)) = LOWER('Course Enrollment Tracker')"
+        )
+        sheets = cur.fetchall()
+        check("Cloud spreadsheet 'Course Enrollment Tracker' created",
+              len(sheets) >= 1, f"found {len(sheets)} matching sheets")
+        if sheets:
+            ss_id = sheets[0][0]
+            cur.execute(
+                "SELECT COUNT(*) FROM gsheet.cells c JOIN gsheet.sheets s ON c.sheet_id=s.id "
+                "WHERE s.spreadsheet_id=%s AND c.value IS NOT NULL AND TRIM(c.value)<>''",
+                (ss_id,)
+            )
+            cell_count = cur.fetchone()[0]
+            check("Course Enrollment Tracker has populated cells",
+                  cell_count >= 8, f"only {cell_count} non-empty cells")
+        conn.close()
+    except Exception as e:
+        check("GSheet check", False, str(e))
 
-        try:
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT title FROM gsheet.spreadsheets WHERE title ILIKE %s", ('%tracker%',))
-            sheets = cur.fetchall()
-            check("Google Sheet created", len(sheets) >= 1, f"found {len(sheets)} sheets")
-            conn.close()
-        except Exception as e:
-            check("GSheet check", False, str(e))
+    # Check Word document by exact filename + sections (use Heading styles when available)
+    word_path = os.path.join(agent_workspace, "Enrollment_Analysis_Analysis.docx")
+    check("Enrollment_Analysis_Analysis.docx exists", os.path.exists(word_path))
+    if os.path.exists(word_path):
+        from docx import Document
+        doc = Document(word_path)
+        # Collect headings (paragraphs whose style is a Heading style or look like a heading)
+        heading_texts = []
+        body_paras = []
+        for p in doc.paragraphs:
+            sname = (p.style.name if p.style else "") or ""
+            t = (p.text or "").strip()
+            if not t:
+                continue
+            if sname.startswith("Heading") or sname == "Title":
+                heading_texts.append(t.lower())
+            else:
+                body_paras.append(t)
+        all_headings = " | ".join(heading_texts)
+        full_text = " ".join(p.text for p in doc.paragraphs).lower()
 
-        # Check Word document
-        import glob as globmod
-        word_files = globmod.glob(os.path.join(agent_workspace, "*.docx"))
-        check("Word document exists", len(word_files) >= 1, f"found {len(word_files)} docx files")
-        if word_files:
-            from docx import Document
-            doc = Document(word_files[0])
-            text = " ".join(p.text for p in doc.paragraphs).lower()
-            check("Word has content", len(text) > 50, f"text length: {len(text)}")
+        def has_heading(*needles):
+            return any(any(n in h for n in needles) for h in heading_texts)
 
-        check("course_enrollment_processor.py exists", os.path.exists(os.path.join(agent_workspace, "course_enrollment_processor.py")))
+        # Require an explicit heading for each section, not just substring in body.
+        check(
+            "Word doc has Executive Summary / Overview heading",
+            has_heading("executive summary", "overview", "summary"),
+            f"headings: {all_headings[:200]}",
+        )
+        check(
+            "Word doc has Key Findings heading",
+            has_heading("key findings", "findings"),
+            f"headings: {all_headings[:200]}",
+        )
+        check(
+            "Word doc has Recommendations heading",
+            has_heading("recommendation"),
+            f"headings: {all_headings[:200]}",
+        )
+        # Substantive body content (not counting headings); raise threshold so trivial
+        # answers like "no findings" cannot pass.
+        body_len = sum(len(p) for p in body_paras)
+        check(
+            "Word doc has substantive body content",
+            body_len > 150 and len(body_paras) >= 3,
+            f"body_len={body_len} paras={len(body_paras)}",
+        )
+
+    check("course_enrollment_processor.py exists",
+          os.path.exists(os.path.join(agent_workspace, "course_enrollment_processor.py")))
 
 
     return FAIL_COUNT == 0, f"Passed {PASS_COUNT}/{PASS_COUNT + FAIL_COUNT} checks"

@@ -1,21 +1,13 @@
 {
   "trip_date": "2026-03-10",
-  "origin": "Beijing",
-  "destination": "Shanghai",
-  "purpose": "Customer visits",
+  "train_service": "G1",
+  "purpose": "Business Development Visit",
+  "customer_region_filter": "North America",
   "num_customers_to_visit": 5,
-  "sales_rep": {
-    "name": "Sales Representative",
-    "preferred_class": "first",
-    "budget_limit_cny": 2000
-  },
   "selection_criteria": {
-    "rank_by": "total_order_value",
+    "rank_by": "total_order_amount",
     "order": "descending",
     "top_n": 5
   },
-  "meeting_schedule": {
-    "first_meeting_time": "14:00",
-    "meeting_duration_hours": 1.5
-  }
+  "email_recipient": "sales-manager@company.com"
 }

@@ -98,12 +98,30 @@ def check_excel(workspace):
         conn.close()
     except Exception:
         pass
+    # Query all department averages dynamically
+    dept_salaries = {}
+    try:
+        conn2 = psycopg2.connect(**DB_CONFIG)
+        cur2 = conn2.cursor()
+        cur2.execute('SELECT "DEPARTMENT", AVG("SALARY") FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES" GROUP BY "DEPARTMENT"')
+        for dept, avg in cur2.fetchall():
+            if avg is not None:
+                dept_salaries[dept] = float(avg)
+        cur2.close()
+        conn2.close()
+    except Exception as e:
+        print(f"  WARN: could not load per-dept salaries: {e}")
+
     for row in data_rows1:
-        if row[0] and str(row[0]).strip() == "Engineering":
+        if not row or not row[0]:
+            continue
+        dept_name = str(row[0]).strip()
+        if dept_name in dept_salaries:
+            expected = dept_salaries[dept_name]
             avg_sal = safe_float(row[2])
-            check("Engineering avg salary correct", avg_sal is not None and abs(avg_sal - expected_eng_salary) < 500,
-                  f"Got {avg_sal}, expected ~{expected_eng_salary:.2f}")
-            break
+            check(f"{dept_name} avg salary correct",
+                  avg_sal is not None and abs(avg_sal - expected) < max(500, expected*0.02),
+                  f"Got {avg_sal}, expected ~{expected:.2f}")
 
     # Salary_Benchmark sheet
     sb_idx = next((i for i, s in enumerate(sheets_lower) if "benchmark" in s), 1)
@@ -149,13 +167,22 @@ def check_gcal():
             for dept in DEPARTMENTS:
                 if dept.lower() in summary:
                     dept_found.add(dept)
-        check("Events cover at least 6 departments", len(dept_found) >= 6,
+        check("Events cover all 7 departments", len(dept_found) >= 7,
               f"Departments in events: {dept_found}")
 
-        # Check events are in March 2026
-        march_events = [e for e in events if e[1] and e[1].month == 3 and e[1].year == 2026]
-        check("Events scheduled in March 2026", len(march_events) >= 7,
-              f"Found {len(march_events)} March 2026 events")
+        # Check events are in March 16-20 2026 (the specified week)
+        target_events = [e for e in events
+                         if e[1] and e[1].year == 2026 and e[1].month == 3
+                         and 16 <= e[1].day <= 20]
+        check("Events scheduled in March 16-20 2026", len(target_events) >= 7,
+              f"Found {len(target_events)} events in target week")
+
+        # Check event times: 10 AM and 2 PM pattern (task.md specifies 10 AM and 2 PM slots)
+        allowed_hours = {10, 14}  # 10 AM and 2 PM
+        bad_hours = [e for e in target_events if e[1] and e[1].hour not in allowed_hours]
+        check("Review events scheduled at 10 AM or 2 PM only",
+              len(bad_hours) == 0,
+              f"Events with non-10/14 hour: {[(e[0], e[1]) for e in bad_hours[:3]]}")
 
     cur.close()
     conn.close()
@@ -191,8 +218,22 @@ def check_email():
         all_text = ((subject or "") + " " + (body_text or "")).lower()
         check("Email mentions compensation or benchmark", "compensation" in all_text or "benchmark" in all_text,
               f"Subject: {subject}")
-        check("Email mentions review meetings scheduled", "meeting" in all_text or "scheduled" in all_text or "march" in all_text,
-              f"Body snippet: {all_text[:100]}")
+        # Require BOTH 'meeting/scheduled' AND 'march' AND a department name
+        has_review_words = ("meeting" in all_text or "scheduled" in all_text)
+        has_time_ref = ("march" in all_text or "2026" in all_text)
+        has_dept = any(d.lower() in all_text for d in DEPARTMENTS)
+        check("Email mentions review meetings + time + department",
+              has_review_words and has_time_ref and has_dept,
+              f"review={has_review_words}, time={has_time_ref}, dept={has_dept}")
+
+        # Email must mention the department with the largest gap vs benchmark.
+        # We cannot query the mock server from within evaluation reliably, but
+        # we can at least require the email names *some* specific department as
+        # the largest-gap department (not just keyword mention).
+        dept_mentions = [d for d in DEPARTMENTS if d.lower() in all_text]
+        check("Email body identifies at least one specific department by name",
+              len(dept_mentions) >= 1,
+              f"dept mentions: {dept_mentions}")
 
     cur.close()
     conn.close()
@@ -267,7 +308,8 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    # Tightened: require all checks to pass (previously >=70%).
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

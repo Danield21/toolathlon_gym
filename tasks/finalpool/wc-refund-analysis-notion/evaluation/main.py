@@ -109,9 +109,29 @@ def check_excel(agent_workspace, expected_refunds, order_count):
                 key = str(row[0]).strip().lower().replace(" ", "_")
                 summary_data[key] = row[1]
 
-        check("Summary has total refunds entry",
-              any("total" in k and "refund" in k for k in summary_data),
-              f"Keys: {list(summary_data.keys())}")
+        # Verify all 4 required Summary metrics present and numeric
+        for required_key in ["total_refunds", "total_refund_amount", "avg_refund_amount", "refund_rate"]:
+            present = required_key in summary_data
+            check(f"Summary has '{required_key}' entry", present,
+                  f"Keys: {list(summary_data.keys())}")
+            if present:
+                val = summary_data[required_key]
+                try:
+                    float(str(val).replace(",", "").replace("%", "").replace("$", ""))
+                    is_num = True
+                except (TypeError, ValueError):
+                    is_num = False
+                check(f"Summary '{required_key}' is numeric", is_num, f"Got: {val}")
+
+        # Verify expected counts
+        if "total_refunds" in summary_data:
+            try:
+                actual = int(float(str(summary_data["total_refunds"]).replace(",", "")))
+                check(f"Summary Total_Refunds == {expected_count}",
+                      actual == expected_count,
+                      f"Got {actual}")
+            except (TypeError, ValueError):
+                pass
 
     return True
 
@@ -121,39 +141,67 @@ def check_notion():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
-    # Check pages
-    cur.execute("SELECT id, properties FROM notion.pages")
+    # Tightened: page title must contain 'Refund Analysis Dashboard'
+    cur.execute("SELECT id, properties FROM notion.pages WHERE archived = false AND in_trash = false")
     pages = cur.fetchall()
 
-    refund_pages = []
+    dashboard_pages = []
     for pid, props in pages:
         if props:
             props_str = json.dumps(props).lower() if isinstance(props, dict) else str(props).lower()
-            if "refund" in props_str:
-                refund_pages.append(pid)
+            if "refund analysis dashboard" in props_str:
+                dashboard_pages.append(pid)
 
-    check("Notion page with 'refund' in properties exists",
-          len(refund_pages) > 0,
-          f"Found {len(pages)} pages, {len(refund_pages)} with refund")
+    check("Notion page 'Refund Analysis Dashboard' exists",
+          len(dashboard_pages) > 0,
+          f"Found {len(pages)} pages, {len(dashboard_pages)} with title 'Refund Analysis Dashboard'")
+
+    # Verify 'Refund Trends' database exists
+    # Notion databases live in notion.databases or as page-children with type=database
+    try:
+        cur.execute("""
+            SELECT id, title FROM notion.databases
+            WHERE archived = false
+        """)
+        databases = cur.fetchall()
+        rt_dbs = []
+        for did, title in databases:
+            title_str = json.dumps(title).lower() if isinstance(title, (dict, list)) else (title or "").lower()
+            if "refund trends" in title_str:
+                rt_dbs.append(did)
+        check("Notion database 'Refund Trends' exists", len(rt_dbs) > 0,
+              f"Found {len(databases)} databases, {len(rt_dbs)} with 'Refund Trends'")
+        if rt_dbs:
+            # Each database should have at least one entry (page child of the database)
+            cur.execute("""
+                SELECT COUNT(*) FROM notion.pages
+                WHERE archived = false AND in_trash = false AND parent::text ILIKE %s
+            """, (f"%{rt_dbs[0]}%",))
+            entry_count = cur.fetchone()[0]
+            check("'Refund Trends' database has >=1 entry", entry_count >= 1,
+                  f"entries={entry_count}")
+    except Exception as e:
+        # Schema may differ; treat missing databases-table as soft fail
+        check("Notion database query ran", False, str(e))
 
     cur.close()
     conn.close()
-    return len(refund_pages) > 0
+    return len(dashboard_pages) > 0
 
 
 def check_email():
     print("\n=== Checking Email ===")
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
-    cur.execute("SELECT subject, to_addr, body_text FROM email.messages")
+    cur.execute("SELECT subject, from_addr, to_addr, body_text FROM email.messages")
     all_emails = cur.fetchall()
     cur.close()
     conn.close()
 
     print(f"[check_email] Found {len(all_emails)} emails.")
 
-    found = False
-    for subject, to_addr, body_text in all_emails:
+    matched = None
+    for subject, from_addr, to_addr, body_text in all_emails:
         to_str = ""
         if isinstance(to_addr, list):
             to_str = " ".join(str(r).lower() for r in to_addr)
@@ -166,16 +214,33 @@ def check_email():
                     to_str = str(to_addr).lower()
             except (json.JSONDecodeError, TypeError):
                 to_str = str(to_addr).lower()
+        from_str = str(from_addr or "").lower()
 
         if "cfo@company.com" in to_str:
-            found = True
-            check("Email subject contains 'refund'",
-                  "refund" in (subject or "").lower(),
-                  f"Subject: {subject}")
+            matched = (subject, from_str, body_text)
             break
 
-    check("Email sent to cfo@company.com", found)
-    return found
+    check("Email sent to cfo@company.com", matched is not None)
+    if matched:
+        subject, from_str, body_text = matched
+        # Tightened: from finance@store.com
+        check("Email from 'finance@store.com'",
+              "finance@store.com" in from_str,
+              f"From: {from_str}")
+        # Tightened: exact subject 'Monthly Refund Analysis Report'
+        sl = (subject or "").lower()
+        check("Email subject equals 'Monthly Refund Analysis Report'",
+              "monthly refund analysis report" in sl or
+              ("monthly" in sl and "refund" in sl and "analysis" in sl and "report" in sl),
+              f"Subject: {subject}")
+        # Body must mention 4 key items: total count, total amount, avg amount, most common reason
+        body = (body_text or "").lower()
+        body_terms = {"total": "total" in body, "amount": "amount" in body,
+                      "average": ("average" in body) or ("avg" in body) or ("mean" in body),
+                      "reason": "reason" in body}
+        for term, present in body_terms.items():
+            check(f"Email body mentions '{term}'", present, f"body sample: {body[:200]}")
+    return matched is not None
 
 
 def main():

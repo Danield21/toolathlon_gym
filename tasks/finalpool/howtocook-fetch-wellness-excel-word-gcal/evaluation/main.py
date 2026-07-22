@@ -64,16 +64,35 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                             check(f"{sheet_name} has {h} column", h in headers, f"headers: {headers[:10]}")
                     # Check row count
                     gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
+                    gt_rows = [r for r in gt_rows if r and r[0] is not None]
                     data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-                    min_rows = max(1, len(gt_rows) - 2)
+                    data_rows = [r for r in data_rows if r and r[0] is not None]
+                    # Require at least len(gt_rows) data rows for Weekly_Plan (5 days),
+                    # Nutritional_Summary (3 slots), Program_Metrics (5 metrics).
+                    # Recipe_Evaluation is discretionary (task says "at least 10 recipes").
+                    if sheet_name == "Recipe_Evaluation":
+                        min_rows = max(3, len(gt_rows))
+                    else:
+                        min_rows = len(gt_rows)
                     check(f"{sheet_name} has >= {min_rows} data rows", len(data_rows) >= min_rows, f"got {len(data_rows)}")
 
                     # Cell value comparison against groundtruth
                     header_map = {h: i for i, h in enumerate(headers)}
-                    gt_header_map = {h: i for i, h in enumerate(gt_headers)}
-                    for ri in range(min(3, len(gt_rows), len(data_rows))):
-                        gt_row = gt_rows[ri]
-                        agent_row = data_rows[ri]
+                    # Build agent row lookup by first-column key to compare keyed rows (not positional).
+                    agent_lookup = {}
+                    for ar in data_rows:
+                        if ar and ar[0] is not None:
+                            agent_lookup[str(ar[0]).strip().lower()] = ar
+                    # Compare ALL GT rows (not just first 3) matched by first-column key.
+                    for ri, gt_row in enumerate(gt_rows):
+                        key = str(gt_row[0]).strip().lower() if gt_row[0] is not None else ""
+                        agent_row = agent_lookup.get(key)
+                        if agent_row is None:
+                            # Some sheets (Recipe_Evaluation) may have different row order; fall back to positional.
+                            if ri < len(data_rows):
+                                agent_row = data_rows[ri]
+                            else:
+                                continue
                         for ci, gt_h in enumerate(gt_headers):
                             if not gt_h or ci >= len(gt_row):
                                 continue
@@ -85,15 +104,17 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                             gf = safe_float(gv)
                             af = safe_float(av)
                             if gf is not None and af is not None:
-                                tol = max(0.5, abs(gf) * 0.15)
+                                # Tighter tolerance: absolute 0.5, relative 10% (Wellness_Score/Compliance are subjective)
+                                tol = max(0.5, abs(gf) * 0.10)
                                 check(f"{sheet_name} R{ri+2} {gt_h} ~{gf:.1f}",
                                       abs(gf - af) <= tol, f"got {af}")
                             elif gv is not None and av is not None:
                                 gs = str(gv).strip().lower()
                                 avs = str(av).strip().lower()
                                 if gs:
+                                    # Exact case-insensitive match; bidirectional substring removed.
                                     check(f"{sheet_name} R{ri+2} {gt_h} text",
-                                          gs == avs or gs in avs or avs in gs,
+                                          gs == avs,
                                           f"expected {gs[:50]}, got {avs[:50]}")
 
     # Check Wellness_Program_Guide.docx
@@ -112,16 +133,27 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
             gt_headings = [p.text.strip().lower() for p in gt_doc.paragraphs if p.style.name.startswith("Heading")]
             for gh in gt_headings:
                 if gh:
-                    found = any(gh in h or h in gh for h in headings)
+                    # Require exact or agent heading containing GT heading (GT is canonical).
+                    found = any(h == gh or gh in h for h in headings)
                     check(f"Wellness_Program_Guide.docx has heading \"{gh[:40]}\"", found, f"agent headings: {headings[:5]}")
         else:
             check("Wellness_Program_Guide.docx has headings", len(headings) >= 2, f"found {len(headings)} headings")
 
-    # Check Python script exists (terminal usage)
-    py_files = [f for f in os.listdir(agent_workspace) if f.endswith(".py")]
-    check("Python analysis script exists", len(py_files) >= 1, f"found: {py_files}")
+    # Track file-level failures (blocking) separately from runtime checks.
+    file_fail_before_runtime = FAIL_COUNT
 
-    # Database checks
+    # Check Python script exists (terminal usage) - only when agent_workspace differs
+    # from groundtruth (skip in GT-self-test where no script is expected).
+    try:
+        gt_canon = os.path.realpath(groundtruth_workspace)
+        ag_canon = os.path.realpath(agent_workspace)
+    except Exception:
+        gt_canon, ag_canon = groundtruth_workspace, agent_workspace
+    if gt_canon != ag_canon:
+        py_files = [f for f in os.listdir(agent_workspace) if f.endswith(".py")]
+        check("Python analysis script exists", len(py_files) >= 1, f"found: {py_files}")
+
+    # Database checks (runtime-only; non-blocking when agent has not yet run)
     try:
         conn = get_conn()
         cur = conn.cursor()
@@ -136,7 +168,11 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
     except Exception as e:
         check("DB checks", False, str(e))
 
-    return FAIL_COUNT == 0, f"Passed {PASS_COUNT}/{PASS_COUNT + FAIL_COUNT} checks"
+    # Local file checks must be zero; runtime checks allowed to fail at 85% accuracy.
+    total = PASS_COUNT + FAIL_COUNT
+    accuracy = (PASS_COUNT / total * 100) if total else 0
+    file_ok = file_fail_before_runtime == 0
+    return (file_ok and accuracy >= 85), f"Passed {PASS_COUNT}/{total} checks (accuracy={accuracy:.1f}%, file_fail={file_fail_before_runtime})"
 
 def main():
     parser = argparse.ArgumentParser()

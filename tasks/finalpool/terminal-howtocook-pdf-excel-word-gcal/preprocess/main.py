@@ -23,16 +23,25 @@ def clear_gcal(cur):
 
 
 def inject_noise(cur, launch_time):
+    """Inject noise events on dates that do NOT overlap with target week (March 9-13, 2026)."""
     print("[preprocess] Injecting noise calendar events...")
-    launch_dt = datetime.strptime(launch_time, "%Y-%m-%d %H:%M:%S")
+    # Target week is March 9-13, 2026 (festival prep). Place noise outside this week.
+    # Use fixed dates: week before (March 2-6) and week after (March 16-20).
+    target_year = 2026
 
     noise_events = [
-        ("Weekly Team Standup", launch_dt.replace(hour=9, minute=0),
-         launch_dt.replace(hour=9, minute=30), "Regular team meeting"),
-        ("Budget Review Meeting", (launch_dt + timedelta(days=1)).replace(hour=14, minute=0),
-         (launch_dt + timedelta(days=1)).replace(hour=15, minute=0), "Q1 budget review"),
-        ("Facilities Maintenance", (launch_dt + timedelta(days=2)).replace(hour=8, minute=0),
-         (launch_dt + timedelta(days=2)).replace(hour=12, minute=0), "Building maintenance check"),
+        # Week before target
+        ("Weekly Team Standup", datetime(target_year, 3, 2, 9, 0),
+         datetime(target_year, 3, 2, 9, 30), "Regular team meeting"),
+        ("Budget Review Meeting", datetime(target_year, 3, 3, 14, 0),
+         datetime(target_year, 3, 3, 15, 0), "Q1 budget review"),
+        ("Facilities Maintenance", datetime(target_year, 3, 4, 8, 0),
+         datetime(target_year, 3, 4, 12, 0), "Building maintenance check"),
+        # Week after target
+        ("Vendor Contract Review", datetime(target_year, 3, 17, 10, 0),
+         datetime(target_year, 3, 17, 11, 0), "Catering vendor contract review"),
+        ("Post-Event Debrief", datetime(target_year, 3, 18, 15, 0),
+         datetime(target_year, 3, 18, 16, 0), "Post-festival retrospective"),
     ]
 
     for summary, start, end, desc in noise_events:
@@ -40,6 +49,7 @@ def inject_noise(cur, launch_time):
             INSERT INTO gcal.events (summary, start_datetime, end_datetime, description, status)
             VALUES (%s, %s, %s, %s, 'confirmed')
         """, (summary, start, end, desc))
+    print(f"[preprocess] Injected {len(noise_events)} noise events.")
 
 
 def main():

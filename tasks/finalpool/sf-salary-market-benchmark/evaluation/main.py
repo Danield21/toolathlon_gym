@@ -86,6 +86,48 @@ def main():
             if len(a_row) > 3 and len(g_row) > 3:
                 if not num_close(a_row[3], g_row[3], 0.05):
                     errors.append(f"{key}.Pay_Ratio: {a_row[3]} vs {g_row[3]}")
+            # Above_Market_Count (col 4): integer, exact match
+            if len(a_row) > 4 and len(g_row) > 4 and g_row[4] is not None:
+                if not num_close(a_row[4], g_row[4], 0):
+                    errors.append(f"{key}.Above_Market_Count: {a_row[4]} vs {g_row[4]}")
+            # Below_Market_Count (col 5): integer, exact match
+            if len(a_row) > 5 and len(g_row) > 5 and g_row[5] is not None:
+                if not num_close(a_row[5], g_row[5], 0):
+                    errors.append(f"{key}.Below_Market_Count: {a_row[5]} vs {g_row[5]}")
+            # Above_Market_Pct (col 6): percent, tol 0.5
+            if len(a_row) > 6 and len(g_row) > 6 and g_row[6] is not None:
+                try:
+                    # allow both 0-1 and 0-100 representations: if GT < 1, treat as ratio else percent
+                    gv = float(g_row[6])
+                    av = a_row[6]
+                    if av is not None:
+                        av_f = float(av)
+                        tol_effective = 0.01 if gv <= 1.0 else 0.5
+                        # Harmonize scale for comparison
+                        if gv <= 1.0 and av_f > 1.5:
+                            av_f = av_f / 100.0
+                        elif gv > 1.0 and av_f <= 1.0:
+                            av_f = av_f * 100.0
+                        if not abs(av_f - gv) <= tol_effective:
+                            errors.append(f"{key}.Above_Market_Pct: {a_row[6]} vs {g_row[6]}")
+                except (TypeError, ValueError):
+                    pass
+            # Below_Market_Pct (col 7)
+            if len(a_row) > 7 and len(g_row) > 7 and g_row[7] is not None:
+                try:
+                    gv = float(g_row[7])
+                    av = a_row[7]
+                    if av is not None:
+                        av_f = float(av)
+                        tol_effective = 0.01 if gv <= 1.0 else 0.5
+                        if gv <= 1.0 and av_f > 1.5:
+                            av_f = av_f / 100.0
+                        elif gv > 1.0 and av_f <= 1.0:
+                            av_f = av_f * 100.0
+                        if not abs(av_f - gv) <= tol_effective:
+                            errors.append(f"{key}.Below_Market_Pct: {a_row[7]} vs {g_row[7]}")
+                except (TypeError, ValueError):
+                    pass
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -119,6 +161,10 @@ def main():
             if a_row is None:
                 errors.append(f"Missing row: {g_row[0]}|{g_row[1]}")
                 continue
+            # Employee_Count (col 2): integer exact match
+            if len(a_row) > 2 and len(g_row) > 2 and g_row[2] is not None:
+                if not num_close(a_row[2], g_row[2], 0):
+                    errors.append(f"{key}.Employee_Count: {a_row[2]} vs {g_row[2]}")
             if len(a_row) > 3 and len(g_row) > 3:
                 if not num_close(a_row[3], g_row[3], 500):
                     errors.append(f"{key}.Avg_Salary: {a_row[3]} vs {g_row[3]}")
@@ -128,6 +174,18 @@ def main():
             if len(a_row) > 5 and len(g_row) > 5:
                 if not num_close(a_row[5], g_row[5], 0.05):
                     errors.append(f"{key}.Pay_Ratio: {a_row[5]} vs {g_row[5]}")
+            # Variance_Amount (col 6): dollar amount, tol $500
+            if len(a_row) > 6 and len(g_row) > 6 and g_row[6] is not None:
+                if not num_close(a_row[6], g_row[6], 500):
+                    errors.append(f"{key}.Variance_Amount: {a_row[6]} vs {g_row[6]}")
+            # Status column (Above/Below/At Market) at col 7 per task.md (Role Details has 8 cols)
+            if len(g_row) > 7 and g_row[7] is not None and len(a_row) > 7:
+                if not str_match(a_row[7], g_row[7]):
+                    errors.append(f"{key}.Status: {a_row[7]} vs {g_row[7]}")
+            elif len(g_row) > 6 and g_row[6] is not None and isinstance(g_row[6], str) and len(a_row) > 6:
+                # Some GT layouts may differ; fall back to column 6
+                if not str_match(a_row[6], g_row[6]):
+                    errors.append(f"{key}.Status: {a_row[6]} vs {g_row[6]}")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -159,7 +217,8 @@ def main():
                 continue
             if len(a_row) > 1 and len(g_row) > 1:
                 if key in ("total_employees", "total_roles_analyzed", "roles_above_market", "roles_below_market"):
-                    if not num_close(a_row[1], g_row[1], 2):
+                    # Counts are integer-exact; tightened tol from 2 to 0.
+                    if not num_close(a_row[1], g_row[1], 0):
                         errors.append(f"{key}: {a_row[1]} vs {g_row[1]}")
                 elif key in ("overall_pay_ratio", "most_above_market_ratio", "most_below_market_ratio"):
                     if not num_close(a_row[1], g_row[1], 0.05):
@@ -189,10 +248,16 @@ def main():
             from docx import Document
             doc = Document(word_file)
             text = " ".join(p.text for p in doc.paragraphs).lower()
-            if "executive summary" not in text and "summary" not in text:
-                all_errors.append("Word doc missing executive summary section")
+            # Task requires 4 named sections: executive summary, key findings,
+            # department overview, recommendations
+            if "executive summary" not in text:
+                all_errors.append("Word doc missing 'Executive Summary' section")
+            if "key findings" not in text:
+                all_errors.append("Word doc missing 'Key Findings' section")
+            if "department overview" not in text and "department" not in text:
+                all_errors.append("Word doc missing 'Department Overview' section")
             if "recommend" not in text:
-                all_errors.append("Word doc missing recommendations section")
+                all_errors.append("Word doc missing 'Recommendations' section")
             if len(doc.paragraphs) < 5:
                 all_errors.append("Word doc too short")
             print("    PASS" if not any("Word" in e for e in all_errors) else "    ERRORS found")

@@ -3,6 +3,14 @@ import argparse
 import os
 import sys
 import openpyxl
+import psycopg2
+
+DB = {
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5432")),
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": "eigent", "password": "camel",
+}
 
 
 def num_close(a, b, tol=1.0):
@@ -14,6 +22,38 @@ def num_close(a, b, tol=1.0):
         return abs(float(a) - float(b)) <= tol
     except (TypeError, ValueError):
         return str(a).strip().lower() == str(b).strip().lower()
+
+
+def is_numeric(val):
+    if val is None: return False
+    try:
+        float(str(val).replace(",", "").replace("$", "").strip())
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def check_gsheet(errors):
+    """Verify Google Sheet 'Product Category Report' exists with substantive data."""
+    try:
+        conn = psycopg2.connect(**DB); cur = conn.cursor()
+        cur.execute("""
+            SELECT id, title FROM gsheet.spreadsheets
+            WHERE LOWER(title) LIKE '%product category report%'
+               OR LOWER(title) = LOWER('Product Category Report')
+        """)
+        sheets = cur.fetchall()
+        if not sheets:
+            errors.append("Google Sheet 'Product Category Report' not found")
+            cur.close(); conn.close(); return
+        sid = sheets[0][0]
+        cur.execute("SELECT COUNT(*) FROM gsheet.cells WHERE spreadsheet_id = %s", (sid,))
+        cell_count = cur.fetchone()[0]
+        if cell_count < 10:
+            errors.append(f"Google Sheet has only {cell_count} cells (expected >=10)")
+        cur.close(); conn.close()
+    except Exception as e:
+        errors.append(f"Google Sheet check error: {e}")
 
 
 def str_match(a, b):
@@ -83,20 +123,33 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 2):
-                    errors.append(f"{key}.Product_Count: {a_row[1]} vs {g_row[1]} (tol=2)")
+                if not num_close(a_row[1], g_row[1], 0):  # exact product count
+                    errors.append(f"{key}.Product_Count: {a_row[1]} vs {g_row[1]} (exact)")
 
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 5.0):
-                    errors.append(f"{key}.Avg_Price: {a_row[2]} vs {g_row[2]} (tol=5.0)")
+                if not num_close(a_row[2], g_row[2], 0.5):
+                    errors.append(f"{key}.Avg_Price: {a_row[2]} vs {g_row[2]} (tol=0.5)")
 
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 5.0):
-                    errors.append(f"{key}.Avg_Cost: {a_row[3]} vs {g_row[3]} (tol=5.0)")
+                if not num_close(a_row[3], g_row[3], 0.5):
+                    errors.append(f"{key}.Avg_Cost: {a_row[3]} vs {g_row[3]} (tol=0.5)")
 
             if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 5.0):
-                    errors.append(f"{key}.Avg_Margin: {a_row[4]} vs {g_row[4]} (tol=5.0)")
+                if not num_close(a_row[4], g_row[4], 0.5):
+                    errors.append(f"{key}.Avg_Margin: {a_row[4]} vs {g_row[4]} (tol=0.5)")
+
+        # Sort order check: by Avg_Margin desc
+        if a_data and len(a_data) >= 2:
+            a_margins = []
+            for r in a_data:
+                if r and len(r) >= 5 and r[4] is not None:
+                    try:
+                        a_margins.append(float(r[4]))
+                    except Exception:
+                        pass
+            if len(a_margins) >= 2:
+                if a_margins != sorted(a_margins, reverse=True):
+                    errors.append(f"Product Categories not sorted by Avg_Margin desc: {a_margins[:5]}")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -134,8 +187,14 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 10.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=10.0)")
+                if is_numeric(g_row[1]):
+                    # Counts exact, averages ±0.05
+                    tol = 0 if "count" in key or "total" in key else 0.05
+                    if not num_close(a_row[1], g_row[1], tol):
+                        errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol={tol})")
+                else:
+                    if str(a_row[1]).strip().lower() != str(g_row[1]).strip().lower():
+                        errors.append(f"{key}.Value: '{a_row[1]}' vs '{g_row[1]}'")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -145,6 +204,17 @@ def main():
             print(f"    PASS")
 
     
+
+    # Google Sheet check
+    print(f"  Checking Google Sheet...")
+    gs_errors = []
+    check_gsheet(gs_errors)
+    all_errors.extend(gs_errors)
+    if gs_errors:
+        for e in gs_errors:
+            print(f"    {e}")
+    else:
+        print("    PASS")
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

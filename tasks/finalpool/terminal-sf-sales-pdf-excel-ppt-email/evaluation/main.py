@@ -178,8 +178,12 @@ def check_excel(agent_workspace, groundtruth_workspace):
             conn_db = psycopg2.connect(**DB)
             cur_db = conn_db.cursor()
             cur_db.execute("""
-                SELECT region FROM sf_data.orders
-                GROUP BY region ORDER BY SUM(sales) DESC LIMIT 1
+                SELECT c."REGION"
+                FROM sf_data."SALES_DW__PUBLIC__ORDERS" o
+                JOIN sf_data."SALES_DW__PUBLIC__CUSTOMERS" c
+                  ON o."CUSTOMER_ID" = c."CUSTOMER_ID"
+                GROUP BY c."REGION"
+                ORDER BY SUM(o."TOTAL_AMOUNT") DESC LIMIT 1
             """)
             result = cur_db.fetchone()
             if result and result[0]:
@@ -192,6 +196,30 @@ def check_excel(agent_workspace, groundtruth_workspace):
         check("Best_Region correct",
               br is not None and expected_best_region in str(br).lower(),
               f"Got {br}, expected {expected_best_region}")
+        # Dynamically determine worst region from DB
+        expected_worst_region = "latin america"  # fallback
+        try:
+            conn_db = psycopg2.connect(**DB)
+            cur_db = conn_db.cursor()
+            cur_db.execute("""
+                SELECT c."REGION"
+                FROM sf_data."SALES_DW__PUBLIC__ORDERS" o
+                JOIN sf_data."SALES_DW__PUBLIC__CUSTOMERS" c
+                  ON o."CUSTOMER_ID" = c."CUSTOMER_ID"
+                GROUP BY c."REGION"
+                ORDER BY SUM(o."TOTAL_AMOUNT") ASC LIMIT 1
+            """)
+            result = cur_db.fetchone()
+            if result and result[0]:
+                expected_worst_region = str(result[0]).strip().lower()
+            cur_db.close()
+            conn_db.close()
+        except Exception:
+            pass
+        wr = a_data.get("worst_region")
+        check("Worst_Region correct",
+              wr is not None and expected_worst_region in str(wr).lower(),
+              f"Got {wr}, expected {expected_worst_region}")
 
 
 def check_pptx(agent_workspace):
@@ -230,19 +258,27 @@ def check_email():
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
+        # Match only Sent folder messages to regional managers
         cur.execute("""
-            SELECT m.subject, m.to_addr, m.body_text
-            FROM email.sent_log sl
-            JOIN email.messages m ON sl.message_id = m.id
-            WHERE lower(m.subject) LIKE '%%sales%%territory%%review%%'
-               OR lower(m.subject) LIKE '%%q1%%sales%%'
+            SELECT subject, to_addr, body_text FROM email.messages
+            WHERE folder_id IN (SELECT id FROM email.folders WHERE name = 'Sent')
+              AND to_addr::text ILIKE '%%regional_managers@company.com%%'
+              AND (lower(subject) LIKE '%%sales%%territory%%review%%'
+                   OR lower(subject) LIKE '%%q1%%sales%%'
+                   OR lower(subject) LIKE '%%quarterly%%sales%%'
+                   OR lower(subject) LIKE '%%sales%%review%%')
+              AND lower(subject) NOT LIKE '%%retreat%%'
         """)
         rows = cur.fetchall()
         if not rows:
             cur.execute("""
                 SELECT subject, to_addr, body_text FROM email.messages
-                WHERE lower(subject) LIKE '%%sales%%territory%%review%%'
-                   OR lower(subject) LIKE '%%q1%%sales%%'
+                WHERE to_addr::text ILIKE '%%regional_managers@company.com%%'
+                  AND (lower(subject) LIKE '%%sales%%territory%%review%%'
+                       OR lower(subject) LIKE '%%q1%%sales%%'
+                       OR lower(subject) LIKE '%%quarterly%%sales%%'
+                       OR lower(subject) LIKE '%%sales%%review%%')
+                  AND lower(subject) NOT LIKE '%%retreat%%'
             """)
             rows = cur.fetchall()
         check("Sales review email sent", len(rows) > 0, f"Found {len(rows)}")
@@ -292,6 +328,21 @@ def check_reverse_validation(workspace):
         bad_count = cur.fetchone()[0]
         check("No sales emails to competitor addresses", bad_count == 0,
               f"Found {bad_count}")
+
+        # Reverse: noise emails preserved
+        noise_subjects = [
+            "FY2024 Annual Report Draft",
+            "New Product Launch Timeline",
+            "RE: Sales Team Retreat Planning",
+            "Office Expansion Discussion",
+            "Travel Policy Update Reminder",
+        ]
+        cur.execute("SELECT subject FROM email.messages")
+        existing = {r[0] for r in cur.fetchall()}
+        preserved = sum(1 for s in noise_subjects if s in existing)
+        check("Reverse: noise emails preserved (not deleted)",
+              preserved >= 4,
+              f"Only {preserved}/5 noise emails remain")
         cur.close()
         conn.close()
     except Exception:

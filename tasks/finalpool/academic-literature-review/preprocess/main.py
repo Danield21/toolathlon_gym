@@ -14,7 +14,7 @@ import psycopg2.extras
 
 DB_CONN = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -524,6 +524,143 @@ def inject_arxiv_latex(conn):
     print(f"Injected {len(PAPERS)} papers into arxiv_latex.papers")
 
 
+# Distractor papers — unrelated to RAG. Agent should filter these out
+# and NOT include them in the literature review.
+NOISE_PAPERS = [
+    {
+        "arxiv_id": "2310.02345",
+        "title": "Deep Learning Approaches for Medical Image Segmentation",
+        "authors": [{"name": "Maria Rodriguez"}, {"name": "Kenji Tanaka"}],
+        "categories": ["cs.CV", "eess.IV"],
+        "primary_category": "cs.CV",
+        "abstract": "We present a survey of deep learning methods for medical image segmentation, focusing on U-Net variants and attention mechanisms.",
+        "published": "2023-10-04",
+        "pub_year": 2023,
+        "venue": "MICCAI 2023",
+        "citation_count": 120,
+        "markdown_content": "# Deep Learning Approaches for Medical Image Segmentation\n\n## Abstract\n\nSurvey of CNN-based medical image segmentation methods including U-Net and Transformer-based models.\n\n## Methodology\n\nWe review attention U-Net, TransUNet, and Swin-UNet architectures on ISIC and BraTS datasets.",
+        "latex_content": "\\documentclass{article}\n\\title{Deep Learning Approaches for Medical Image Segmentation}\n\\begin{document}\n\\maketitle\n\\section{Methodology}\nWe review CNN-based medical segmentation methods.\n\\end{document}",
+    },
+    {
+        "arxiv_id": "2211.05678",
+        "title": "Quantum Computing Foundations and Error Correction",
+        "authors": [{"name": "Sophia Nguyen"}, {"name": "Rohan Mehta"}],
+        "categories": ["quant-ph", "cs.ET"],
+        "primary_category": "quant-ph",
+        "abstract": "This paper surveys quantum computing fundamentals including qubits, gates, and surface code error correction schemes.",
+        "published": "2022-11-10",
+        "pub_year": 2022,
+        "venue": "Physical Review A",
+        "citation_count": 85,
+        "markdown_content": "# Quantum Computing Foundations and Error Correction\n\n## Abstract\n\nSurvey of quantum gates and error correction using surface codes.\n\n## Methodology\n\nWe analyze Shor, Steane, and surface code schemes for fault-tolerant computation.",
+        "latex_content": "\\documentclass{article}\n\\title{Quantum Computing Foundations and Error Correction}\n\\begin{document}\n\\maketitle\n\\section{Methodology}\nSurvey of quantum error correction codes.\n\\end{document}",
+    },
+    {
+        "arxiv_id": "2309.08721",
+        "title": "Reinforcement Learning for Robotic Manipulation in Cluttered Environments",
+        "authors": [{"name": "Luis Fernandez"}, {"name": "Aisha Patel"}],
+        "categories": ["cs.RO", "cs.LG"],
+        "primary_category": "cs.RO",
+        "abstract": "We propose a reinforcement learning framework for robotic grasping and manipulation in dense, cluttered scenes using PPO and sim-to-real transfer.",
+        "published": "2023-09-16",
+        "pub_year": 2023,
+        "venue": "CoRL 2023",
+        "citation_count": 95,
+        "markdown_content": "# Reinforcement Learning for Robotic Manipulation in Cluttered Environments\n\n## Abstract\n\nPPO-based grasping in cluttered scenes with sim-to-real transfer.\n\n## Methodology\n\nCurriculum learning with domain randomization, evaluated on Franka Panda.",
+        "latex_content": "\\documentclass{article}\n\\title{Reinforcement Learning for Robotic Manipulation}\n\\begin{document}\n\\maketitle\n\\section{Methodology}\nPPO with domain randomization.\n\\end{document}",
+    },
+    {
+        "arxiv_id": "2405.11234",
+        "title": "Graph Neural Networks for Social Network Analysis",
+        "authors": [{"name": "David Kim"}, {"name": "Elena Petrova"}],
+        "categories": ["cs.SI", "cs.LG"],
+        "primary_category": "cs.SI",
+        "abstract": "We investigate GNN architectures for node classification and link prediction in large-scale social networks, comparing GCN, GAT, and GraphSAGE.",
+        "published": "2024-05-18",
+        "pub_year": 2024,
+        "venue": "WWW 2024",
+        "citation_count": 60,
+        "markdown_content": "# Graph Neural Networks for Social Network Analysis\n\n## Abstract\n\nGNN architectures for social graph tasks: GCN, GAT, GraphSAGE.\n\n## Methodology\n\nNode classification on Reddit and Pokec datasets.",
+        "latex_content": "\\documentclass{article}\n\\title{Graph Neural Networks for Social Network Analysis}\n\\begin{document}\n\\maketitle\n\\section{Methodology}\nGNN evaluation on social datasets.\n\\end{document}",
+    },
+]
+
+
+def inject_noise_papers(conn):
+    """Inject distractor papers unrelated to RAG to test agent's filtering ability."""
+    with conn.cursor() as cur:
+        for p in NOISE_PAPERS:
+            # scholarly.arxiv_papers
+            cur.execute("""
+                INSERT INTO scholarly.arxiv_papers
+                (id, title, authors, abstract, categories, primary_category,
+                 published, updated, doi, journal_ref, pdf_url, html_url, comment)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+            """, (
+                p["arxiv_id"], p["title"], json.dumps(p["authors"]), p["abstract"],
+                json.dumps(p["categories"]), p["primary_category"],
+                p["published"], p["published"], None, p.get("venue"),
+                f"http://arxiv.org/pdf/{p['arxiv_id']}",
+                f"http://arxiv.org/abs/{p['arxiv_id']}", None,
+            ))
+            # scholarly.scholar_papers
+            cur.execute("""
+                INSERT INTO scholarly.scholar_papers
+                (title, authors, abstract, pub_year, venue, citation_count,
+                 url, eprint_url, pub_url, bib)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (
+                p["title"], json.dumps(p["authors"]), p["abstract"],
+                p["pub_year"], p.get("venue"), p.get("citation_count", 0),
+                f"http://arxiv.org/abs/{p['arxiv_id']}",
+                f"http://arxiv.org/pdf/{p['arxiv_id']}",
+                f"http://arxiv.org/abs/{p['arxiv_id']}",
+                json.dumps({"title": p["title"], "year": p["pub_year"]}),
+            ))
+            # arxiv.papers
+            cur.execute("""
+                INSERT INTO arxiv.papers
+                (id, title, authors, summary, categories, primary_category,
+                 published, updated, doi, journal_ref, comment, pdf_url,
+                 links, markdown_content, is_downloaded)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO NOTHING
+            """, (
+                p["arxiv_id"], p["title"], json.dumps(p["authors"]),
+                p["abstract"], json.dumps(p["categories"]), p["primary_category"],
+                p["published"], p["published"], None, p.get("venue"), None,
+                f"http://arxiv.org/pdf/{p['arxiv_id']}", json.dumps([]),
+                p["markdown_content"], True,
+            ))
+            # arxiv_latex.papers
+            md = p["markdown_content"]
+            sections = []
+            for line in md.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    level = 0
+                    for ch in stripped:
+                        if ch == "#":
+                            level += 1
+                        else:
+                            break
+                    title = stripped[level:].strip()
+                    if title:
+                        sections.append(title)
+            cur.execute("""
+                INSERT INTO arxiv_latex.papers
+                (id, title, abstract, full_prompt, sections, raw_latex, processed_at)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (id) DO NOTHING
+            """, (
+                p["arxiv_id"], p["title"], p["abstract"], md,
+                json.dumps(sections), p["latex_content"],
+            ))
+    conn.commit()
+    print(f"Injected {len(NOISE_PAPERS)} distractor (noise) papers into scholarly/arxiv tables")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", type=str, required=False)
@@ -537,6 +674,7 @@ def main():
         inject_scholarly_scholar(conn)
         inject_arxiv_papers(conn)
         inject_arxiv_latex(conn)
+        inject_noise_papers(conn)
     finally:
         conn.close()
 

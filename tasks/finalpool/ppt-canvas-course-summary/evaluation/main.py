@@ -25,13 +25,34 @@ def get_expected_data():
     )
     cur = conn.cursor()
 
+    # Dynamically resolve course_id by matching the course name and Fall 2013 term
+    cur.execute("""
+        SELECT id FROM canvas.courses
+        WHERE (LOWER(name) LIKE %s OR LOWER(name) LIKE %s)
+           AND (LOWER(COALESCE(name,'')) LIKE %s
+                OR CAST(id AS TEXT) = '1')
+        ORDER BY id ASC
+        LIMIT 1
+    """, ('%applied analytics%algorithms%', '%analytics & algorithms%', '%fall 2013%'))
+    row = cur.fetchone()
+    if row:
+        course_id = row[0]
+    else:
+        # Fallback: first try any 'applied analytics' course, else id=1
+        cur.execute("""SELECT id FROM canvas.courses
+                       WHERE LOWER(name) LIKE %s
+                       ORDER BY id ASC LIMIT 1""",
+                    ('%applied analytics%',))
+        r2 = cur.fetchone()
+        course_id = r2[0] if r2 else 1
+
     # Enrollment counts
     cur.execute("""
         SELECT type, COUNT(*)
         FROM canvas.enrollments
-        WHERE course_id = 1
+        WHERE course_id = %s
         GROUP BY type ORDER BY type
-    """)
+    """, (course_id,))
     enrollment_raw = dict(cur.fetchall())
     enrollments = {
         "student": enrollment_raw.get("StudentEnrollment", 0),
@@ -48,10 +69,10 @@ def get_expected_data():
                COUNT(*) as sub_count
         FROM canvas.assignments a
         JOIN canvas.submissions s ON a.id = s.assignment_id
-        WHERE a.course_id = 1 AND s.score IS NOT NULL
+        WHERE a.course_id = %s AND s.score IS NOT NULL
         GROUP BY a.name
         ORDER BY a.name
-    """)
+    """, (course_id,))
     assignments = cur.fetchall()
 
     # Grade distribution
@@ -69,12 +90,12 @@ def get_expected_data():
           SELECT s.user_id, AVG(s.score)::float as avg_score
           FROM canvas.submissions s
           JOIN canvas.assignments a ON s.assignment_id = a.id
-          WHERE a.course_id = 1 AND s.score IS NOT NULL
+          WHERE a.course_id = %s AND s.score IS NOT NULL
           GROUP BY s.user_id
         ) sub
         GROUP BY grade_range
         ORDER BY grade_range
-    """)
+    """, (course_id,))
     grades = cur.fetchall()
     total_graded_students = sum(g[1] for g in grades)
 
@@ -152,11 +173,18 @@ def check_excel(workspace, enrollments, assignments, grades, total_graded_studen
     if len(data_rows2) != len(assignments):
         return False, f"Assignment Performance: expected {len(assignments)} rows, got {len(data_rows2)}"
 
-    for i, (exp_name, exp_avg, exp_max, exp_min, exp_count) in enumerate(assignments):
-        row = data_rows2[i]
-        name_val = str(row[idx_map["assignment_name"]]).strip() if row[idx_map["assignment_name"]] else ""
-        if name_val.lower() != exp_name.lower():
-            return False, f"Assignment row {i+1}: expected name '{exp_name}', got '{name_val}'"
+    # Build lookup by assignment_name (case-insensitive) for order-independent comparison
+    agent_lookup = {}
+    for row in data_rows2:
+        nv = row[idx_map["assignment_name"]]
+        if nv is not None:
+            agent_lookup[str(nv).strip().lower()] = row
+
+    for (exp_name, exp_avg, exp_max, exp_min, exp_count) in assignments:
+        key = exp_name.lower()
+        if key not in agent_lookup:
+            return False, f"Assignment '{exp_name}' not found in Assignment Performance"
+        row = agent_lookup[key]
 
         avg_val = float(row[idx_map["avg_score"]]) if row[idx_map["avg_score"]] is not None else None
         if avg_val is None or abs(avg_val - exp_avg) > 0.5:
@@ -250,11 +278,45 @@ def check_pptx(workspace, enrollments, assignments):
         return False, f"Title slide does not contain 'Fall 2013'. Text: {all_text[0][:200]}"
     print("  [PASS] Title slide contains course name")
 
-    # Check enrollment numbers appear somewhere
+    # Check enrollment numbers appear somewhere with appropriate label context
+    import re as _re
     student_str = str(enrollments["student"])
-    if student_str not in full_text:
-        return False, f"Student count ({student_str}) not found in presentation"
-    print("  [PASS] Student count found in presentation")
+    teacher_str = str(enrollments["teacher"])
+    ta_str = str(enrollments["ta"])
+
+    # Student count: require explicit context (labels with number on same slide/paragraph)
+    student_pattern = _re.compile(
+        r"student[^\n]{0,20}[:\s\-]+" + _re.escape(student_str) + r"\b"
+        r"|" + _re.escape(student_str) + r"\s*students?",
+        _re.IGNORECASE,
+    )
+    if not student_pattern.search(full_text):
+        return False, (f"Student count ({student_str}) not found with label "
+                       f"in presentation")
+    print("  [PASS] Student count found with label context")
+
+    # Teacher count
+    teacher_pattern = _re.compile(
+        r"teacher[^\n]{0,20}[:\s\-]+" + _re.escape(teacher_str) + r"\b"
+        r"|" + _re.escape(teacher_str) + r"\s*teachers?",
+        _re.IGNORECASE,
+    )
+    if not teacher_pattern.search(full_text):
+        return False, (f"Teacher count ({teacher_str}) not found with label "
+                       f"in presentation")
+    print("  [PASS] Teacher count found with label context")
+
+    # TA count
+    ta_pattern = _re.compile(
+        r"\bta[^\n]{0,20}[:\s\-]+" + _re.escape(ta_str) + r"\b"
+        r"|" + _re.escape(ta_str) + r"\s*tas?\b"
+        r"|teaching\s+assistant[^\n]{0,20}[:\s\-]+" + _re.escape(ta_str) + r"\b",
+        _re.IGNORECASE,
+    )
+    if not ta_pattern.search(full_text):
+        return False, (f"TA count ({ta_str}) not found with label "
+                       f"in presentation")
+    print("  [PASS] TA count found with label context")
 
     # Check all assignment names appear
     for a in assignments:
@@ -276,10 +338,19 @@ def check_pptx(workspace, enrollments, assignments):
         return False, f"Key findings slide content insufficient (found {findings_found}/6 keywords)"
     print("  [PASS] Key findings content found")
 
+    # Check last slide mentions highest-performing assignment (max avg_score)
+    if assignments:
+        top_assign = max(assignments, key=lambda a: a[1])  # a[1]=exp_avg
+        last_slide = all_text[-1].lower() if all_text else ""
+        # The highest performing assignment name should appear in the last slide OR in the overall text
+        if top_assign[0].lower() not in last_slide and top_assign[0].lower() not in full_text:
+            return False, f"Highest performing assignment '{top_assign[0]}' not found in presentation"
+        print(f"  [PASS] Highest-performing assignment '{top_assign[0]}' referenced")
+
     return True, "PPTX file checks passed"
 
 
-def check_gsheet():
+def check_gsheet(enrollments=None, assignments=None):
     """Check that AAA F13 Course Dashboard was created in gsheet schema."""
     import psycopg2
 
@@ -325,12 +396,38 @@ def check_gsheet():
         WHERE spreadsheet_id = %s
     """, (spreadsheet_id,))
     cell_count = cur.fetchone()[0]
+    # Fetch all cell values to verify content
+    cur.execute("""
+        SELECT value FROM gsheet.cells
+        WHERE spreadsheet_id = %s
+    """, (spreadsheet_id,))
+    all_cells = cur.fetchall()
     conn.close()
 
     if cell_count < 4:
         return False, f"Dashboard spreadsheet has only {cell_count} cells, expected at least 4"
 
-    print(f"  [PASS] Dashboard spreadsheet found with {cell_count} cells")
+    all_text = " ".join(str(c[0]).lower() for c in all_cells if c[0] is not None)
+    # Must contain course name reference and some enrollment number
+    has_course = "applied analytics" in all_text or "aaa" in all_text or "algorithms" in all_text
+    if not has_course:
+        return False, f"Dashboard does not mention course name. Cells: {all_text[:300]}"
+
+    # Key-field check: student count + assignment count must appear verbatim
+    if enrollments is not None:
+        student_str = str(enrollments["student"])
+        if student_str not in all_text:
+            return False, (f"Dashboard missing student count '{student_str}'. "
+                           f"Cells excerpt: {all_text[:300]}")
+        print(f"  [PASS] Dashboard contains student count {student_str}")
+    if assignments is not None:
+        assign_count = str(len(assignments))
+        if assign_count not in all_text:
+            return False, (f"Dashboard missing assignment count '{assign_count}'. "
+                           f"Cells excerpt: {all_text[:300]}")
+        print(f"  [PASS] Dashboard contains assignment count {assign_count}")
+
+    print(f"  [PASS] Dashboard spreadsheet found with {cell_count} cells, contains course name")
     return True, "Google Sheet check passed"
 
 
@@ -394,7 +491,7 @@ if __name__ == "__main__":
     # Check Google Sheet
     print("\n--- Check 3: Online Spreadsheet Dashboard ---")
     try:
-        ok, msg = check_gsheet()
+        ok, msg = check_gsheet(enrollments, assignments)
         if not ok:
             print(f"  [FAIL] {msg}")
             all_passed = False

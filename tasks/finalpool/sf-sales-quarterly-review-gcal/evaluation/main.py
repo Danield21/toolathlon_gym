@@ -192,7 +192,9 @@ def check_word(agent_workspace):
         text = " ".join(p.text for p in doc.paragraphs).lower()
         if len(text.strip()) < 50:
             errors.append("Sales_Executive_Summary.docx has too little content")
-        for kw in ["q4", "q1"]:
+        # Require all four quarters to be mentioned (Q1-Q4) since it's a full
+        # 2025 annual review.
+        for kw in ["q1", "q2", "q3", "q4"]:
             if kw not in text:
                 errors.append(f"Sales_Executive_Summary.docx missing keyword: {kw}")
     except ImportError:

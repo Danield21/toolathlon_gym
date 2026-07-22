@@ -190,9 +190,16 @@ def check_gsheet():
     cur = conn.cursor()
 
     try:
-        # Find spreadsheet with "FY2024" or "dashboard" in title
+        # Reverse validation: noise spreadsheets must remain (not be deleted)
+        cur.execute("SELECT COUNT(*) FROM gsheet.spreadsheets WHERE id LIKE 'noise-ss-%'")
+        noise_cnt = cur.fetchone()[0]
+        if noise_cnt < 3:
+            print(f"  [FAIL] Noise spreadsheets missing: {noise_cnt}/3 preserved")
+            return False
+
+        # Find spreadsheet with "FY2024" or "dashboard" in title (agent's output)
         cur.execute(
-            "SELECT id, title FROM gsheet.spreadsheets WHERE LOWER(title) LIKE '%fy2024%' OR LOWER(title) LIKE '%dashboard%'"
+            "SELECT id, title FROM gsheet.spreadsheets WHERE (LOWER(title) LIKE '%fy2024%' OR LOWER(title) LIKE '%dashboard%') AND id NOT LIKE 'noise-ss-%'"
         )
         spreadsheets = cur.fetchall()
         if not spreadsheets:
@@ -301,7 +308,7 @@ def check_word(workspace):
 
 
 def check_pdf(workspace):
-    """Check FY2024_Financial_Report.pdf exists and has reasonable size."""
+    """Check FY2024_Financial_Report.pdf exists, has reasonable size, and contains FY2024 content."""
     print("\n--- Check 4: PDF File ---")
     pdf_path = Path(workspace) / "FY2024_Financial_Report.pdf"
     if not pdf_path.exists():
@@ -313,8 +320,35 @@ def check_pdf(workspace):
         print(f"  [FAIL] PDF file too small ({size} bytes), likely invalid")
         return False
 
-    print(f"  [PASS] PDF exists, size={size} bytes")
-    return True
+    # Extract text and verify it references FY2024 / 2024
+    pdf_text = ""
+    try:
+        from pdfminer.high_level import extract_text
+        pdf_text = extract_text(str(pdf_path)) or ""
+    except Exception:
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(str(pdf_path))
+            for page in reader.pages:
+                pdf_text += page.extract_text() or ""
+        except Exception:
+            try:
+                from PyPDF2 import PdfReader
+                reader = PdfReader(str(pdf_path))
+                for page in reader.pages:
+                    pdf_text += page.extract_text() or ""
+            except Exception as e:
+                print(f"  [WARN] PDF text extraction unavailable ({e}); size-only check passed")
+                print(f"  [PASS] PDF exists, size={size} bytes")
+                return True
+
+    text_lower = pdf_text.lower()
+    if "fy2024" in text_lower or "2024" in pdf_text:
+        print(f"  [PASS] PDF exists, size={size} bytes, contains FY2024/2024 text")
+        return True
+    else:
+        print(f"  [FAIL] PDF does not contain 'FY2024' or '2024' (text length={len(pdf_text)})")
+        return False
 
 
 if __name__ == "__main__":

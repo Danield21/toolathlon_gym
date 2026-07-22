@@ -103,23 +103,58 @@ def check_excel(agent_workspace):
             check(f"Column '{col}' present", any(col in h for h in header_lower),
                   f"Header: {header}")
 
-        # Spot-check some courses
+        # Validate ALL 22 courses counts and compliance against DB-derived expected
+        courses_validated = 0
+        course_names_in_order = []
         for row in data_rows:
             if not row or not row[0]:
                 continue
             course_key = str(row[0]).strip().lower()
+            course_names_in_order.append(str(row[0]).strip())
             if course_key in expected:
                 exp = expected[course_key]
-                if "applied analytics" in course_key and "fall 2013" in course_key:
-                    # AAA Fall 2013: 6 assignments, 0 quizzes, 3 modules
-                    check("AAA-2013 assignments=6", num_close(row[1], 6), f"Got {row[1]}")
-                    check("AAA-2013 quizzes=0", num_close(row[2], 0), f"Got {row[2]}")
-                    check("AAA-2013 compliant=No",
-                          str(row[5]).strip().lower() in ("no", "n", "false"),
-                          f"Got {row[5]}")
-                elif "foundations of finance" in course_key and "fall 2013" in course_key:
-                    check("FFF-2013 assignments=13", num_close(row[1], 13), f"Got {row[1]}")
-                    check("FFF-2013 quizzes=7", num_close(row[2], 7), f"Got {row[2]}")
+                short = course_key[:40]
+                check(f"'{short}' assignments={exp['assignments']}",
+                      num_close(row[1], exp["assignments"]), f"Got {row[1]}")
+                check(f"'{short}' quizzes={exp['quizzes']}",
+                      num_close(row[2], exp["quizzes"]), f"Got {row[2]}")
+                check(f"'{short}' modules={exp['modules']}",
+                      num_close(row[3], exp["modules"]), f"Got {row[3]}")
+                # Has_Syllabus (col 4) must match DB
+                syl_cell = str(row[4]).strip().lower() if row[4] is not None else ""
+                exp_syl = "yes" if exp["syllabus"] else "no"
+                syl_ok = syl_cell in ("yes", "y", "true", "1") if exp["syllabus"] else syl_cell in ("no", "n", "false", "0")
+                check(f"'{short}' has_syllabus={exp_syl}", syl_ok, f"Got {row[4]}")
+                # Compliant_YN
+                comp_cell = str(row[5]).strip().lower() if row[5] is not None else ""
+                if exp["compliant"]:
+                    comp_ok = comp_cell in ("yes", "y", "true", "1")
+                else:
+                    comp_ok = comp_cell in ("no", "n", "false", "0")
+                check(f"'{short}' compliant_yn", comp_ok, f"Got {row[5]}")
+                # Issues column (index 6): if non-compliant, must list at least one deficiency
+                issues_cell = str(row[6]).strip() if len(row) > 6 and row[6] is not None else ""
+                if exp["compliant"]:
+                    # Compliant courses: Issues should be 'None' or empty
+                    issues_ok = issues_cell.lower() in ("none", "", "n/a", "-") or issues_cell.lower().startswith("no ")
+                    check(f"'{short}' issues=None (compliant)", issues_ok,
+                          f"Got {issues_cell[:100]}")
+                else:
+                    # Non-compliant: must list a deficiency keyword
+                    issues_lower = issues_cell.lower()
+                    deficiency_kws = ["assignment", "quiz", "module", "syllabus"]
+                    issues_ok = any(kw in issues_lower for kw in deficiency_kws)
+                    check(f"'{short}' issues lists deficiencies (non-compliant)", issues_ok,
+                          f"Got {issues_cell[:100]}")
+                courses_validated += 1
+        check(f"All 22 courses validated", courses_validated == 22,
+              f"Validated {courses_validated}")
+
+        # Alphabetical sort check
+        sorted_names = sorted(course_names_in_order)
+        check("Courses sorted alphabetically",
+              course_names_in_order == sorted_names,
+              f"Order mismatch at first diff")
 
     # Check Summary sheet
     sum_rows = load_sheet_rows(wb, "Summary")
@@ -137,9 +172,27 @@ def check_excel(agent_workspace):
               f"Got {lookup.get('total_courses')}")
 
         compliant_expected = sum(1 for v in expected.values() if v["compliant"])
+        non_compliant_expected = len(expected) - compliant_expected
         check(f"Compliant_Courses = {compliant_expected}",
               num_close(lookup.get("compliant_courses"), compliant_expected),
               f"Got {lookup.get('compliant_courses')}")
+        check(f"Non_Compliant_Courses = {non_compliant_expected}",
+              num_close(lookup.get("non_compliant_courses"), non_compliant_expected),
+              f"Got {lookup.get('non_compliant_courses')}")
+        # Compliance rate: strip any % sign and compare as float
+        rate_cell = lookup.get("compliance_rate")
+        rate_expected = round(100.0 * compliant_expected / max(len(expected), 1), 1)
+        def _parse_pct(v):
+            if v is None:
+                return None
+            try:
+                return float(str(v).strip().rstrip("%"))
+            except (TypeError, ValueError):
+                return None
+        rate_actual = _parse_pct(rate_cell)
+        check(f"Compliance_Rate ~= {rate_expected}%",
+              rate_actual is not None and abs(rate_actual - rate_expected) <= 1.0,
+              f"Got {rate_cell}")
 
 
 def check_word(agent_workspace):
@@ -155,9 +208,29 @@ def check_word(agent_workspace):
     try:
         from docx import Document
         doc = Document(docx_path)
-        all_text = " ".join(p.text for p in doc.paragraphs).lower()
+        paragraphs = [p.text for p in doc.paragraphs]
+        all_text = " ".join(paragraphs).lower()
         check("Report mentions compliance", "compli" in all_text, f"Sample: {all_text[:200]}")
         check("Report mentions recommendations", "recommend" in all_text, f"Sample: {all_text[:200]}")
+        # Executive summary section
+        check("Report has executive summary phrase",
+              "executive summary" in all_text,
+              f"Sample: {all_text[:200]}")
+        # Non-compliance / areas of non-compliance
+        has_noncompliance = any(p in all_text for p in [
+            "non-compliance", "non compliance", "non-compliant", "non compliant", "areas of"
+        ])
+        check("Report discusses non-compliance areas", has_noncompliance,
+              f"Sample: {all_text[:200]}")
+        # At least one recommendation paragraph + 'recommendations' heading
+        recommend_paragraphs = [p for p in paragraphs if p and "recommend" in p.lower()]
+        check("Report has at least 1 recommendations section paragraph",
+              len(recommend_paragraphs) >= 1,
+              f"Found {len(recommend_paragraphs)} paragraphs with 'recommend'")
+        # "Key findings" or "key finding" must appear (narrative structure)
+        check("Report has Key Findings section",
+              "key finding" in all_text or "key findings" in all_text,
+              f"Sample: {all_text[:200]}")
     except ImportError:
         check("python-docx available", False, "pip install python-docx")
 

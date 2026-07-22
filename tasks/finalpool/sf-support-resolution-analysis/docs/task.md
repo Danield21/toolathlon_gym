@@ -4,4 +4,4 @@ Create an Excel file called Support_Resolution_Report.xlsx with two sheets. The 
 
 The "Summary" should have Total_Issue_Types, Total_Tickets, Most_Common_Issue type name, and Best_CSAT_Issue type with highest satisfaction.
 
-Also create a Google Sheet titled "Support Issue Dashboard" with an "Issues" sheet containing the same data.
+Also create a cloud spreadsheet titled "Support Issue Dashboard" with an "Issues" sheet containing the same Issue_Type, Tickets, Avg_Response_Hrs, and Avg_CSAT data as the Excel file.

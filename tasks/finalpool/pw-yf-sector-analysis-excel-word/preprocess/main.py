@@ -4,7 +4,7 @@ import argparse, json, os, sys, shutil, tarfile, subprocess, time
 from datetime import datetime, timedelta
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -62,7 +62,21 @@ def setup_mock_server(port=30315):
             shell=True
         )
         time.sleep(1)
-        print(f"Mock server started on port 30315")
+        # Health check: confirm port is reachable
+        ok = False
+        try:
+            import urllib.request
+            for _ in range(5):
+                try:
+                    with urllib.request.urlopen("http://localhost:30315/", timeout=1) as r:
+                        if r.status == 200:
+                            ok = True
+                            break
+                except Exception:
+                    time.sleep(0.5)
+        except Exception:
+            pass
+        print(f"Mock server started on port 30315 (health_check={'OK' if ok else 'WARN'})")
 
 
 def main():

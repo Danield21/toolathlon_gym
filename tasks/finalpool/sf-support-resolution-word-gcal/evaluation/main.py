@@ -61,93 +61,154 @@ def check_word_doc(agent_workspace, groundtruth_workspace):
     if len(doc.tables) < 2:
         return False
 
-    # Get expected data from DB
-    conn = psycopg2.connect(**DB)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT "PRIORITY", COUNT(*),
-               ROUND(AVG(EXTRACT(EPOCH FROM ("RESOLVED_AT" - "CREATED_AT"))/3600)::numeric, 2)
-        FROM sf_data."SUPPORT_CENTER__PUBLIC__TICKETS"
-        WHERE "STATUS" = 'Resolved' AND "RESOLVED_AT" IS NOT NULL
-        GROUP BY "PRIORITY"
-        ORDER BY "PRIORITY"
-    """)
-    priority_data = cur.fetchall()
-    conn.close()
+    def find_table_by_header(doc, required_columns):
+        """Find a table whose header row contains all of required_columns (case-insensitive)."""
+        rc_lower = [c.lower() for c in required_columns]
+        for t in doc.tables:
+            if not t.rows:
+                continue
+            header_cells = [cell.text.strip().lower() for cell in t.rows[0].cells]
+            header_blob = " | ".join(header_cells)
+            if all(any(rc in hc for hc in header_cells) for rc in rc_lower):
+                return t
+        return None
 
-    # Check priority table content
-    table1 = doc.tables[0]
-    rows = []
-    for row in table1.rows[1:]:
-        cells = [cell.text.strip() for cell in row.cells]
-        rows.append(cells)
-
-    check("Priority table has 3 rows", len(rows) == 3, f"Got {len(rows)} rows")
-
-    for priority, count, avg_hours in priority_data:
-        matched = None
-        for r in rows:
-            if r and r[0].lower() == priority.lower():
-                matched = r
+    # Locate priority and category tables explicitly (not by index)
+    priority_table = find_table_by_header(doc, ["priority", "total_tickets", "avg_hours", "min_hours", "max_hours"])
+    category_table = find_table_by_header(doc, ["category", "total_tickets", "avg_hours"])
+    # Avoid double-counting when priority_table matches "category" table check
+    if category_table is priority_table:
+        # Try to find a different table that has 'category' but not 'priority'
+        for t in doc.tables:
+            if t is priority_table:
+                continue
+            header_cells = [cell.text.strip().lower() for cell in t.rows[0].cells]
+            if any("category" in hc for hc in header_cells):
+                category_table = t
                 break
-        if matched:
-            # Check ticket count
+
+    check("Priority table found by header", priority_table is not None)
+    check("Category table found by header", category_table is not None)
+
+    # Load expected data from groundtruth Excel (authoritative)
+    gt_priority = []
+    gt_category = []
+    gt_file = os.path.join(groundtruth_workspace, "Resolution_Data.xlsx")
+    if os.path.isfile(gt_file):
+        gt_wb = openpyxl.load_workbook(gt_file, data_only=True)
+        if "By Priority" in gt_wb.sheetnames:
+            for row in gt_wb["By Priority"].iter_rows(min_row=2, values_only=True):
+                if row and row[0]:
+                    gt_priority.append(row)
+        if "By Category" in gt_wb.sheetnames:
+            for row in gt_wb["By Category"].iter_rows(min_row=2, values_only=True):
+                if row and row[0]:
+                    gt_category.append(row)
+
+    # Validate priority table
+    if priority_table is not None:
+        rows = []
+        for row in priority_table.rows[1:]:
+            cells = [cell.text.strip() for cell in row.cells]
+            rows.append(cells)
+        check(f"Priority table has {len(gt_priority)} rows", len(rows) == len(gt_priority),
+              f"Got {len(rows)} rows, expected {len(gt_priority)}")
+
+        for prio, total, avg_h, min_h, max_h in gt_priority:
+            matched = None
+            for r in rows:
+                if r and r[0].strip().lower() == prio.strip().lower():
+                    matched = r
+                    break
+            if not matched:
+                check(f"Priority '{prio}' present", False)
+                continue
+
+            # Check count exact
             found_count = False
             for cell in matched[1:]:
                 try:
                     val = int(cell.replace(",", ""))
-                    if abs(val - count) <= 5:
+                    if val == total:
                         found_count = True
                         break
                 except (ValueError, AttributeError):
                     continue
-            check(f"Priority {priority} ticket count", found_count,
-                  f"Expected ~{count}")
+            check(f"Priority {prio} ticket count exact", found_count, f"Expected {total} got {matched[1:]}")
 
-            # Check avg hours
-            found_hours = False
-            for cell in matched[1:]:
-                try:
-                    val = float(cell.replace(",", ""))
-                    if num_close(val, float(avg_hours), 1.0):
-                        found_hours = True
-                        break
-                except (ValueError, AttributeError):
-                    continue
-            check(f"Priority {priority} avg hours", found_hours,
-                  f"Expected ~{float(avg_hours)}")
-        else:
-            check(f"Priority {priority} found in table", False)
-
-    # Cross-check with groundtruth
-    gt_file = os.path.join(groundtruth_workspace, "Resolution_Data.xlsx")
-    if os.path.isfile(gt_file):
-        gt_wb = openpyxl.load_workbook(gt_file, data_only=True)
-        gt_rows = list(gt_wb["By Priority"].iter_rows(min_row=2, values_only=True))
-        for row in gt_rows:
-            prio, total, avg_h, min_h, max_h = row
-            matched = None
-            for r in rows:
-                if r and r[0].lower() == prio.lower():
-                    matched = r
-                    break
-            if matched:
-                found_avg = False
+            # Check avg hours, min, max
+            for label, expected, tol in [("avg_hours", avg_h, 0.05),
+                                          ("min_hours", min_h, 0.05),
+                                          ("max_hours", max_h, 0.05)]:
+                found = False
                 for cell in matched[1:]:
                     try:
                         val = float(cell.replace(",", ""))
-                        if num_close(val, avg_h, 1.0):
-                            found_avg = True
+                        if num_close(val, float(expected), tol):
+                            found = True
                             break
                     except (ValueError, AttributeError):
                         continue
-                check(f"GT cross-check {prio} avg hours", found_avg,
-                      f"Expected {avg_h}")
+                check(f"Priority {prio} {label}", found, f"Expected ~{expected}")
+
+    # Validate category table
+    if category_table is not None:
+        rows = []
+        for row in category_table.rows[1:]:
+            cells = [cell.text.strip() for cell in row.cells]
+            rows.append(cells)
+        check(f"Category table has {len(gt_category)} rows", len(rows) == len(gt_category),
+              f"Got {len(rows)} rows, expected {len(gt_category)}")
+
+        for cat, total, avg_h in gt_category:
+            matched = None
+            for r in rows:
+                if r and r[0].strip().lower() == cat.strip().lower():
+                    matched = r
+                    break
+            if not matched:
+                check(f"Category '{cat}' present", False)
+                continue
+            found_count = False
+            for cell in matched[1:]:
+                try:
+                    val = int(cell.replace(",", ""))
+                    if val == total:
+                        found_count = True
+                        break
+                except (ValueError, AttributeError):
+                    continue
+            check(f"Category {cat} ticket count exact", found_count, f"Expected {total}")
+            found_avg = False
+            for cell in matched[1:]:
+                try:
+                    val = float(cell.replace(",", ""))
+                    if num_close(val, float(avg_h), 0.05):
+                        found_avg = True
+                        break
+                except (ValueError, AttributeError):
+                    continue
+            check(f"Category {cat} avg hours", found_avg, f"Expected ~{avg_h}")
+
+        # Check sort: descending by avg_hours
+        avg_vals = []
+        for r in rows:
+            if r and len(r) > 2:
+                try:
+                    avg_vals.append(float(r[2].replace(",", "")))
+                except (ValueError, AttributeError):
+                    pass
+        is_desc = all(avg_vals[i] >= avg_vals[i+1] for i in range(len(avg_vals)-1)) if len(avg_vals) > 1 else True
+        check("Category table sorted by avg_hours descending", is_desc, f"Got {avg_vals}")
 
     # Check summary paragraph
     full_text = " ".join(p.text for p in doc.paragraphs).lower()
-    has_summary = "overall" in full_text or "total" in full_text or "resolved" in full_text
-    check("Document has summary text", has_summary)
+    # Require an overall total resolved tickets count somewhere in summary
+    total_resolved = sum(int(r[1]) for r in gt_priority) if gt_priority else 0
+    has_overall = ("overall" in full_text and "resolved" in full_text)
+    check("Summary mentions 'overall' and 'resolved'", has_overall)
+    has_total_count = str(total_resolved) in full_text if total_resolved else True
+    check(f"Summary contains overall ticket count {total_resolved}", has_total_count)
 
     return True
 
@@ -166,18 +227,40 @@ def check_gcal():
     cur.close()
     conn.close()
 
-    check("At least 1 calendar event created", len(events) >= 1,
-          f"Found {len(events)}")
+    # Find specifically the "Support Resolution Review Meeting" event on 2026-03-12 14:00-15:00
+    matching_event = None
+    for e in events:
+        summary, desc, start_dt, end_dt = e
+        if not summary:
+            continue
+        s_lower = summary.lower()
+        # Require both 'resolution' AND 'review' AND 'meeting' (per task title)
+        if "resolution" in s_lower and "review" in s_lower:
+            if "2026-03-12" in str(start_dt or ""):
+                matching_event = e
+                break
 
-    if events:
-        found_review = any("resolution" in (e[0] or "").lower() or "review" in (e[0] or "").lower()
-                          for e in events)
-        check("Event title mentions resolution or review", found_review,
-              f"Events: {[e[0] for e in events]}")
+    check("Support Resolution Review Meeting event exists on 2026-03-12",
+          matching_event is not None,
+          f"Events: {[(e[0], str(e[2])) for e in events]}")
 
-        found_date = any("2026-03-12" in str(e[2] or "") for e in events)
-        check("Event scheduled for 2026-03-12", found_date,
-              f"Dates: {[str(e[2]) for e in events]}")
+    if matching_event:
+        summary, desc, start_dt, end_dt = matching_event
+        # Check exact start time 14:00
+        start_str = str(start_dt or "")
+        check("Event start time is 14:00 (2 PM)",
+              "14:00" in start_str,
+              f"start_datetime={start_str}")
+        # Check exact end time 15:00
+        end_str = str(end_dt or "")
+        check("Event end time is 15:00 (3 PM)",
+              "15:00" in end_str,
+              f"end_datetime={end_str}")
+        # Check description mentions findings/analysis
+        desc_lower = (desc or "").lower()
+        has_desc = ("review" in desc_lower or "finding" in desc_lower or "analysis" in desc_lower or "resolution" in desc_lower)
+        check("Event description mentions review/findings/analysis",
+              has_desc, f"description={desc[:120] if desc else '(empty)'}")
 
 
 def main():

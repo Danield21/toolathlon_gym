@@ -157,11 +157,12 @@ def check_excel(agent_workspace, expected):
     if ws:
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         check("Low Performers has data", len(rows) > 0)
-        check("Low Performers count",
-              num_close(len(rows), expected["total_employees"], 10),
-              f"Expected ~{expected['total_employees']}, got {len(rows)}")
+        # Counts must be exact for integer totals
+        check("Low Performers count (exact)",
+              len(rows) == expected["total_employees"],
+              f"Expected {expected['total_employees']}, got {len(rows)}")
 
-        # Check department distribution
+        # Check department distribution (exact match per department)
         dept_dist = {}
         for r in rows:
             if r and r[1]:
@@ -169,8 +170,8 @@ def check_excel(agent_workspace, expected):
                 dept_dist[d] = dept_dist.get(d, 0) + 1
         for dept, exp_cnt in expected["dept_counts"].items():
             actual = dept_dist.get(dept, 0)
-            check(f"Dept '{dept}' count",
-                  num_close(actual, exp_cnt, 5),
+            check(f"Dept '{dept}' count (exact)",
+                  actual == exp_cnt,
                   f"Expected {exp_cnt}, got {actual}")
 
     # --- Recommended Courses ---
@@ -192,8 +193,8 @@ def check_excel(agent_workspace, expected):
                 check(f"{dept} Course_Cost",
                       num_close(matched[2], exp_row["Course_Cost"], 1),
                       f"Expected {exp_row['Course_Cost']}, got {matched[2]}")
-                check(f"{dept} Employee_Count",
-                      num_close(matched[3], exp_row["Employee_Count"], 5),
+                check(f"{dept} Employee_Count (exact)",
+                      num_close(matched[3], exp_row["Employee_Count"], 0),
                       f"Expected {exp_row['Employee_Count']}, got {matched[3]}")
                 check(f"{dept} Total_Cost",
                       num_close(matched[4], exp_row["Total_Cost"], exp_row["Total_Cost"] * 0.05),
@@ -257,18 +258,49 @@ def check_emails(expected):
     except Exception:
         pass
 
-    check("Training emails sent", len(all_emails) >= 7,
+    check("Training emails sent (>=7)", len(all_emails) >= 7,
           f"Found {len(all_emails)} training emails")
 
-    # Check each department head received an email
+    # Map department -> recommended course (for body validation)
+    rec_by_dept = {r["Department"]: r for r in expected["recommended"]}
+    # Check each department head received an email with required elements
     for dept, email_addr in DEPT_HEADS.items():
-        found = False
+        found_email = None
         for subj, to_addr, body in all_emails:
             to_str = str(to_addr).lower() if to_addr else ""
             if email_addr.lower() in to_str:
-                found = True
+                found_email = (subj, to_addr, body)
                 break
-        check(f"Email to {dept} head ({email_addr})", found)
+        check(f"Email to {dept} head ({email_addr})", found_email is not None)
+        if found_email is None:
+            continue
+        subj, to_addr, body = found_email
+        subj_low = (subj or "").lower()
+        body_low = (body or "").lower()
+        # Subject must be dept-specific; require both 'training' and dept name
+        dept_low = dept.lower()
+        subj_ok = ("training" in subj_low and
+                   (dept_low in subj_low or
+                    # map R&D -> 'r&d' or 'research and development'
+                    (dept_low == "r&d" and ("r&d" in subj_low or "research" in subj_low))))
+        check(f"Subject for {dept} mentions dept + 'training'", subj_ok,
+              f"Got: {subj}")
+        # Body must mention the recommended course title and cost-related number
+        rec = rec_by_dept.get(dept)
+        if rec:
+            course_title = rec["Course_Title"].lower()
+            total_cost = str(rec["Total_Cost"])
+            course_cost = str(rec["Course_Cost"])
+            body_has_course = course_title in body_low or course_title.split()[0] in body_low
+            body_has_cost = (total_cost in (body or "") or
+                             course_cost in (body or "") or
+                             # Tolerate formatted numbers
+                             format(rec["Total_Cost"], ",") in (body or "") or
+                             format(rec["Course_Cost"], ",") in (body or ""))
+            check(f"Body for {dept} mentions course '{rec['Course_Title']}'", body_has_course,
+                  f"Body preview: {(body or '')[:200]}")
+            check(f"Body for {dept} mentions cost (course or total)", body_has_cost,
+                  f"Body preview: {(body or '')[:200]}")
 
     cur.close()
     conn.close()
@@ -299,7 +331,8 @@ def main():
 
     total = PASS_COUNT + FAIL_COUNT
     pass_rate = PASS_COUNT / total if total > 0 else 0
-    success = pass_rate >= 0.8
+    # Require all checks to pass (no more 80% threshold that masked failures)
+    success = FAIL_COUNT == 0
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

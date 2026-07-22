@@ -104,22 +104,22 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 check(f"Row '{g_row[0]}'", False, "Missing")
                 continue
 
-            # Product_Count (col 1)
+            # Product_Count (col 1) - exact integer count
             if len(a_row) > 1 and len(g_row) > 1:
                 check(f"{key}.Product_Count",
-                      num_close(a_row[1], g_row[1], 2),
+                      num_close(a_row[1], g_row[1], 0),
                       f"{a_row[1]} vs {g_row[1]}")
 
-            # Total_Units_Sold (col 2)
+            # Total_Units_Sold (col 2) - tol 50 -> 5
             if len(a_row) > 2 and len(g_row) > 2:
                 check(f"{key}.Total_Units_Sold",
-                      num_close(a_row[2], g_row[2], 50),
+                      num_close(a_row[2], g_row[2], 5),
                       f"{a_row[2]} vs {g_row[2]}")
 
-            # Total_Revenue (col 3)
+            # Total_Revenue (col 3) - tol 500 -> 50
             if len(a_row) > 3 and len(g_row) > 3:
                 check(f"{key}.Total_Revenue",
-                      num_close(a_row[3], g_row[3], 500),
+                      num_close(a_row[3], g_row[3], 50),
                       f"{a_row[3]} vs {g_row[3]}")
 
             # Avg_Price (col 4)
@@ -213,7 +213,7 @@ def check_email():
               "Headphones not found in body")
 
         check("Email body mentions lowest category 'TV & Home Theater' or similar",
-              "tv" in body_lower and "theater" in body_lower or "tv & home theater" in body_lower,
+              ("tv" in body_lower and "theater" in body_lower) or ("tv & home theater" in body_lower),
               "TV & Home Theater not found in body")
 
 

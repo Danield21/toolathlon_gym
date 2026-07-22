@@ -46,6 +46,20 @@ def load_sheet_rows(wb, sheet_name):
     return None
 
 
+def get_focus_threshold():
+    """Read threshold from prep_guidelines.json so verifier matches the source of truth."""
+    task_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    candidate = os.path.join(task_root, "tmp", "mock_pages", "api", "prep_guidelines.json")
+    if os.path.isfile(candidate):
+        try:
+            with open(candidate) as f:
+                data = json.load(f)
+            return float(data.get("focus_threshold", 80))
+        except Exception:
+            pass
+    return 80.0
+
+
 def get_expected_quiz_data():
     """Get expected quiz performance from DB."""
     conn = psycopg2.connect(**DB_CONFIG)
@@ -81,7 +95,9 @@ def check_excel(agent_workspace):
     check("Excel readable", True)
 
     expected = get_expected_quiz_data()
-    below_80 = [r for r in expected if float(r[2]) < 80]
+    threshold = get_focus_threshold()
+    print(f"  Focus threshold from prep_guidelines.json: {threshold}")
+    below_80 = [r for r in expected if float(r[2]) < threshold]
     courses_needing = len(set(r[0] for r in below_80))
 
     # Quiz Performance sheet
@@ -153,16 +169,22 @@ def check_excel(agent_workspace):
 def check_calendar():
     print("\n=== Checking Calendar Events ===")
     try:
+        expected = get_expected_quiz_data()
+        threshold = get_focus_threshold()
+        below_thr = [r for r in expected if float(r[2]) < threshold]
+        courses_needing = len(set(r[0] for r in below_thr))
+
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
         cur.execute("""
             SELECT summary, description, start_datetime
             FROM gcal.events
-            WHERE summary ILIKE '%%review%%' OR summary ILIKE '%%exam%%' OR summary ILIKE '%%quiz%%'
+            WHERE summary ILIKE '%%quiz review%%' OR summary ILIKE '%%review session%%'
         """)
         events = cur.fetchall()
-        check("Calendar events created for review sessions", len(events) >= 1,
-              f"Found {len(events)} events")
+        check(f"Calendar events count matches courses needing review ({courses_needing})",
+              len(events) >= courses_needing,
+              f"Found {len(events)} events, expected >= {courses_needing}")
         cur.close()
         conn.close()
     except Exception as e:
@@ -174,17 +196,28 @@ def check_email():
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
-        cur.execute("""
-            SELECT id, subject, to_addr, body_text
-            FROM email.messages
-            WHERE subject ILIKE '%%review%%' OR subject ILIKE '%%exam%%'
-               OR subject ILIKE '%%scheduled%%'
-        """)
+        cur.execute("SELECT id, subject, to_addr, body_text FROM email.messages")
         emails = cur.fetchall()
-        check("Email sent about review sessions", len(emails) >= 1,
-              "No matching email found")
         cur.close()
         conn.close()
+
+        target_to = "academic-coordinator@university.edu"
+        target_subj = "exam review sessions scheduled"
+        match = None
+        for eid, subject, to_addr, body in emails:
+            subj_l = (subject or "").lower()
+            to_l = str(to_addr or "").lower()
+            if target_subj in subj_l and target_to in to_l:
+                match = (subject, to_addr, body)
+                break
+        check(f"Email to {target_to} with subject 'Exam Review Sessions Scheduled'",
+              match is not None,
+              f"{len(emails)} emails total")
+        if match is not None:
+            body_lower = (match[2] or "").lower()
+            check("Email body mentions session count or course list",
+                  any(w in body_lower for w in ("session", "course", "review")),
+                  "Body too short")
     except Exception as e:
         check("Email check", False, str(e))
 

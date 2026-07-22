@@ -1,0 +1,7 @@
+# Tracked Stocks - One representative per sector
+# Pull stock info from Yahoo Finance and group by sector for the comparison report.
+AMZN
+GOOGL
+JNJ
+JPM
+XOM

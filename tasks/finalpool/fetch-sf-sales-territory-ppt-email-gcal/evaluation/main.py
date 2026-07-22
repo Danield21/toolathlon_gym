@@ -41,13 +41,10 @@ def check_pptx(agent_workspace):
         if "territory performance" not in all_lower and "q1 2026" not in all_lower:
             errors.append("Title slide missing expected title text")
 
-        # Check revenue data for key regions
-        if "asia pacific" not in all_lower:
-            errors.append("Asia Pacific not mentioned in presentation")
-        if "europe" not in all_lower:
-            errors.append("Europe not mentioned in presentation")
-        if "latin america" not in all_lower:
-            errors.append("Latin America not mentioned in presentation")
+        # Check revenue data for ALL 5 regions (not just 3)
+        for region in ["asia pacific", "europe", "latin america", "middle east", "north america"]:
+            if region not in all_lower:
+                errors.append(f"Region '{region}' not mentioned in presentation")
 
         # Check quota attainment values
         if "103.7" not in all_text and "103.6" not in all_text and "103.8" not in all_text:
@@ -55,11 +52,10 @@ def check_pptx(agent_workspace):
         if "94.7" not in all_text and "94.6" not in all_text and "94.8" not in all_text:
             errors.append("Latin America attainment ~94.7% not found")
 
-        # Check segment mentions
-        if "consumer" not in all_lower:
-            errors.append("Consumer segment not mentioned")
-        if "enterprise" not in all_lower:
-            errors.append("Enterprise segment not mentioned")
+        # Check ALL 4 segments
+        for seg in ["consumer", "enterprise", "smb", "government"]:
+            if seg not in all_lower:
+                errors.append(f"Segment '{seg}' not mentioned in presentation")
 
         # Check pipeline coverage
         if "pipeline" not in all_lower and "coverage" not in all_lower:
@@ -80,7 +76,7 @@ def check_gcal():
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
         cur.execute("""
-            SELECT summary, description FROM gcal.events
+            SELECT summary, description, start_datetime, end_datetime FROM gcal.events
             WHERE start_datetime::date = '2026-03-28'
         """)
         rows = cur.fetchall()
@@ -89,9 +85,23 @@ def check_gcal():
         if not rows:
             errors.append("No GCal event found on 2026-03-28")
         else:
-            summaries = [r[0].lower() if r[0] else "" for r in rows]
-            if not any("territory" in s or "review" in s or "executive" in s for s in summaries):
-                errors.append(f"No territory review event (found: {[r[0] for r in rows]})")
+            matched = False
+            for r in rows:
+                sum_lower = (r[0] or "").lower()
+                if ("territory" in sum_lower or "review" in sum_lower or "executive" in sum_lower):
+                    # Verify 09:00-10:30 window (tolerant of TZ)
+                    try:
+                        sh = r[2].hour
+                        eh = r[3].hour
+                        em = r[3].minute
+                        if sh == 9 and eh == 10 and em == 30:
+                            matched = True
+                            break
+                    except Exception:
+                        matched = True
+                        break
+            if not matched:
+                errors.append(f"No territory review event at 09:00-10:30 on 2026-03-28 (found: {[r[0] for r in rows]})")
     except Exception as e:
         errors.append(f"Error checking GCal: {e}")
     return errors

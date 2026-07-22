@@ -93,12 +93,37 @@ def check_excel(agent_workspace):
         else:
             record("Availability Summary has 3 rows", True)
 
-        # Check expected uptime values by finding each service in the data
-        expected = {
-            "api gateway": 99.21,
-            "database cluster": 98.50,
-            "storage service": 99.95,
-        }
+        # Check expected uptime values by dynamically reading raw monitoring data
+        raw_log_path = os.path.join(agent_workspace, "service_status_log.json")
+        if not os.path.isfile(raw_log_path):
+            # fallback: try initial_workspace variants
+            for alt in ("initial_workspace/service_status_log.json",
+                        "../initial_workspace/service_status_log.json"):
+                cand = os.path.join(agent_workspace, alt)
+                if os.path.isfile(cand):
+                    raw_log_path = cand
+                    break
+        expected = {}
+        if os.path.isfile(raw_log_path):
+            try:
+                with open(raw_log_path) as f:
+                    raw_log = json.load(f)
+                by_svc = {}
+                for e in raw_log:
+                    by_svc.setdefault(e["service_name"], []).append(e)
+                for svc, lst in by_svc.items():
+                    up_count = sum(1 for x in lst if x.get("status") == "up")
+                    total = len(lst)
+                    expected[svc.lower()] = round(up_count / total * 100, 1) if total else 0.0
+            except Exception:
+                pass
+        # Fallback hardcoded if raw data unavailable (reflecting true values in GT data):
+        if not expected:
+            expected = {
+                "api gateway": 97.6,
+                "auth service": 98.8,
+                "database": 100.0,
+            }
 
         for svc_key, expected_uptime in expected.items():
             found = False
@@ -117,7 +142,8 @@ def check_excel(agent_workspace):
                             continue
 
                     if uptime_val is not None:
-                        ok = num_close(uptime_val, expected_uptime, tol=2.0)
+                        # Tightened tolerance from 2.0 -> 0.5 per audit suggestion
+                        ok = num_close(uptime_val, expected_uptime, tol=0.5)
                         record(
                             f"'{svc_key}' uptime ~{expected_uptime}%",
                             ok,
@@ -141,34 +167,50 @@ def check_excel(agent_workspace):
             incidents_sheet = name
             break
 
+    # Compute expected minimum incident count from raw data if available
+    expected_incidents_min = 2  # at least 2 services had downtime (API Gateway + Auth Service)
+    try:
+        if os.path.isfile(raw_log_path):
+            with open(raw_log_path) as f:
+                raw_log = json.load(f)
+            by_svc = {}
+            for e in raw_log:
+                by_svc.setdefault(e["service_name"], []).append(e)
+            total_incidents = 0
+            for svc, lst in by_svc.items():
+                lst_s = sorted(lst, key=lambda x: x.get("timestamp", ""))
+                in_inc = False
+                for x in lst_s:
+                    if x.get("status") in ("down", "degraded"):
+                        if not in_inc:
+                            total_incidents += 1
+                            in_inc = True
+                    else:
+                        in_inc = False
+            expected_incidents_min = max(1, total_incidents - 1)  # -1 grace
+    except Exception:
+        pass
+
     if not incidents_sheet:
-        # Incidents sheet is optional; do not fail the evaluation
-        print("  [INFO] No dedicated Incidents sheet found (optional); skipping incidents checks")
+        # Per audit: not fully optional. Require incidents sheet when downtime exists.
+        record("Incidents sheet exists", False,
+               f"Expected dedicated Incidents sheet. Sheets: {wb.sheetnames}")
+        all_ok = False
     else:
         record("Incidents sheet exists", True)
         ws = wb[incidents_sheet]
         rows = list(ws.iter_rows(values_only=True))
         data_rows = rows[1:] if len(rows) > 1 else []
 
-        # Database Cluster is the degraded service; check for at least 1 incident row
-        db_rows = [
-            r for r in data_rows if r and (str_contains(r[0], "database") or str_contains(r[0], "cluster"))
-        ]
-        if len(db_rows) >= 1:
-            record("Incidents has >= 1 Database Cluster rows", True)
+        # Lower bound: at least expected_incidents_min incident rows
+        if len(data_rows) >= expected_incidents_min:
+            record(f"Incidents sheet has >= {expected_incidents_min} rows", True)
         else:
             record(
-                "Incidents has >= 1 Database Cluster rows",
+                f"Incidents sheet has >= {expected_incidents_min} rows",
                 False,
-                f"Found {len(db_rows)} Database Cluster rows",
+                f"Found {len(data_rows)} rows",
             )
-            all_ok = False
-
-        # Should have at least 1 row total (any incident)
-        if len(data_rows) >= 1:
-            record("Incidents sheet has data", True)
-        else:
-            record("Incidents sheet has data", False, "No data rows")
             all_ok = False
 
     wb.close()
@@ -194,6 +236,8 @@ def check_notion():
 
     all_ok = True
     found_page = False
+    noise_titles = {"onboarding checklist", "company handbook", "q1 okr draft"}
+    noise_present_count = 0
 
     for page_id, props_raw in pages:
         if isinstance(props_raw, str):
@@ -212,6 +256,10 @@ def check_notion():
 
         page_title = "".join(p.get("plain_text", "") for p in title_parts)
         page_title_lower = page_title.lower()
+
+        if page_title_lower in noise_titles:
+            noise_present_count += 1
+            continue
 
         # Match pages with monitoring, dashboard, or service in title
         if (
@@ -252,6 +300,16 @@ def check_notion():
         )
         all_ok = False
 
+    # Reverse validation: noise pages injected at preprocess must still be present
+    # (agent should not delete unrelated knowledge-base pages).
+    record(
+        f"Pre-existing noise Notion pages preserved (>=2 of 3)",
+        noise_present_count >= 2,
+        f"Only {noise_present_count} of 3 noise pages still present",
+    )
+    if noise_present_count < 2:
+        all_ok = False
+
     return all_ok
 
 
@@ -275,20 +333,47 @@ def check_calendar():
     all_ok = True
     found_event = False
 
+    noise_event_summaries = {"weekly all-hands", "department training session", "q1 budget review"}
+    noise_event_count = 0
+    incident_review_summaries = []
     for summary, description, start_dt, end_dt in events:
         summary_lower = (summary or "").lower()
+        if summary_lower in noise_event_summaries:
+            noise_event_count += 1
+            continue
         if "incident review" in summary_lower:
             found_event = True
-            record("Incident review calendar event exists", True)
-            break
+            incident_review_summaries.append(summary_lower)
 
-    if not found_event:
+    if found_event:
+        record("Incident review calendar event exists", True)
+    else:
         record(
             "Incident review calendar event exists",
             False,
             f"Found {len(events)} events but none with 'incident review' in summary",
         )
         all_ok = False
+
+    # Reverse validation: noise events must not have been relabeled as incident
+    # reviews, and must still be present.
+    record(
+        f"Pre-existing noise calendar events preserved (>=2 of 3)",
+        noise_event_count >= 2,
+        f"Only {noise_event_count} of 3 noise events still present",
+    )
+    if noise_event_count < 2:
+        all_ok = False
+
+    for ir_summary in incident_review_summaries:
+        for noise_phrase in ("weekly all-hands", "department training", "budget review"):
+            if noise_phrase in ir_summary:
+                record(
+                    "Incident review event does not reuse noise summary",
+                    False,
+                    f"Summary '{ir_summary}' overlaps noise phrase '{noise_phrase}'",
+                )
+                all_ok = False
 
     return all_ok
 

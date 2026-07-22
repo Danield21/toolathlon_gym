@@ -8,4 +8,4 @@ Create an Excel file called Escalation_Report.xlsx in the workspace with five sh
 
 Send an email to the escalation group address from the team contacts file with the subject Weekly Escalation Analysis Report. The email body should summarize the total ticket count, the number and percentage of low satisfaction tickets, the number of at-risk tickets, the worst performing issue type, and a note that the full Excel report is available for review.
 
-Create a Notion page titled Support Escalation Analysis with content summarizing the key findings and listing at least three specific action items based on the analysis, such as focusing attention on the issue types with lowest satisfaction or reviewing the priority level with the highest risk percentage.
+Create a knowledge base page titled Support Escalation Analysis with content summarizing the key findings and listing at least three specific action items based on the analysis, such as focusing attention on the issue types with lowest satisfaction or reviewing the priority level with the highest risk percentage.

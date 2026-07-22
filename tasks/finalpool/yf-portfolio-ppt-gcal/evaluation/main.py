@@ -108,8 +108,18 @@ def main():
     if not all_errors:
         print("    PASS")
 
-    # --- Non-blocking: Check Google Calendar event in DB ---
-    print("  Checking Google Calendar event (non-blocking)...")
+    # --- Check Google Calendar event in DB ---
+    # Task.md REQUIRES a calendar event on Mar 15, 2026 14:00-15:00 with title
+    # "Q4 2025 Portfolio Review Meeting" and location "Conference Room A".
+    # When an event is present it must match all criteria (BLOCKING if present
+    # but wrong); total absence is tolerated only when running GT self-test.
+    print("  Checking Google Calendar event...")
+    try:
+        gt_canon = os.path.realpath(gt_dir)
+        ag_canon = os.path.realpath(args.agent_workspace) if args.agent_workspace else gt_canon
+        is_gt_self_test = (gt_canon == ag_canon)
+    except Exception:
+        is_gt_self_test = True
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
@@ -117,18 +127,47 @@ def main():
             SELECT id, summary, start_datetime, end_datetime, location
             FROM gcal.events
             WHERE LOWER(summary) LIKE '%portfolio%review%'
-            OR LOWER(summary) LIKE '%q4 2025%'
+               OR LOWER(summary) LIKE '%q4 2025%'
         """)
         events = cur.fetchall()
-        if events:
-            print(f"    Found {len(events)} matching event(s)")
-            for ev in events:
-                print(f"      {ev[1]} at {ev[2]}")
+        if not events:
+            # When run against a real agent workspace (agent != gt), missing event is fatal.
+            # During GT self-test, tolerate absence.
+            if is_gt_self_test:
+                print("    WARNING: Portfolio review meeting not found in calendar (GT self-test, non-blocking)")
+            else:
+                all_errors.append(
+                    "Portfolio review calendar event missing (expected Mar 15 2026 14:00-15:00 "
+                    "at 'Conference Room A')."
+                )
         else:
-            print("    WARNING: Portfolio review meeting not found in calendar (non-blocking)")
+            # At least one candidate -> require it to match date/time/location.
+            match_found = False
+            for ev_id, summary, start_dt, end_dt, location in events:
+                try:
+                    if start_dt is None:
+                        continue
+                    date_match = str(start_dt)[:10] == "2026-03-15"
+                    hour_match = hasattr(start_dt, 'hour') and start_dt.hour == 14
+                    duration_match = False
+                    if hasattr(start_dt, 'hour') and end_dt is not None and hasattr(end_dt, 'hour'):
+                        duration_min = (end_dt - start_dt).total_seconds() / 60
+                        duration_match = 55 <= duration_min <= 75
+                    loc_match = location and "conference room a" in str(location).lower()
+                    if date_match and hour_match and duration_match and loc_match:
+                        match_found = True
+                        print(f"    Matched calendar event: {summary} at {start_dt}")
+                        break
+                except Exception as inner_e:
+                    print(f"    (parse err on event {ev_id}: {inner_e})")
+            if not match_found:
+                all_errors.append(
+                    "Calendar event present but wrong date/time/location; "
+                    "expected Mar 15 2026 14:00-15:00 at 'Conference Room A'."
+                )
         conn.close()
     except Exception as e:
-        print(f"    WARNING: GCal DB check error: {e} (non-blocking)")
+        print(f"    WARNING: GCal DB check error (fallback to non-blocking): {e}")
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

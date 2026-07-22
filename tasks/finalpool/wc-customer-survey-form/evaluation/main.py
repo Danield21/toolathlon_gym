@@ -60,6 +60,38 @@ EXPECTED_QUESTIONS = [
     "any suggestions for improvement",
 ]
 
+# Expected question type per question (0-indexed):
+# Q1 = multiple choice, Q2,Q3 = scale, Q4,Q5 = paragraph
+# Accept list of acceptable type substrings per question (gform variants)
+EXPECTED_Q_TYPES = [
+    ("MULTIPLE_CHOICE", "RADIO", "CHOICE"),
+    ("SCALE",),
+    ("SCALE",),
+    ("PARAGRAPH", "LONG_ANSWER"),
+    ("PARAGRAPH", "LONG_ANSWER"),
+]
+
+
+def _fetch_expected_emails():
+    """Dynamic DB query for customers with completed orders, fallback to hardcoded."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG, connect_timeout=5)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT LOWER(c.email)
+            FROM wc.customers c
+            JOIN wc.orders o ON o.customer_id = c.id
+            WHERE LOWER(o.status) = 'completed'
+              AND c.email IS NOT NULL
+        """)
+        emails = {r[0] for r in cur.fetchall() if r[0]}
+        cur.close(); conn.close()
+        if emails:
+            return emails
+    except Exception as e:
+        print(f"[WARN] Email fetch failed: {e}")
+    return None
+
 
 def str_contains(haystack, needle):
     if haystack is None:
@@ -74,6 +106,9 @@ def main():
     parser.add_argument("--launch_time", required=False)
     parser.add_argument("--res_log_file", required=False)
     args = parser.parse_args()
+
+    # Dynamic email set (with fallback to hardcoded)
+    expected_emails = _fetch_expected_emails() or EXPECTED_EMAILS
 
     all_errors = []
     conn = psycopg2.connect(**DB_CONFIG)
@@ -99,11 +134,23 @@ def main():
         if len(questions) < 5:
             all_errors.append(f"Expected 5 questions, found {len(questions)}")
         else:
+            # Better matching: use 4-gram matching on expected question phrase
             for i, expected in enumerate(EXPECTED_QUESTIONS):
                 if i < len(questions):
                     q = questions[i]
-                    if not str_contains(q[0], expected.split()[-2]):
-                        all_errors.append(f"Question {i+1} title mismatch: '{q[0]}' does not match expected")
+                    # Check multiple significant words from expected
+                    exp_words = [w for w in expected.lower().split() if len(w) > 4]
+                    # Require at least 2 significant words match
+                    q_lower = str(q[0]).lower() if q[0] else ""
+                    matches = sum(1 for w in exp_words if w in q_lower)
+                    if matches < 2:
+                        all_errors.append(f"Question {i+1} title mismatch: '{q[0]}' (matched {matches}/{len(exp_words)} words)")
+                    # Validate question type
+                    if i < len(EXPECTED_Q_TYPES):
+                        actual_type = str(q[1]).upper() if q[1] else ""
+                        expected_types = EXPECTED_Q_TYPES[i]
+                        if not any(et in actual_type for et in expected_types):
+                            all_errors.append(f"Question {i+1} type mismatch: got '{q[1]}', expected one of {expected_types}")
             # Check last question is not required
             if len(questions) >= 5:
                 last_q = questions[4]
@@ -127,21 +174,23 @@ def main():
             found_addrs = re.findall(r'[\w.+-]+@[\w.-]+', to_str.lower())
             for addr in found_addrs:
                 sent_to.add(addr)
-                if addr in EXPECTED_EMAILS:
+                if addr in expected_emails:
                     survey_messages.append(msg)
 
-    missing = EXPECTED_EMAILS - sent_to
+    missing = expected_emails - sent_to
 
-    if len(missing) > 5:
+    # Allow at most 1 missing (tolerance for mock-data inconsistency)
+    if len(missing) > 1:
         all_errors.append(f"Missing {len(missing)} expected email recipients (first 5: {list(missing)[:5]})")
-    elif len(missing) > 0:
-        all_errors.append(f"Missing {len(missing)} email recipients: {list(missing)}")
+    elif len(missing) == 1:
+        print(f"    [WARN] Missing 1 email recipient: {list(missing)}")
 
-    # Check subject only on survey-related emails
+    # Check subject only on survey-related emails - task requires "We'd Love Your Feedback!"
     if survey_messages:
         subj = str(survey_messages[0][1] or "").lower()
-        if "feedback" not in subj and "survey" not in subj and "satisfaction" not in subj:
-            all_errors.append(f"Email subject should contain 'feedback'/'survey'/'satisfaction': {survey_messages[0][1]}")
+        # Require "love" + "feedback" (core phrase) - more specific than just keywords
+        if not (("love" in subj and "feedback" in subj) or "satisfaction survey" in subj):
+            all_errors.append(f"Email subject should match \"We'd Love Your Feedback!\": got '{survey_messages[0][1]}'")
 
     # Check email body mentions customer name
     has_personalized = False

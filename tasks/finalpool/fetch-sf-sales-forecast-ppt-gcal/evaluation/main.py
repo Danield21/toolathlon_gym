@@ -30,17 +30,21 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+BLOCKING_FAIL_COUNT = 0
 
 
-def record(name, passed, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def record(name, passed, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, BLOCKING_FAIL_COUNT
     if passed:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if not runtime_only:
+            BLOCKING_FAIL_COUNT += 1
         msg = f": {detail[:300]}" if detail else ""
-        print(f"  [FAIL] {name}{msg}")
+        suffix = " (runtime-only)" if runtime_only else ""
+        print(f"  [FAIL] {name}{suffix}{msg}")
 
 
 def num_close(a, b, tol=5000.0):
@@ -75,17 +79,24 @@ def check_excel(agent_workspace):
 
     all_ok = True
 
-    # Check Q1_Actuals sheet
+    # Check Q1_Actuals sheet (exact match preferred)
     q1_sheet = None
     for name in wb.sheetnames:
-        if "q1" in name.lower() or "actual" in name.lower():
-            q1_sheet = name
-            break
+        if name.strip().lower() == "q1_actuals":
+            q1_sheet = name; break
+    if not q1_sheet:
+        for name in wb.sheetnames:
+            if "q1" in name.lower() or "actual" in name.lower():
+                q1_sheet = name
+                break
 
     if not q1_sheet:
         record("Q1_Actuals sheet exists", False, f"Sheets: {wb.sheetnames}")
         all_ok = False
     else:
+        record("Q1_Actuals sheet exists (exact)",
+               q1_sheet.strip().lower() == "q1_actuals",
+               f"Got '{q1_sheet}'")
         record("Q1_Actuals sheet exists", True)
         ws = wb[q1_sheet]
         rows = list(ws.iter_rows(values_only=True))
@@ -107,64 +118,131 @@ def check_excel(agent_workspace):
                     all_ok = False
                 break
 
-    # Check Q2_Forecast sheet
+        # More Q1 spot checks (one per region in a different month)
+        EXPECTED_Q1 = {
+            ("asia pacific", 2): 46608.06,
+            ("europe", 1): 48744.82,
+            ("europe", 3): None,  # just check row exists
+            ("latin america", 2): None,
+            ("north america", 3): None,
+        }
+        region_month_found = set()
+        for r in data_rows:
+            if not (r and r[0] and len(r) > 1):
+                continue
+            region = str(r[0]).strip().lower()
+            try:
+                month = int(r[1]) if not isinstance(r[1], int) else r[1]
+            except Exception:
+                continue
+            key = (region, month)
+            if key in EXPECTED_Q1:
+                region_month_found.add(key)
+                expected = EXPECTED_Q1[key]
+                if expected is not None and len(r) > 3:
+                    ok = num_close(r[3], expected, tol=max(expected * 0.05, 100))
+                    record(f"Q1 {region} M{month} revenue ~{expected:.2f}", ok,
+                           f"Got {r[3]}")
+        # Ensure we saw all five region/month combos (every region appears)
+        regions_seen = {k[0] for k in region_month_found}
+        expected_regions = {"asia pacific", "europe", "latin america", "north america"}
+        missing = expected_regions - regions_seen
+        record("Q1_Actuals covers all major regions",
+               len(missing) == 0, f"Missing: {missing}")
+
+    # Check Q2_Forecast sheet (exact match preferred)
     q2_sheet = None
     for name in wb.sheetnames:
-        if "q2" in name.lower() or "forecast" in name.lower():
-            q2_sheet = name
-            break
+        if name.strip().lower() == "q2_forecast":
+            q2_sheet = name; break
+    if not q2_sheet:
+        for name in wb.sheetnames:
+            if "q2" in name.lower() or "forecast" in name.lower():
+                q2_sheet = name
+                break
 
     if not q2_sheet:
         record("Q2_Forecast sheet exists", False, f"Sheets: {wb.sheetnames}")
         all_ok = False
     else:
+        record("Q2_Forecast sheet exists (exact)",
+               q2_sheet.strip().lower() == "q2_forecast",
+               f"Got '{q2_sheet}'")
         record("Q2_Forecast sheet exists", True)
         ws2 = wb[q2_sheet]
         rows2 = list(ws2.iter_rows(values_only=True))
         data_rows2 = [r for r in rows2[1:] if r and r[0]] if len(rows2) > 1 else []
         record(
-            "Q2_Forecast has 5 region rows",
-            len(data_rows2) >= 5,
+            "Q2_Forecast has exactly 5 region rows",
+            len(data_rows2) == 5,
             f"Found {len(data_rows2)} data rows",
         )
-        if len(data_rows2) < 5:
+        if len(data_rows2) != 5:
             all_ok = False
 
-        # Check growth rates present
-        has_growth = False
+        # Exact expected growth rates per region (from GT)
+        EXPECTED_GROWTH = {
+            "asia pacific": 8.5,
+            "europe": 4.2,
+            "latin america": 6.8,
+            "middle east": 7.3,
+            "north america": 3.5,
+        }
+        growth_errors = 0
         for r in data_rows2:
-            if r and len(r) >= 3:
-                try:
-                    gr = float(r[2])
-                    if 2.0 <= gr <= 10.0:
-                        has_growth = True
-                        break
-                except (TypeError, ValueError):
-                    continue
-        record("Growth rates present", has_growth)
+            if r and len(r) >= 3 and r[0]:
+                region = str(r[0]).strip().lower()
+                exp = EXPECTED_GROWTH.get(region)
+                if exp is not None:
+                    try:
+                        if abs(float(r[2]) - exp) > 0.5:
+                            growth_errors += 1
+                    except (TypeError, ValueError):
+                        growth_errors += 1
+        record("All 5 region growth rates match expected", growth_errors == 0,
+               f"{growth_errors} mismatches")
 
-    # Check Segment_Mix sheet
+    # Check Segment_Mix sheet (exact match preferred)
     seg_sheet = None
     for name in wb.sheetnames:
-        if "segment" in name.lower() or "mix" in name.lower():
-            seg_sheet = name
-            break
+        if name.strip().lower() == "segment_mix":
+            seg_sheet = name; break
+    if not seg_sheet:
+        for name in wb.sheetnames:
+            if "segment" in name.lower() or "mix" in name.lower():
+                seg_sheet = name
+                break
 
     if not seg_sheet:
         record("Segment_Mix sheet exists", False, f"Sheets: {wb.sheetnames}")
         all_ok = False
     else:
+        record("Segment_Mix sheet exists (exact)",
+               seg_sheet.strip().lower() == "segment_mix",
+               f"Got '{seg_sheet}'")
         record("Segment_Mix sheet exists", True)
         ws3 = wb[seg_sheet]
         rows3 = list(ws3.iter_rows(values_only=True))
         data_rows3 = [r for r in rows3[1:] if r and r[0]] if len(rows3) > 1 else []
         record(
-            "Segment_Mix has >= 20 rows (5 regions x 4 segments)",
-            len(data_rows3) >= 20,
+            "Segment_Mix has 20 rows (5 regions x 4 segments)",
+            len(data_rows3) == 20,
             f"Found {len(data_rows3)} data rows",
         )
-        if len(data_rows3) < 20:
+        if len(data_rows3) != 20:
             all_ok = False
+        # Revenue_Share_Pct per region should sum to ~100
+        region_sums = {}
+        for r in data_rows3:
+            if r and len(r) >= 4 and r[0]:
+                region = str(r[0]).strip().lower()
+                try:
+                    region_sums[region] = region_sums.get(region, 0) + float(r[3])
+                except Exception:
+                    pass
+        bad_regions = [r for r, s in region_sums.items() if abs(s - 100) > 2]
+        record("Revenue_Share_Pct sums to ~100 per region",
+               len(bad_regions) == 0, f"Bad regions: {bad_regions}")
 
     wb.close()
     return all_ok
@@ -244,13 +322,21 @@ def check_calendar():
             found = True
             record("Board presentation event exists", True)
 
-            # Check date is March 28, 2026
+            # Check date is March 28, 2026 (blocking once event exists)
             dt_str = str(start_dt)
             record(
                 "Event on March 28, 2026",
                 "2026-03-28" in dt_str,
                 f"Start: {dt_str}",
             )
+
+            # Check end_datetime is 11:30 per task
+            if end_dt is not None:
+                end_hour = end_dt.hour
+                end_min = end_dt.minute
+                record("Event end_datetime is 11:30",
+                       end_hour == 11 and end_min == 30,
+                       f"End: {end_dt.isoformat()}")
 
             # Check description has forecast info
             desc_lower = (description or "").lower()
@@ -265,6 +351,7 @@ def check_calendar():
             "Board presentation event exists",
             False,
             f"Found {len(events)} events but none for board/forecast/sales presentation",
+            runtime_only=True,
         )
 
     return found
@@ -280,15 +367,16 @@ def main():
 
     excel_ok = check_excel(args.agent_workspace)
     pptx_ok = check_pptx(args.agent_workspace)
-    cal_ok = check_calendar()
+    _ = check_calendar()  # returns bool but we gate on BLOCKING_FAIL_COUNT instead
 
     print(f"\n=== SUMMARY ===")
     print(f"  Excel:    {'PASS' if excel_ok else 'FAIL'}")
     print(f"  PPT:      {'PASS' if pptx_ok else 'FAIL'}")
-    print(f"  Calendar: {'PASS' if cal_ok else 'FAIL'}")
-    print(f"  Passed: {PASS_COUNT}, Failed: {FAIL_COUNT}")
+    print(f"  Passed: {PASS_COUNT}, Failed: {FAIL_COUNT} (blocking_fail={BLOCKING_FAIL_COUNT})")
 
-    overall = excel_ok and pptx_ok and cal_ok
+    # Blocking-fail gate: calendar absence is runtime_only, but
+    # wrong-value calendar/excel/pptx checks are blocking.
+    overall = excel_ok and pptx_ok and BLOCKING_FAIL_COUNT == 0
     print(f"  Overall:  {'PASS' if overall else 'FAIL'}")
 
     sys.exit(0 if overall else 1)

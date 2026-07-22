@@ -1,0 +1,4 @@
+dataset_id,funder,pi,retention_years,format,size_bytes,sensitive,collection_date
+NSF-2021-CLIM-001,NSF,Alice Martinez,7,csv,2400,no,2024-01-15
+NIH-2022-HLTH-002,NIH,Bob Chen,10,csv,1800,yes,2024-02-01
+DOE-2023-ENRG-003,DOE,Carol Wu,5,csv,3000,no,2024-02-20

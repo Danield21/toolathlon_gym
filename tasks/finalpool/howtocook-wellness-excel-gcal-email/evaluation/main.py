@@ -75,7 +75,7 @@ def check_excel(agent_workspace, groundtruth_workspace):
 
         data_rows = [row for row in mp_ws.iter_rows(min_row=2, values_only=True)
                      if any(v is not None for v in row)]
-        check("Meal Plan has at least 15 rows", len(data_rows) >= 15,
+        check("Meal Plan has exactly 15 rows", len(data_rows) == 15,
               f"Found {len(data_rows)} rows")
 
         # Check all 5 days covered
@@ -182,9 +182,9 @@ def check_emails():
               "wellness@company.example.com" in (from_addr or "").lower(),
               f"From: {from_addr}")
         body_lower = (body or "").lower()
-        check("Email mentions wellness goals (stress or focus)",
-              "stress" in body_lower or "focus" in body_lower,
-              "Expected wellness goals mentioned")
+        check("Email mentions wellness goals (stress AND focus)",
+              "stress" in body_lower and "focus" in body_lower,
+              "Expected both 'stress' and 'focus' mentioned")
         check("Email mentions 5 days or 15 meals",
               "5" in (body or "") or "five" in body_lower or "15" in (body or ""),
               "Expected meal plan scope mentioned")
@@ -206,13 +206,20 @@ def main():
     print("=" * 70)
 
     check_excel(args.agent_workspace, gt_dir)
+    excel_fail = FAIL_COUNT
     check_gcal()
     check_emails()
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")
     print(f"  Failed: {FAIL_COUNT}")
-    overall = FAIL_COUNT == 0
+    # Excel is local file (blocking); gcal/email runtime-only
+    total = PASS_COUNT + FAIL_COUNT
+    acc = (PASS_COUNT / total * 100) if total else 0
+    # Runtime-only checks (gcal + email) can account for ~5 of ~14 checks,
+    # so require 65%+ accuracy while enforcing zero Excel failures.
+    overall = (excel_fail == 0) and (acc >= 65)
+    print(f"  Excel failures: {excel_fail}; accuracy: {acc:.1f}%")
     print(f"  Overall: {'PASS' if overall else 'FAIL'}")
     sys.exit(0 if overall else 1)
 

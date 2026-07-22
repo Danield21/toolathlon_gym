@@ -54,8 +54,8 @@ def main():
     gt_wb = openpyxl.load_workbook(gt_file, data_only=True)
 
     all_errors = []
-    
-    # Check sheet: Inventory Report
+
+    # ===== Inventory Report sheet =====
     print(f"  Checking Inventory Report...")
     a_rows = load_sheet_rows(agent_wb, "Inventory Report")
     g_rows = load_sheet_rows(gt_wb, "Inventory Report")
@@ -64,41 +64,103 @@ def main():
     elif g_rows is None:
         all_errors.append("Sheet 'Inventory Report' not found in groundtruth")
     else:
-        sheet_name = "Inventory Report"
         errors = []
-        a_data = a_rows[1:] if len(a_rows) > 1 else []
-        g_data = g_rows[1:] if len(g_rows) > 1 else []
-        
+        a_data = [r for r in a_rows[1:] if r and r[0] is not None and str(r[0]).strip()]
+        g_data = [r for r in g_rows[1:] if r and r[0] is not None and str(r[0]).strip()]
+
+        # Row count: must equal expected
+        if len(a_data) != len(g_data):
+            errors.append(f"Row count mismatch: agent {len(a_data)} vs gt {len(g_data)}")
+
+        # Build lookups keyed by name first, then fall back to (name, regular_price) tuple
+        # to disambiguate any duplicate product names (rare but defensive).
+        def _key(row):
+            name = str(row[0]).strip().lower() if row[0] is not None else ""
+            try:
+                rp = float(row[2]) if len(row) > 2 and row[2] is not None else None
+            except (TypeError, ValueError):
+                rp = None
+            return name, rp
+
         a_lookup = {}
         for row in a_data:
             if row and row[0] is not None:
-                a_lookup[str(row[0]).strip().lower()] = row
-        for g_row in g_data:
-            if not g_row or g_row[0] is None:
-                continue
-            key = str(g_row[0]).strip().lower()
+                k = _key(row)
+                # Primary key by name; secondary by (name, price) tuple
+                a_lookup[k[0]] = row
+                a_lookup[k] = row
+        g_lookup = {}
+        for row in g_data:
+            if row and row[0] is not None:
+                k = _key(row)
+                g_lookup[k[0]] = row
+                g_lookup[k] = row
+        # Iterate only on string-keyed entries (avoid double-counting tuple keys)
+        g_lookup_iter = {k: v for k, v in g_lookup.items() if isinstance(k, str)}
+        a_lookup = {k: v for k, v in a_lookup.items() if isinstance(k, str)}
+        g_lookup = g_lookup_iter
+
+        for key, g_row in g_lookup.items():
             a_row = a_lookup.get(key)
             if a_row is None:
                 errors.append(f"Missing row: {g_row[0]}")
                 continue
-            
-            if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 1.0):
-                    errors.append(f"{key}.Regular_Price: {a_row[2]} vs {g_row[2]} (tol=1.0)")
 
-            if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 2):
-                    errors.append(f"{key}.Stock_Qty: {a_row[4]} vs {g_row[4]} (tol=2)")
+            # Pad short rows with None
+            def safe(r, i):
+                return r[i] if i < len(r) else None
+
+            # Type (col 1) -- string
+            g_type, a_type = safe(g_row, 1), safe(a_row, 1)
+            if not str_match(a_type, g_type):
+                errors.append(f"{key[:60]}.Type: {a_type!r} vs {g_type!r}")
+
+            # Regular_Price (col 2) -- tight 0.01 tolerance for dollar amounts
+            g_rp, a_rp = safe(g_row, 2), safe(a_row, 2)
+            if not num_close(a_rp, g_rp, 0.01):
+                errors.append(f"{key[:60]}.Regular_Price: {a_rp} vs {g_rp} (tol=0.01)")
+
+            # Sale_Price (col 3) -- 0.01 tolerance, allow 0 if not on sale
+            g_sp, a_sp = safe(g_row, 3), safe(a_row, 3)
+            if not num_close(a_sp, g_sp, 0.01):
+                errors.append(f"{key[:60]}.Sale_Price: {a_sp} vs {g_sp} (tol=0.01)")
+
+            # Stock_Qty (col 4) -- exact integer
+            g_sq, a_sq = safe(g_row, 4), safe(a_row, 4)
+            if not num_close(a_sq, g_sq, 0):
+                errors.append(f"{key[:60]}.Stock_Qty: {a_sq} vs {g_sq} (exact)")
+
+            # Stock_Status (col 5) -- string
+            g_ss, a_ss = safe(g_row, 5), safe(a_row, 5)
+            if not str_match(a_ss, g_ss):
+                errors.append(f"{key[:60]}.Stock_Status: {a_ss!r} vs {g_ss!r}")
+
+        # Detect extra rows in agent
+        for key in a_lookup:
+            if key not in g_lookup:
+                errors.append(f"Extra row not in GT: {a_lookup[key][0]}")
+
+        # Sort order: Regular_Price descending
+        a_prices = []
+        for row in a_data:
+            try:
+                a_prices.append(float(row[2]) if row[2] is not None else None)
+            except (TypeError, ValueError):
+                a_prices.append(None)
+        # sorted desc check (skip Nones at end)
+        non_none = [p for p in a_prices if p is not None]
+        if non_none != sorted(non_none, reverse=True):
+            errors.append(f"Inventory Report not sorted by Regular_Price descending (first 5: {a_prices[:5]})")
+
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
-            for e in errors[:5]:
+            for e in errors[:8]:
                 print(f"      {e}")
         else:
             print(f"    PASS")
 
-
-    # Check sheet: Summary
+    # ===== Summary sheet =====
     print(f"  Checking Summary...")
     a_rows = load_sheet_rows(agent_wb, "Summary")
     g_rows = load_sheet_rows(gt_wb, "Summary")
@@ -107,40 +169,68 @@ def main():
     elif g_rows is None:
         all_errors.append("Sheet 'Summary' not found in groundtruth")
     else:
-        sheet_name = "Summary"
         errors = []
-        a_data = a_rows[1:] if len(a_rows) > 1 else []
-        g_data = g_rows[1:] if len(g_rows) > 1 else []
-        
-        a_lookup = {}
-        for row in a_data:
-            if row and row[0] is not None:
-                a_lookup[str(row[0]).strip().lower()] = row
-        for g_row in g_data:
-            if not g_row or g_row[0] is None:
+        # Support BOTH key-value (vertical) and single-row (horizontal) formats
+        EXPECTED_KEYS = {
+            "total_products": ("count", 0),
+            "avg_price": ("price", 0.01),
+            "on_sale_count": ("count", 0),
+            "out_of_stock": ("count", 0),
+        }
+
+        # Build mapping from GT
+        g_kv = {}
+        for row in g_rows:
+            if row and row[0] is not None and len(row) > 1 and row[1] is not None:
+                key = str(row[0]).strip().lower().replace(" ", "_")
+                g_kv[key] = row[1]
+        # If GT also has horizontal layout: header row + value row
+        if not all(k in g_kv for k in EXPECTED_KEYS):
+            # try horizontal
+            if len(g_rows) >= 2:
+                hdr = [str(c).strip().lower().replace(" ", "_") if c else "" for c in g_rows[0]]
+                vals = g_rows[1] if len(g_rows) > 1 else []
+                for i, h in enumerate(hdr):
+                    if h in EXPECTED_KEYS and i < len(vals):
+                        g_kv.setdefault(h, vals[i])
+
+        # Build mapping from agent (try both layouts)
+        a_kv = {}
+        for row in a_rows:
+            if row and row[0] is not None and len(row) > 1 and row[1] is not None:
+                key = str(row[0]).strip().lower().replace(" ", "_")
+                if key in EXPECTED_KEYS:
+                    a_kv[key] = row[1]
+        if not all(k in a_kv for k in EXPECTED_KEYS):
+            # try horizontal
+            if len(a_rows) >= 2:
+                hdr = [str(c).strip().lower().replace(" ", "_") if c else "" for c in a_rows[0]]
+                vals = a_rows[1] if len(a_rows) > 1 else []
+                for i, h in enumerate(hdr):
+                    if h in EXPECTED_KEYS and i < len(vals):
+                        a_kv.setdefault(h, vals[i])
+
+        for k, (kind, tol) in EXPECTED_KEYS.items():
+            if k not in g_kv:
+                errors.append(f"Summary GT missing {k}")
                 continue
-            key = str(g_row[0]).strip().lower()
-            a_row = a_lookup.get(key)
-            if a_row is None:
-                errors.append(f"Missing row: {g_row[0]}")
+            if k not in a_kv:
+                errors.append(f"Summary agent missing {k}")
                 continue
-            
-            if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 5.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=5.0)")
+            if not num_close(a_kv[k], g_kv[k], tol):
+                errors.append(f"Summary {k}: agent={a_kv[k]} gt={g_kv[k]} (tol={tol})")
+
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
-            for e in errors[:5]:
+            for e in errors[:8]:
                 print(f"      {e}")
         else:
             print(f"    PASS")
 
-    
-
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")
-        for e in all_errors[:10]:
+        for e in all_errors[:15]:
             print(f"  {e}")
         sys.exit(1)
     else:

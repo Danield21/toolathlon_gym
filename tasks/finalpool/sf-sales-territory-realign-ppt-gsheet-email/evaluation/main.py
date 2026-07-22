@@ -207,7 +207,7 @@ def check_ppt(agent_workspace):
         check("PPT file readable", False, str(e))
         return
 
-    check("PPT has at least 5 slides", len(prs.slides) >= 5,
+    check("PPT has at least 6 slides", len(prs.slides) >= 6,
           f"Found {len(prs.slides)} slides")
 
     all_text = " ".join(
@@ -220,11 +220,10 @@ def check_ppt(agent_workspace):
     check("PPT contains 'territory' and 'realignment' or 'review'",
           "territory" in all_text and ("realign" in all_text or "review" in all_text),
           "Title keywords not found")
-    check("PPT mentions Europe", "europe" in all_text)
-    check("PPT mentions Latin America", "latin america" in all_text)
-    check("PPT contains revenue figures",
-          "648" in all_text or "642" in all_text or "549" in all_text,
-          "Revenue figures not found")
+    for region in ["asia pacific", "europe", "latin america", "middle east", "north america"]:
+        check(f"PPT mentions {region}",
+              region in all_text,
+              f"'{region}' missing in PPT text")
     check("PPT contains recommendations or actions",
           "recommend" in all_text or "action" in all_text or "strategy" in all_text,
           "No recommendations found")
@@ -270,27 +269,42 @@ def check_emails():
         "northamerica_manager@company.com": "north america",
     }
 
-    found_count = 0
+    found = {}
     all_recipients = []
     for subj, from_addr, to_addr, body in all_emails:
         recipients = parse_recipients(to_addr)
         all_recipients.extend(recipients)
         for mgr_email in region_managers:
             if mgr_email in recipients:
-                found_count += 1
-                # Check subject contains territory and review
-                subj_lower = (subj or "").lower()
-                region_name = region_managers[mgr_email]
-                has_region_or_territory = ("territory" in subj_lower or
-                                           region_name.split()[0] in subj_lower or
-                                           "review" in subj_lower)
-                check(f"Email to {mgr_email} has appropriate subject",
-                      has_region_or_territory,
-                      f"Subject: {subj}")
+                found[mgr_email] = (subj, body)
                 break
 
-    check("At least 5 regional manager emails sent", found_count >= 5,
-          f"Found {found_count} emails to regional managers. All recipients: {all_recipients[:10]}")
+    # Ensure each region manager got an email
+    for mgr_email, region_name in region_managers.items():
+        email_data = found.get(mgr_email)
+        check(f"Email sent to {mgr_email}", email_data is not None,
+              f"Not found. All recipients: {all_recipients[:10]}")
+        if email_data:
+            subj, body = email_data
+            subj_lower = (subj or "").lower()
+            body_lower = (body or "").lower()
+            # Subject must include region name AND 'territory review' keywords
+            region_in_subj = region_name in subj_lower or region_name.split()[0] in subj_lower
+            check(f"{mgr_email}: subject includes '{region_name}' AND 'territory review'",
+                  region_in_subj and "territory" in subj_lower and "review" in subj_lower,
+                  f"Subject: {subj}")
+            # Body must include revenue, target, variance, priority, action
+            required_in_body = [
+                ("revenue", ["revenue"]),
+                ("target", ["target"]),
+                ("variance", ["variance", "gap"]),
+                ("priority", ["priority", "high", "medium", "low"]),
+                ("action", ["action", "recommend"]),
+            ]
+            for label, roots in required_in_body:
+                ok = any(root in body_lower for root in roots)
+                check(f"{mgr_email}: body mentions {label}", ok,
+                      f"Body sample: {body_lower[:200]}")
 
 
 def main():

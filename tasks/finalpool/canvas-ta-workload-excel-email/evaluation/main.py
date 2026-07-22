@@ -48,6 +48,37 @@ def load_sheet_rows(wb, sheet_name):
     return None
 
 
+def _fetch_course_workload():
+    """Fetch expected per-course TA counts from Canvas DB."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT c.name,
+                   c.course_code,
+                   (SELECT COUNT(*) FROM canvas.enrollments e
+                      WHERE e.course_id = c.id AND e.type = 'TaEnrollment') as ta_count,
+                   (SELECT COUNT(*) FROM canvas.assignments a WHERE a.course_id = c.id) as asgn,
+                   (SELECT COUNT(*) FROM canvas.submissions s
+                      JOIN canvas.assignments a ON a.id = s.assignment_id
+                      WHERE a.course_id = c.id) as sub
+            FROM canvas.courses c
+        """)
+        result = {}
+        for name, code, ta, asgn, sub in cur.fetchall():
+            result[str(name).strip().lower()] = {
+                "ta_count": int(ta or 0),
+                "course_code": code,
+                "assignment_count": int(asgn or 0),
+                "submission_count": int(sub or 0),
+            }
+        cur.close(); conn.close()
+        return result
+    except Exception as e:
+        print(f"  [WARN] DB fetch failed: {e}")
+        return {}
+
+
 def check_excel(agent_workspace):
     print("\n=== Checking Excel ===")
     xlsx_path = os.path.join(agent_workspace, "TA_Workload_Report.xlsx")
@@ -89,6 +120,31 @@ def check_excel(agent_workspace):
                 check("FFF-2013J has TA_Count=1", num_close(ta_count, 1, 0), f"Got {ta_count}")
                 check("FFF-2013J has Submission_Count=16240", num_close(submission_count, 16240, 10), f"Got {submission_count}")
         check("Foundations of Finance (Fall 2013) row found", found_fff)
+
+        # Spot-check >= 5 course rows against DB-derived expected values.
+        expected = _fetch_course_workload()
+        spot_checked = 0
+        for row in data_rows:
+            if not row or not row[0]:
+                continue
+            key = str(row[0]).strip().lower()
+            if key in expected:
+                exp = expected[key]
+                short = key[:40]
+                ta = row[2] if len(row) > 2 else None
+                asgn = row[3] if len(row) > 3 else None
+                sub = row[4] if len(row) > 4 else None
+                check(f"'{short}' TA_Count={exp['ta_count']}",
+                      num_close(ta, exp["ta_count"], 0), f"Got {ta}")
+                check(f"'{short}' Assignment_Count={exp['assignment_count']}",
+                      num_close(asgn, exp["assignment_count"], 0), f"Got {asgn}")
+                check(f"'{short}' Submission_Count~{exp['submission_count']}",
+                      num_close(sub, exp["submission_count"], 10), f"Got {sub}")
+                spot_checked += 1
+                if spot_checked >= 5:
+                    break
+        check(f"Validated >=5 courses against DB", spot_checked >= 5,
+              f"Validated {spot_checked}")
 
     # Check Summary sheet
     sum_rows = load_sheet_rows(wb, "Summary")
@@ -184,16 +240,20 @@ def main():
     args = parser.parse_args()
 
     check_excel(args.agent_workspace)
+    excel_fail = FAIL_COUNT
     check_notion()
     check_email()
 
     total = PASS_COUNT + FAIL_COUNT
     print(f"\n=== Results: {PASS_COUNT}/{total} passed ===")
-    if FAIL_COUNT > 0:
-        print(f"{FAIL_COUNT} checks failed")
+    # Excel is local-file (blocking). Notion/email are runtime-only.
+    accuracy = (PASS_COUNT / total * 100) if total else 0
+    overall_ok = (excel_fail == 0) and (accuracy >= 85)
+    if not overall_ok:
+        print(f"FAIL: excel_failures={excel_fail}, accuracy={accuracy:.1f}%")
         sys.exit(1)
     else:
-        print("All checks passed!")
+        print(f"PASS: excel_failures={excel_fail}, accuracy={accuracy:.1f}%")
         sys.exit(0)
 
 

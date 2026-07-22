@@ -39,6 +39,16 @@ EXPECTED_BUDGETS = {
     "Support": 684741486.31,
 }
 
+# Per-dept Headcount and Avg_Salary (from GT snapshot); used for triage per-dept checks.
+EXPECTED_HEADCOUNT = {
+    "Engineering": 7096, "Finance": 7148, "HR": 7077, "Operations": 7120,
+    "R&D": 7083, "Sales": 7232, "Support": 7244,
+}
+EXPECTED_AVG_SALARY = {
+    "Engineering": 58991.61, "Finance": 57878.19, "HR": 58920.45, "Operations": 57808.74,
+    "R&D": 57905.93, "Sales": 58864.79, "Support": 58400.48,
+}
+
 
 def record(name, passed, detail=""):
     global PASS_COUNT, FAIL_COUNT
@@ -107,6 +117,11 @@ def check_excel(agent_workspace, groundtruth_workspace):
 
     rows = list(ws1.iter_rows(min_row=2, values_only=True))
     record("Department Details has 7 rows", len(rows) == 7, f"Got {len(rows)}")
+    # Verify alphabetical order of Department column (triage requirement).
+    dept_names = [str(r[0]).strip() for r in rows if r and r[0] is not None]
+    record("Department Details rows in alphabetical order",
+           dept_names == sorted(dept_names, key=str.lower),
+           f"Got: {dept_names}")
 
     for dept in DEPARTMENTS:
         agent_row = None
@@ -136,6 +151,26 @@ def check_excel(agent_workspace, groundtruth_workspace):
         record(f"Dept {dept}: Variance",
                num_close(agent_row[3], expected_var),
                f"Expected ~{expected_var:.0f}, got {agent_row[3]}")
+
+        # Variance_Pct = Variance / Approved_Budget * 100
+        expected_var_pct = (expected_var / EXPECTED_BUDGETS[dept]) * 100
+        if len(agent_row) > 4:
+            record(f"Dept {dept}: Variance_Pct",
+                   num_close(agent_row[4], expected_var_pct, rel_tol=0.05),
+                   f"Expected ~{expected_var_pct:.2f}%, got {agent_row[4]}")
+        # Headcount
+        if len(agent_row) > 5 and EXPECTED_HEADCOUNT.get(dept) is not None:
+            try:
+                ok = int(agent_row[5]) == EXPECTED_HEADCOUNT[dept]
+            except (TypeError, ValueError):
+                ok = False
+            record(f"Dept {dept}: Headcount",
+                   ok, f"Expected {EXPECTED_HEADCOUNT[dept]}, got {agent_row[5]}")
+        # Avg_Salary
+        if len(agent_row) > 6 and EXPECTED_AVG_SALARY.get(dept) is not None:
+            record(f"Dept {dept}: Avg_Salary",
+                   num_close(agent_row[6], EXPECTED_AVG_SALARY[dept], rel_tol=0.01),
+                   f"Expected ~{EXPECTED_AVG_SALARY[dept]:.2f}, got {agent_row[6]}")
 
     # Sheet 2: Totals
     ws2 = get_sheet(wb, "Totals")
@@ -219,10 +254,38 @@ def check_pptx(agent_workspace):
            "march 2026" in all_lower,
            "March 2026 not found")
 
+    # Per-slide dept verification: find slide containing dept name, verify at least
+    # one numeric value close to the expected Actual_Expenditure appears on that slide.
     for dept in DEPARTMENTS:
         record(f"PPTX: mentions {dept}",
                dept.lower() in all_lower,
                f"{dept} not found")
+        # Find slide with this dept name.
+        dept_slide = None
+        for slide in slides:
+            slide_text_parts = []
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    slide_text_parts.append(shape.text_frame.text)
+            slide_text = " ".join(slide_text_parts).lower()
+            if dept.lower() in slide_text:
+                dept_slide = slide_text
+                # Prefer slides with numeric content
+                if any(ch.isdigit() for ch in slide_text):
+                    break
+        if dept_slide:
+            # Check if actual expenditure (in millions) appears on slide
+            actual_m = EXPECTED_ACTUALS[dept] / 1_000_000  # ~411
+            actual_full = EXPECTED_ACTUALS[dept]
+            has_num = (
+                f"{actual_m:.0f}" in dept_slide
+                or f"{actual_m:.1f}" in dept_slide
+                or f"{int(actual_full):,}".lower() in dept_slide
+                or f"{int(actual_full)}" in dept_slide
+            )
+            record(f"PPTX: {dept} slide mentions actual (~${actual_m:.0f}M)",
+                   has_num,
+                   f"Slide preview: {dept_slide[:150]}")
 
     record("PPTX: has Summary slide",
            "summary" in all_lower,
@@ -247,10 +310,12 @@ def main():
     parser.add_argument("--res_log_file", required=False)
     args = parser.parse_args()
 
-    excel_ok = check_excel(args.agent_workspace, args.groundtruth_workspace)
-    pptx_ok = check_pptx(args.agent_workspace)
+    check_excel(args.agent_workspace, args.groundtruth_workspace)
+    check_pptx(args.agent_workspace)
 
-    all_passed = excel_ok and pptx_ok
+    # Use global FAIL_COUNT to gate overall (was `excel_ok and pptx_ok` which
+    # was only True when sheets existed, even if many record()'d checks failed).
+    all_passed = FAIL_COUNT == 0
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

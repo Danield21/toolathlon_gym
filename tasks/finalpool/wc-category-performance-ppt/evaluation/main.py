@@ -152,17 +152,28 @@ def check_excel(agent_workspace, gt_workspace, expected):
                    num_close(a_row[1], g_row[1], 1),
                    f"Agent={a_row[1]}, GT={g_row[1]}")
         if len(a_row) > 2 and len(g_row) > 2:
+            # Tightened tol from 5.0 to 1.0 for Avg_Price
             record(f"  {cat} Avg_Price",
-                   num_close(a_row[2], g_row[2], 5.0),
+                   num_close(a_row[2], g_row[2], 1.0),
                    f"Agent={a_row[2]}, GT={g_row[2]}")
         if len(a_row) > 3 and len(g_row) > 3:
+            # Tightened tol from 5 to 2 for Total_Units_Sold
             record(f"  {cat} Total_Units_Sold",
-                   num_close(a_row[3], g_row[3], 5),
+                   num_close(a_row[3], g_row[3], 2),
                    f"Agent={a_row[3]}, GT={g_row[3]}")
         if len(a_row) > 4 and len(g_row) > 4:
             record(f"  {cat} Avg_Rating",
                    num_close(a_row[4], g_row[4], 0.1),
                    f"Agent={a_row[4]}, GT={g_row[4]}")
+
+    # Sort order: alphabetical by category
+    cat_names = [str(r[0]).strip() for r in a_data if r and r[0]]
+    sorted_cats = sorted(cat_names, key=lambda s: s.lower())
+    record(
+        "Categories sorted alphabetically",
+        cat_names == sorted_cats,
+        f"got {cat_names}",
+    )
 
     return True
 
@@ -183,41 +194,104 @@ def check_pptx(agent_workspace, expected):
         num_slides = len(prs.slides)
 
         expected_slides = len(expected) + 2  # title + per-category + summary
-        record(f"Slide count (expected ~{expected_slides})",
-               abs(num_slides - expected_slides) <= 2,
+        # Tighten: must be exactly title + N + summary (no ±2)
+        record(f"Slide count exactly {expected_slides}",
+               num_slides == expected_slides,
                f"Got {num_slides}")
 
-        # Check for title slide
+        # Check for title slide (slide 1)
         first_slide = prs.slides[0]
+        first_title = first_slide.shapes.title.text.strip().lower() if first_slide.shapes.title else ""
         first_text = " ".join(
             shape.text for shape in first_slide.shapes if shape.has_text_frame
         ).lower()
-        record("Title slide mentions category/performance/review",
-               any(w in first_text for w in ["category", "performance", "review"]),
-               f"Title text: {first_text[:100]}")
+        record(
+            "Title slide title 'Product Category Performance Review'",
+            "product category performance review" in first_title or "product category performance review" in first_text,
+            f"Title text: {first_text[:120]}",
+        )
 
-        # Check that category names appear in slides
-        all_slide_text = ""
+        # Per-category slides (slides 2 .. N+1): each should have category name as title
+        slide_titles = []
         for slide in prs.slides:
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    all_slide_text += " " + shape.text
-        all_slide_lower = all_slide_text.lower()
+            try:
+                title_text = (slide.shapes.title.text if slide.shapes.title else "").strip()
+            except Exception:
+                title_text = ""
+            slide_titles.append(title_text)
 
-        for cat_info in expected:
-            cat = cat_info['category']
-            record(f"PPT mentions '{cat}'",
-                   cat.lower() in all_slide_lower,
-                   f"'{cat}' not found in slides")
+        cat_names = [c['category'] for c in expected]
+        # Slides 2..N+1 (index 1..N): each title should equal a category name
+        if num_slides >= len(cat_names) + 2:
+            cat_slide_titles = [t.lower() for t in slide_titles[1: 1 + len(cat_names)]]
+            cat_names_lower = sorted(c.lower() for c in cat_names)
+            actual_cat_titles_sorted = sorted(cat_slide_titles)
+            record(
+                "Each category has its own slide with category name as title",
+                actual_cat_titles_sorted == cat_names_lower,
+                f"actual={actual_cat_titles_sorted} expected={cat_names_lower}",
+            )
 
-        # Check summary slide
+        # Each per-category slide must include 4 metric values
+        # We accept loose check: slide content must have product count, avg price, units, rating
+        for i, cat_info in enumerate(expected):
+            slide_idx = i + 1  # slide 2 onward
+            if slide_idx >= num_slides - 1:  # exclude summary slide
+                continue
+            slide = prs.slides[slide_idx]
+            slide_text = " ".join(
+                shape.text for shape in slide.shapes if shape.has_text_frame
+            ).lower()
+            # Check the 4 metrics by value (text-based contains)
+            pc = str(cat_info['product_count'])
+            av = str(cat_info['avg_price'])
+            tu = str(cat_info['total_units_sold'])
+            ar = str(cat_info['avg_rating'])
+            metrics_found = sum(
+                1 for v in [pc, av, tu, ar] if v in slide_text
+            )
+            record(
+                f"Slide for '{cat_info['category']}' has at least 3 of 4 metric values",
+                metrics_found >= 3,
+                f"found {metrics_found}/4 in: {slide_text[:160]}",
+            )
+
+        # Summary slide (last)
         last_slide = prs.slides[-1]
+        last_title = (last_slide.shapes.title.text if last_slide.shapes.title else "").strip().lower()
         last_text = " ".join(
             shape.text for shape in last_slide.shapes if shape.has_text_frame
         ).lower()
-        record("Last slide is summary",
-               "summary" in last_text or "overall" in last_text,
-               f"Last slide text: {last_text[:100]}")
+        record("Last slide title 'Overall Summary'",
+               "overall summary" in last_title or "overall summary" in last_text,
+               f"Last slide title: {last_title}")
+        # Determine expected highlights from `expected` (handle ties)
+        if expected:
+            # Most products: tied
+            mp_count = max(c['product_count'] for c in expected)
+            mp_cats = [c['category'].lower() for c in expected if c['product_count'] == mp_count]
+            # Highest rating: tied
+            hr_val = max(c['avg_rating'] for c in expected)
+            hr_cats = [c['category'].lower() for c in expected if c['avg_rating'] == hr_val]
+            # Most units sold: tied
+            mu_count = max(c['total_units_sold'] for c in expected)
+            mu_cats = [c['category'].lower() for c in expected if c['total_units_sold'] == mu_count]
+
+            record(
+                f"Summary mentions most-products category (one of {mp_cats})",
+                any(c in last_text for c in mp_cats),
+                f"text: {last_text[:200]}",
+            )
+            record(
+                f"Summary mentions highest-rating category (one of {hr_cats})",
+                any(c in last_text for c in hr_cats),
+                f"text: {last_text[:200]}",
+            )
+            record(
+                f"Summary mentions most-units category (one of {mu_cats})",
+                any(c in last_text for c in mu_cats),
+                f"text: {last_text[:200]}",
+            )
 
     except ImportError:
         record("python-pptx available", False, "Cannot import pptx module")

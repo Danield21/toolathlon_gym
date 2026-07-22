@@ -228,6 +228,65 @@ def check_pptx(agent_workspace):
     return passed, total
 
 
+def extract_pdf_text(pdf_path):
+    pdf_text = ""
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(pdf_path)
+        for page in reader.pages:
+            pdf_text += page.extract_text() or ""
+    except Exception:
+        try:
+            from PyPDF2 import PdfReader
+            reader = PdfReader(pdf_path)
+            for page in reader.pages:
+                pdf_text += page.extract_text() or ""
+        except Exception:
+            with open(pdf_path, "rb") as f:
+                pdf_text = f.read().decode("latin-1", errors="ignore")
+    return pdf_text
+
+
+def check_word_pdf_consistency(agent_workspace):
+    """Verify that PDF shopping list overlaps with Word doc ingredients."""
+    passed = 0
+    total = 0
+    doc_path = os.path.join(agent_workspace, "Workshop_Handbook.docx")
+    pdf_path = os.path.join(agent_workspace, "Shopping_List.pdf")
+    if not os.path.exists(doc_path) or not os.path.exists(pdf_path):
+        return passed, total
+
+    try:
+        doc = Document(doc_path)
+        word_text = " ".join(p.text for p in doc.paragraphs).lower()
+    except Exception as e:
+        print(f"  [WARN] could not read Word doc for consistency: {e}")
+        return passed, total
+
+    pdf_text = extract_pdf_text(pdf_path).lower()
+
+    # Extract candidate ingredient keywords from Word doc
+    # Use a curated list of common cooking keywords that might appear
+    ingredient_keywords = [
+        "egg", "tomato", "chicken", "broccoli", "garlic", "oil", "salt",
+        "sugar", "soy sauce", "ginger", "scallion", "onion", "beef", "pork",
+        "fish", "rice", "noodle", "tofu", "mushroom", "pepper", "carrot",
+        "potato", "vinegar", "wine", "flour", "water", "cola", "lemon",
+        "cucumber", "cabbage", "spinach", "shrimp",
+    ]
+    word_keywords = {kw for kw in ingredient_keywords if kw in word_text}
+    overlap = {kw for kw in word_keywords if kw in pdf_text}
+
+    total += 1
+    if len(overlap) >= 3:
+        passed += 1
+        print(f"  PASS: PDF-Word ingredient overlap (found {len(overlap)} shared: {sorted(overlap)[:5]})")
+    else:
+        print(f"  FAIL: Only {len(overlap)} shared ingredient keywords between PDF and Word (need >= 3). Word had {len(word_keywords)}: {sorted(word_keywords)[:8]}")
+
+    return passed, total
+
+
 def check_pdf(agent_workspace):
     """Check Shopping_List.pdf for required structure."""
     passed = 0
@@ -318,6 +377,14 @@ def main(args):
     print(f"  PDF: {p}/{t} checks passed")
     total_passed += p
     total_checks += t
+
+    # Check 4: Word-PDF ingredient consistency
+    print("\n--- Check 4: Word-PDF Ingredient Consistency ---")
+    p, t = check_word_pdf_consistency(args.agent_workspace)
+    if t > 0:
+        print(f"  Consistency: {p}/{t} checks passed")
+        total_passed += p
+        total_checks += t
 
     # Overall
     if total_checks == 0:

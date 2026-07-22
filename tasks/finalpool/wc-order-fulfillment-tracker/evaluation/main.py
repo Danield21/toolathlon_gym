@@ -77,19 +77,19 @@ def main():
                 all_errors.append(f"Missing status: {g_row[0]}")
                 continue
 
-            # Order_Count (col 1)
+            # Order_Count (col 1) -- integer counts, require exact match.
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 2):
+                if not num_close(a_row[1], g_row[1], 0):
                     all_errors.append(f"{key}.Order_Count: {a_row[1]} vs {g_row[1]}")
 
-            # Total_Revenue (col 2)
+            # Total_Revenue (col 2) -- tightened tol from 50.0 to 5.0.
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 50.0):
+                if not num_close(a_row[2], g_row[2], 5.0):
                     all_errors.append(f"{key}.Total_Revenue: {a_row[2]} vs {g_row[2]}")
 
-            # Avg_Order_Value (col 3)
+            # Avg_Order_Value (col 3) -- tightened tol from 5.0 to 1.0.
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 5.0):
+                if not num_close(a_row[3], g_row[3], 1.0):
                     all_errors.append(f"{key}.Avg_Order_Value: {a_row[3]} vs {g_row[3]}")
 
         if not [e for e in all_errors if "Order Status" in e or "Missing status" in e]:

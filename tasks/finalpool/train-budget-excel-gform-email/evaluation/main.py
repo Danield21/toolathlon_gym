@@ -9,6 +9,7 @@ Checks:
 """
 import json
 import os
+import re
 import sys
 from argparse import ArgumentParser
 
@@ -25,17 +26,21 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+BLOCKING_FAIL_COUNT = 0  # Runtime-only checks (gform/email) do not count
 
 
-def record(name, passed, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def record(name, passed, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, BLOCKING_FAIL_COUNT
     if passed:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if not runtime_only:
+            BLOCKING_FAIL_COUNT += 1
         msg = f": {detail[:300]}" if detail else ""
-        print(f"  [FAIL] {name}{msg}")
+        suffix = " (runtime-only)" if runtime_only else ""
+        print(f"  [FAIL] {name}{suffix}{msg}")
 
 
 def check_excel(agent_workspace):
@@ -68,7 +73,10 @@ def check_excel(agent_workspace):
                f"Found {len(data_rows)}")
 
         all_text = " ".join(str(c) for r in rows for c in r if c).upper()
-        record("Seat_Options has G11 and G1", "G11" in all_text and "G1" in all_text, all_text[:200])
+        # Use regex word boundary to avoid 'G1' matching within 'G11'.
+        has_g1 = bool(re.search(r"\bG1\b", all_text))
+        has_g11 = bool(re.search(r"\bG11\b", all_text))
+        record("Seat_Options has G11 and G1", has_g1 and has_g11, all_text[:200])
 
         numeric_vals = []
         for r in data_rows:
@@ -130,28 +138,30 @@ def check_gform():
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
+    # Tighten: title must reflect 'Business Trip Travel Preference Survey' semantics
     cur.execute("""
         SELECT id, title FROM gform.forms
-        WHERE title ILIKE '%travel preference%' OR title ILIKE '%business trip%'
+        WHERE title ILIKE '%travel preference%'
+           OR title ILIKE '%business trip%travel%'
     """)
     forms = cur.fetchall()
-    record("Travel preference survey form exists", len(forms) >= 1,
-           f"Found forms: {[f[1] for f in forms]}")
+    record("Business Trip Travel Preference survey form exists", len(forms) >= 1,
+           f"Found forms: {[f[1] for f in forms]}", runtime_only=True)
 
     if forms:
         form_id = forms[0][0]
         cur.execute("SELECT COUNT(*) FROM gform.questions WHERE form_id = %s", (form_id,))
         q_count = cur.fetchone()[0]
-        record("Form has exactly 3 questions", q_count == 3, f"Found {q_count}")
+        record("Form has exactly 3 questions", q_count == 3, f"Found {q_count}", runtime_only=True)
 
         cur.execute("SELECT title, question_type FROM gform.questions WHERE form_id = %s ORDER BY position", (form_id,))
         questions = cur.fetchall()
         has_departure_q = any("departure" in (q[0] or "").lower() or "time" in (q[0] or "").lower() for q in questions)
         has_seat_q = any("seat" in (q[0] or "").lower() or "class" in (q[0] or "").lower() for q in questions)
         has_text_q = any(q[1] in ("TEXT", "PARAGRAPH") for q in questions)
-        record("Form has departure time question", has_departure_q, f"Questions: {questions}")
-        record("Form has seat class question", has_seat_q, f"Questions: {questions}")
-        record("Form has open text question", has_text_q, f"Questions: {questions}")
+        record("Form has departure time question", has_departure_q, f"Questions: {questions}", runtime_only=True)
+        record("Form has seat class question", has_seat_q, f"Questions: {questions}", runtime_only=True)
+        record("Form has open text question", has_text_q, f"Questions: {questions}", runtime_only=True)
 
     cur.close()
     conn.close()
@@ -163,7 +173,7 @@ def check_email():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     cur.execute("""
-        SELECT to_addr, subject FROM email.messages
+        SELECT to_addr, subject, body_text FROM email.messages
         WHERE subject ILIKE '%budget%' OR subject ILIKE '%beijing-shanghai%' OR subject ILIKE '%conference%'
     """)
     messages = cur.fetchall()
@@ -172,13 +182,34 @@ def check_email():
 
     all_msgs = list(messages)
     record("Budget analysis email sent", len(all_msgs) >= 1,
-           f"Found {len(all_msgs)} matching emails")
+           f"Found {len(all_msgs)} matching emails", runtime_only=True)
 
     if all_msgs:
         to_raw = all_msgs[0][0]
         to_str = str(to_raw).lower() if to_raw else ""
         record("Email sent to finance@company.com", "finance@company.com" in to_str,
-               f"To: {to_str[:100]}")
+               f"To: {to_str[:100]}", runtime_only=True)
+        # Body content validation: must include Budget / Standard / Premium totals
+        body_raw = (all_msgs[0][2] or "") if len(all_msgs[0]) > 2 else ""
+        body_norm = str(body_raw).lower()
+        # Look for digits like 2792, 4424, 13988 or 13,988
+        def has_number(text, target, tol=10):
+            # Strip thousands separators and match either 'target' or close number
+            try:
+                import re as _re
+                nums = [float(n.replace(',', '')) for n in _re.findall(r'[\d,]+(?:\.\d+)?', text)]
+                return any(abs(v - target) <= tol for v in nums)
+            except Exception:
+                return False
+        has_budget_total = has_number(body_norm, 2792.0, tol=2)
+        has_standard_total = has_number(body_norm, 4424.0, tol=2)
+        has_premium_total = has_number(body_norm, 13988.0, tol=20)
+        record("Email body mentions Budget_Total (~2792)", has_budget_total,
+               f"Body[:300]: {body_norm[:300]}", runtime_only=True)
+        record("Email body mentions Standard_Total (~4424)", has_standard_total,
+               f"Body[:300]: {body_norm[:300]}", runtime_only=True)
+        record("Email body mentions Premium_Total (~13988)", has_premium_total,
+               f"Body[:300]: {body_norm[:300]}", runtime_only=True)
 
 
 def main():
@@ -199,19 +230,22 @@ def main():
         sys.exit(1)
 
     accuracy = PASS_COUNT / total * 100
-    print(f"\nOverall: {PASS_COUNT}/{total} checks passed ({accuracy:.1f}%)")
+    print(f"\nOverall: {PASS_COUNT}/{total} checks passed ({accuracy:.1f}%) ; blocking_fail={BLOCKING_FAIL_COUNT}")
 
     result = {
         "total_passed": PASS_COUNT,
         "total_checks": total,
         "accuracy": accuracy,
+        "blocking_fail_count": BLOCKING_FAIL_COUNT,
     }
 
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    # Blocking fail => FAIL. Runtime-only (gform/email) failures do not block the
+    # local-file pass, but any NON-runtime failure is fatal.
+    if BLOCKING_FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

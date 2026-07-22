@@ -4,4 +4,4 @@ Create an Excel file called HR_Manager_Report.xlsx with two sheets. The "Manager
 
 The "Summary" should have Total_Employees, Total_High_Performers, and Best_Dept with highest high performer percentage.
 
-Create a Notion page titled "HR Department Performance Report" summarizing the findings.
+Create a page in the team knowledge base titled "HR Department Performance Report" summarizing the findings.

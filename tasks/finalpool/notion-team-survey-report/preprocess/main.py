@@ -15,7 +15,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -160,11 +160,10 @@ def inject_form_and_responses(cur):
             q,
         )
 
-    # 10 survey responses
+    # 8 survey responses (per task.md spec)
     # Alice: 4,3,5,4 | Bob: 3,4,3,3 | Carol: 5,2,4,5 | David: 3,3,3,2
     # Eva: 4,4,4,4 | Frank: 2,5,3,3 | Grace: 4,3,4,4 | Henry: 3,4,3,3
-    # Irene: 4,3,4,4 | Jack: 3,4,3,3
-    # Averages: Leadership=3.5, Workload=3.5, Communication=3.6, Growth=3.5
+    # Averages: Leadership=3.5, Workload=3.5, Communication=3.625, Growth=3.5
     responses = [
         ("Alice",  "4", "3", "5", "4"),
         ("Bob",    "3", "4", "3", "3"),
@@ -174,8 +173,6 @@ def inject_form_and_responses(cur):
         ("Frank",  "2", "5", "3", "3"),
         ("Grace",  "4", "3", "4", "4"),
         ("Henry",  "3", "4", "3", "3"),
-        ("Irene",  "4", "3", "4", "4"),
-        ("Jack",   "3", "4", "3", "3"),
     ]
 
     for name, leadership, workload, communication, growth in responses:

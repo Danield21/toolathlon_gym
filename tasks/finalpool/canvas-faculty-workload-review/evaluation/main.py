@@ -104,25 +104,53 @@ def check_excel(agent_workspace):
             check(f"Column '{col}' present", any(col in h for h in header_lower),
                   f"Header: {header}")
 
-        # Spot-check Dr. Andrew Walker (3 courses, 2728 students)
-        for row in data_rows:
-            if row and row[0] and "andrew walker" in str(row[0]).lower():
-                check("Dr. Walker courses=3", num_close(row[1], 3), f"Got {row[1]}")
-                check("Dr. Walker total_students=2728", num_close(row[2], 2728, 10), f"Got {row[2]}")
-                # Weekly hours = 2728 * 0.5 / 16 = 85.25 -> overloaded
-                check("Dr. Walker marked overloaded",
-                      str(row[-1]).strip().lower() in ("yes", "y", "true"),
-                      f"Got {row[-1]}")
-                break
+        # Build column-index map
+        def col_idx(target):
+            for i, h in enumerate(header_lower):
+                if target in h:
+                    return i
+            return None
 
-        # Check someone who is NOT overloaded (Dr. Abigail Martin: 1 course, 365 students)
-        for row in data_rows:
-            if row and row[0] and "abigail martin" in str(row[0]).lower():
-                check("Dr. Martin courses=1", num_close(row[1], 1), f"Got {row[1]}")
-                check("Dr. Martin NOT overloaded",
-                      str(row[-1]).strip().lower() in ("no", "n", "false"),
-                      f"Got {row[-1]}")
-                break
+        i_instr = col_idx("instructor")
+        i_courses = col_idx("courses_count") if col_idx("courses_count") is not None else col_idx("course")
+        i_students = col_idx("total_students") if col_idx("total_students") is not None else col_idx("student")
+        i_overload = col_idx("overloaded") if col_idx("overloaded") is not None else (len(header_lower) - 1)
+
+        # Build agent map: instructor_name -> row data
+        agent_map = {}
+        if i_instr is not None:
+            for row in data_rows:
+                if row and i_instr < len(row) and row[i_instr]:
+                    agent_map[str(row[i_instr]).strip().lower()] = row
+
+        # Validate EVERY expected instructor (not just 2 spot checks)
+        for inst_row in expected:
+            instr_name, courses_count, total_students, total_assignments, est_hrs = inst_row
+            key = str(instr_name).strip().lower()
+            actual_row = agent_map.get(key)
+            if actual_row is None:
+                check(f"Instructor '{instr_name}' present", False,
+                      f"agent rows: {list(agent_map.keys())[:10]}")
+                continue
+            check(f"Instructor '{instr_name}' present", True)
+            # courses_count
+            if i_courses is not None and i_courses < len(actual_row):
+                check(f"'{instr_name}' courses_count == {courses_count}",
+                      num_close(actual_row[i_courses], courses_count, 0),
+                      f"Got {actual_row[i_courses]}")
+            # total_students
+            if i_students is not None and i_students < len(actual_row):
+                check(f"'{instr_name}' total_students == {total_students}",
+                      num_close(actual_row[i_students], total_students, 5),
+                      f"Got {actual_row[i_students]}")
+            # overloaded computed
+            weekly_hours = float(total_students) * 0.5 / 16
+            expected_overloaded = (courses_count > 4) or (weekly_hours > 40)
+            if i_overload is not None and i_overload < len(actual_row):
+                actual_y = str(actual_row[i_overload]).strip().lower() in ("yes", "y", "true", "1")
+                check(f"'{instr_name}' overloaded_yn == {'Yes' if expected_overloaded else 'No'}",
+                      actual_y == expected_overloaded,
+                      f"Got '{actual_row[i_overload]}'; weekly_hours={weekly_hours:.1f}")
 
     # Department Summary sheet
     ds_rows = load_sheet_rows(wb, "Department Summary")
@@ -131,8 +159,16 @@ def check_excel(agent_workspace):
     else:
         check("Sheet 'Department Summary' exists", True)
         data_rows = ds_rows[1:] if len(ds_rows) > 1 else []
-        check("Department Summary has 7 departments", len(data_rows) == 7,
+        # Department aggregation depends on subject-area derivation; allow 5-9 range
+        check("Department Summary has 5-9 departments (subject area)",
+              5 <= len(data_rows) <= 9,
               f"Found {len(data_rows)}")
+        # Verify required columns
+        if ds_rows:
+            ds_header = [str(h).lower().replace(" ", "_") if h else "" for h in ds_rows[0]]
+            for col in ["department", "instructor_count", "course_count", "total_students"]:
+                check(f"Department Summary has '{col}'",
+                      any(col in h for h in ds_header), f"Got: {ds_rows[0]}")
 
 
 def check_pptx(agent_workspace):

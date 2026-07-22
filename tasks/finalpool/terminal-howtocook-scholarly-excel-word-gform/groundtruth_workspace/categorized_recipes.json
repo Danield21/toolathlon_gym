@@ -1,0 +1,20 @@
+{
+  "meat": [
+    {"name": "宫保鸡丁", "difficulty": 3},
+    {"name": "红烧肉", "difficulty": 3},
+    {"name": "可乐鸡翅", "difficulty": 2}
+  ],
+  "vegetable": [
+    {"name": "凉拌金针菇", "difficulty": 1},
+    {"name": "蒜蓉西兰花", "difficulty": 2},
+    {"name": "麻婆豆腐", "difficulty": 2}
+  ],
+  "soup": [
+    {"name": "奶油蘑菇汤", "difficulty": 2},
+    {"name": "番茄鸡蛋汤", "difficulty": 1}
+  ],
+  "staple": [
+    {"name": "炒年糕", "difficulty": 2},
+    {"name": "扬州炒饭", "difficulty": 2}
+  ]
+}

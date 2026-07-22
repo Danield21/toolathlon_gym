@@ -18,25 +18,71 @@ DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolath
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
-TOP_PERFORMERS = [
-    ("Engineering", 721, 59150.56, 8.35),
-    ("Finance",     721, 58641.91, 8.29),
-    ("HR",          740, 57240.73, 8.79),
-    ("Operations",  687, 57575.52, 8.60),
-    ("R&D",         693, 56086.53, 8.38),
-    ("Sales",       694, 59193.14, 7.77),
-    ("Support",     752, 59869.03, 8.09),
-]
 
-UNDERPERFORMERS = [
-    ("Engineering", 1381, 59347.28, 8.35),
-    ("Finance",     1387, 59698.81, 8.29),
-    ("HR",          1425, 59741.41, 8.15),
-    ("Operations",  1431, 57394.68, 8.49),
-    ("R&D",         1415, 57839.57, 8.06),
-    ("Sales",       1494, 58111.22, 8.54),
-    ("Support",     1479, 58491.37, 8.04),
-]
+def _derive_expected_from_db():
+    """Derive expected stats from Snowflake at runtime (eliminates drift risk).
+
+    Returns: (top_list, low_list, totals) where
+      top_list: [(dept, count, avg_salary, avg_exp), ...] sorted by dept
+      low_list: [(dept, count, avg_salary, avg_exp), ...] sorted by dept
+      totals:   (total_top, total_low, overall_avg)
+    """
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT "DEPARTMENT",
+                   SUM(CASE WHEN "PERFORMANCE_RATING" = 5 THEN 1 ELSE 0 END) AS top_count,
+                   AVG(CASE WHEN "PERFORMANCE_RATING" = 5 THEN "SALARY" END) AS top_avg_sal,
+                   AVG(CASE WHEN "PERFORMANCE_RATING" = 5 THEN "YEARS_EXPERIENCE" END) AS top_avg_exp,
+                   SUM(CASE WHEN "PERFORMANCE_RATING" IN (1,2) THEN 1 ELSE 0 END) AS low_count,
+                   AVG(CASE WHEN "PERFORMANCE_RATING" IN (1,2) THEN "SALARY" END) AS low_avg_sal,
+                   AVG(CASE WHEN "PERFORMANCE_RATING" IN (1,2) THEN "YEARS_EXPERIENCE" END) AS low_avg_exp
+            FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES"
+            GROUP BY "DEPARTMENT"
+            ORDER BY "DEPARTMENT"
+        ''')
+        rows = cur.fetchall()
+        top_list = [(r[0], int(r[1]), round(float(r[2]), 2), round(float(r[3]), 2)) for r in rows]
+        low_list = [(r[0], int(r[4]), round(float(r[5]), 2), round(float(r[6]), 2)) for r in rows]
+
+        cur.execute('''
+            SELECT SUM(CASE WHEN "PERFORMANCE_RATING" = 5 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN "PERFORMANCE_RATING" IN (1,2) THEN 1 ELSE 0 END),
+                   AVG("PERFORMANCE_RATING"::numeric)
+            FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES"
+        ''')
+        t = cur.fetchone()
+        totals = (int(t[0]), int(t[1]), round(float(t[2]), 2))
+        cur.close()
+        conn.close()
+        return top_list, low_list, totals
+    except Exception as e:
+        print(f"[WARN] Could not derive expected stats from DB: {e}; using hard-coded fallback")
+        # Fallback to hard-coded baseline (matches original frozen snapshot)
+        top_list = [
+            ("Engineering", 721, 59150.56, 8.35),
+            ("Finance",     721, 58641.91, 8.29),
+            ("HR",          740, 57240.73, 8.79),
+            ("Operations",  687, 57575.52, 8.60),
+            ("R&D",         693, 56086.53, 8.38),
+            ("Sales",       694, 59193.14, 7.77),
+            ("Support",     752, 59869.03, 8.09),
+        ]
+        low_list = [
+            ("Engineering", 1381, 59347.28, 8.35),
+            ("Finance",     1387, 59698.81, 8.29),
+            ("HR",          1425, 59741.41, 8.15),
+            ("Operations",  1431, 57394.68, 8.49),
+            ("R&D",         1415, 57839.57, 8.06),
+            ("Sales",       1494, 58111.22, 8.54),
+            ("Support",     1479, 58491.37, 8.04),
+        ]
+        return top_list, low_list, (5008, 10012, 3.20)
+
+
+TOP_PERFORMERS, UNDERPERFORMERS, TOTALS = _derive_expected_from_db()
+TOTAL_TOP, TOTAL_LOW, OVERALL_AVG = TOTALS
 
 
 def check(name, condition, detail=""):
@@ -101,14 +147,20 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 check(f"Top '{gt_dept}' present", False, "Missing")
                 all_ok = False
                 continue
-            ok_cnt = num_close(a_row[1], gt_cnt, 5)
+            ok_cnt = num_close(a_row[1], gt_cnt, 1)
             check(f"Top '{gt_dept}' Count_Rating_5", ok_cnt, f"Expected {gt_cnt}, got {a_row[1]}")
             if not ok_cnt:
                 all_ok = False
-            ok_sal = num_close(a_row[2], gt_sal, 500)
+            ok_sal = num_close(a_row[2], gt_sal, 1.0)
             check(f"Top '{gt_dept}' Avg_Salary_Top", ok_sal, f"Expected {gt_sal}, got {a_row[2]}")
             if not ok_sal:
                 all_ok = False
+            # Validate Avg_Experience_Top column too (was missing!)
+            if len(a_row) > 3:
+                ok_exp = num_close(a_row[3], gt_exp, 0.05)
+                check(f"Top '{gt_dept}' Avg_Experience_Top", ok_exp, f"Expected {gt_exp}, got {a_row[3]}")
+                if not ok_exp:
+                    all_ok = False
 
     # Check Underperformers sheet
     agent_low = get_sheet(agent_wb, "Underperformers")
@@ -129,10 +181,22 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 check(f"Low '{gt_dept}' present", False, "Missing")
                 all_ok = False
                 continue
-            ok_cnt = num_close(a_row[1], gt_cnt, 10)
+            ok_cnt = num_close(a_row[1], gt_cnt, 1)
             check(f"Low '{gt_dept}' Count_Low_Rating", ok_cnt, f"Expected {gt_cnt}, got {a_row[1]}")
             if not ok_cnt:
                 all_ok = False
+            # Validate Avg_Salary_Low (was missing!)
+            if len(a_row) > 2:
+                ok_sal = num_close(a_row[2], gt_sal, 1.0)
+                check(f"Low '{gt_dept}' Avg_Salary_Low", ok_sal, f"Expected {gt_sal}, got {a_row[2]}")
+                if not ok_sal:
+                    all_ok = False
+            # Validate Avg_Experience_Low (was missing!)
+            if len(a_row) > 3:
+                ok_exp = num_close(a_row[3], gt_exp, 0.05)
+                check(f"Low '{gt_dept}' Avg_Experience_Low", ok_exp, f"Expected {gt_exp}, got {a_row[3]}")
+                if not ok_exp:
+                    all_ok = False
 
     # Check Summary sheet
     agent_sum = get_sheet(agent_wb, "Summary")
@@ -146,11 +210,11 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 a_summary[str(row[0]).strip().lower()] = row[1]
 
         ttp = a_summary.get("total_top_performers")
-        check("Total_Top_Performers = 5008", num_close(ttp, 5008, 20), f"Got {ttp}")
+        check(f"Total_Top_Performers = {TOTAL_TOP}", num_close(ttp, TOTAL_TOP, 1), f"Got {ttp}")
         tup = a_summary.get("total_underperformers")
-        check("Total_Underperformers = 10012", num_close(tup, 10012, 40), f"Got {tup}")
+        check(f"Total_Underperformers = {TOTAL_LOW}", num_close(tup, TOTAL_LOW, 1), f"Got {tup}")
         oar = a_summary.get("overall_avg_rating")
-        check("Overall_Avg_Rating close to 3.20", num_close(oar, 3.20, 0.1), f"Got {oar}")
+        check(f"Overall_Avg_Rating close to {OVERALL_AVG}", num_close(oar, OVERALL_AVG, 0.02), f"Got {oar}")
 
     return all_ok
 
@@ -159,7 +223,7 @@ def check_gcal(launch_time_str):
     print("\n=== Checking Google Calendar ===")
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
-    cur.execute("SELECT summary, description, start_datetime FROM gcal.events ORDER BY start_datetime")
+    cur.execute("SELECT summary, description, start_datetime, end_datetime FROM gcal.events ORDER BY start_datetime")
     events = cur.fetchall()
     cur.close()
     conn.close()
@@ -180,8 +244,15 @@ def check_gcal(launch_time_str):
                 if ev[2]:
                     ev_dt = ev[2]
                     diff = abs((ev_dt.replace(tzinfo=None) - expected_dt).total_seconds())
-                    check("Board meeting 21 days from launch", diff <= 86400 * 2,
+                    # Tighter tolerance: 1 hour
+                    check("Board meeting 21 days from launch (within 1h)", diff <= 3600,
                           f"Expected around {expected_dt}, got {ev_dt}")
+                    # Validate duration == 2 hours
+                    if ev[3]:
+                        duration_sec = (ev[3].replace(tzinfo=None) - ev[2].replace(tzinfo=None)).total_seconds()
+                        check("Event duration is 2 hours",
+                              abs(duration_sec - 7200) <= 60,
+                              f"duration: {duration_sec}s")
                     break
         except Exception as e:
             print(f"  [INFO] Could not verify date: {e}")
@@ -213,9 +284,22 @@ def check_email():
         check("Email from hr@company.example.com",
               "hr@company.example.com" in (e[1] or "").lower(), f"from: {e[1]}")
         body = (e[3] or "").lower()
-        check("Email body mentions performance data",
-              any(kw in body for kw in ["5008", "10012", "3.20", "top", "performer", "underperform"]),
-              "Body missing key data")
+        # Require BOTH totals (the explicit counts requested by task)
+        top_str = str(TOTAL_TOP)
+        top_str_c = f"{TOTAL_TOP:,}"
+        low_str = str(TOTAL_LOW)
+        low_str_c = f"{TOTAL_LOW:,}"
+        check(f"Email body contains Total_Top_Performers count {TOTAL_TOP}",
+              top_str in body or top_str_c in body,
+              f"Body excerpt: {body[:200]}")
+        check(f"Email body contains Total_Underperformers count {TOTAL_LOW}",
+              low_str in body or low_str_c in body,
+              f"Body excerpt: {body[:200]}")
+        avg_str = f"{OVERALL_AVG:.2f}"
+        avg_str_short = f"{OVERALL_AVG:.1f}"
+        check("Email body mentions overall average rating",
+              avg_str in body or avg_str_short in body or "average rating" in body,
+              "Body missing avg rating")
 
 
 def main():

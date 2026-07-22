@@ -151,23 +151,34 @@ def check_excel(agent_workspace, expected):
     # Low_Stock_Products checks
     ws2 = get_sheet(wb, "Low_Stock_Products")
     if ws2 and expected:
+        headers = [str(c.value).strip().lower() if c.value else "" for c in ws2[1]]
+        def find_col(keywords):
+            for i, h in enumerate(headers):
+                if any(k in h for k in keywords):
+                    return i
+            return None
+        sku_col = find_col(["sku"])
+        stock_col = find_col(["stock"])
+        sales_col = find_col(["sales", "total_sales"])
         agent_rows = list(ws2.iter_rows(min_row=2, values_only=True))
         exp = expected["low_stock"]
         check("Low_Stock_Products row count", len(agent_rows) == len(exp),
               f"Expected {len(exp)}, got {len(agent_rows)}")
 
         # Check sort order by stock ascending
-        stocks = [r[2] for r in agent_rows if r and r[2] is not None]
-        if len(stocks) >= 2:
-            check("Low_Stock sorted by Stock_Quantity ascending",
-                  all(stocks[i] <= stocks[i + 1] for i in range(len(stocks) - 1)),
-                  f"Stock values: {stocks[:5]}")
+        if stock_col is not None:
+            stocks = [r[stock_col] for r in agent_rows if r and r[stock_col] is not None]
+            if len(stocks) >= 2:
+                check("Low_Stock sorted by Stock_Quantity ascending",
+                      all(stocks[i] <= stocks[i + 1] for i in range(len(stocks) - 1)),
+                      f"Stock values: {stocks[:5]}")
 
         # Spot check a few rows by SKU
         agent_by_sku = {}
-        for row in agent_rows:
-            if row and len(row) >= 4 and row[1]:
-                agent_by_sku[str(row[1]).strip()] = row
+        if sku_col is not None:
+            for row in agent_rows:
+                if row and len(row) > sku_col and row[sku_col]:
+                    agent_by_sku[str(row[sku_col]).strip()] = row
 
         checked = 0
         for exp_row in exp:
@@ -175,13 +186,13 @@ def check_excel(agent_workspace, expected):
                 break
             sku = exp_row[1]
             agent_row = agent_by_sku.get(sku)
-            if agent_row:
+            if agent_row and stock_col is not None and sales_col is not None:
                 check(f"SKU '{sku}' Stock_Quantity",
-                      num_close(agent_row[2], exp_row[2], 0),
-                      f"Expected {exp_row[2]}, got {agent_row[2]}")
+                      num_close(agent_row[stock_col], exp_row[2], 0),
+                      f"Expected {exp_row[2]}, got {agent_row[stock_col]}")
                 check(f"SKU '{sku}' Total_Sales",
-                      num_close(agent_row[3], exp_row[3], 1),
-                      f"Expected {exp_row[3]}, got {agent_row[3]}")
+                      num_close(agent_row[sales_col], exp_row[3], 1),
+                      f"Expected {exp_row[3]}, got {agent_row[sales_col]}")
                 checked += 1
 
 
@@ -215,10 +226,17 @@ def check_calendar():
                       "2026-03-10" in dt_str,
                       f"Got start: {dt_str}")
 
-            # Check description mentions low stock products
-            desc = str(ev[3] or "")
+            # Check description mentions low stock products (ev[1] is description)
+            desc = str(ev[1] or "")
             check("Event description is not empty", len(desc) > 10,
                   f"Description length: {len(desc)}")
+            # Also assert description mentions low/restock context
+            desc_lower = desc.lower()
+            check(
+                "Event description references low-stock context",
+                any(kw in desc_lower for kw in ("low stock", "restock", "low-stock", "reorder")),
+                f"Description: {desc[:120]}",
+            )
             break
 
     if not found_meeting:

@@ -46,6 +46,13 @@ def int_close(a, b, tol=5):
         return False
 
 
+def num_close_rel(a, b, rel=0.05, abs_tol=2):
+    try:
+        return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel)
+    except (TypeError, ValueError):
+        return False
+
+
 def check_excel(agent_workspace, groundtruth_workspace):
     """Check Late_Submissions.xlsx."""
     print("\n=== Checking Excel Output ===")
@@ -112,7 +119,7 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 record(f"Course '{gt_row[0]}' present", False, "Missing")
                 all_ok = False
             else:
-                ok = int_close(a_row[1], gt_row[1], 50) and int_close(a_row[2], gt_row[2], 20)
+                ok = num_close_rel(a_row[1], gt_row[1], rel=0.02, abs_tol=2) and num_close_rel(a_row[2], gt_row[2], rel=0.02, abs_tol=2)
                 record(f"Course '{gt_row[0]}' data", ok,
                        f"Late: {a_row[1]} vs {gt_row[1]}, Students: {a_row[2]} vs {gt_row[2]}")
                 if not ok:
@@ -130,7 +137,7 @@ def check_excel(agent_workspace, groundtruth_workspace):
         agent_rows2 = list(agent_ws2.iter_rows(min_row=2, values_only=True))
         gt_rows2 = list(gt_ws2.iter_rows(min_row=2, values_only=True))
 
-        record("Top Offenders has ~10 rows", 8 <= len(agent_rows2) <= 12,
+        record("Top Offenders has 10 rows", len(agent_rows2) == 10,
                f"Got {len(agent_rows2)}")
 
         # Check top 3 offenders
@@ -160,7 +167,7 @@ def check_gcal():
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
-    cur.execute("SELECT summary, description FROM gcal.events ORDER BY summary")
+    cur.execute("SELECT summary, description, start_datetime, end_datetime FROM gcal.events ORDER BY summary")
     events = cur.fetchall()
     cur.close()
     conn.close()
@@ -168,11 +175,11 @@ def check_gcal():
     print(f"  Found {len(events)} calendar events")
 
     # Should have at least some review meetings (22 courses with late submissions)
-    record("At least 10 calendar events created", len(events) >= 10,
+    record("At least 22 calendar events created", len(events) >= 22,
            f"Found {len(events)}")
 
     review_events = [e for e in events if "review meeting" in (e[0] or "").lower()]
-    record("Review Meeting events found", len(review_events) >= 10,
+    record("Review Meeting events count >= 22 (one per course)", len(review_events) >= 22,
            f"Found {len(review_events)} review meeting events")
 
     # Check that top 3 courses are represented
@@ -186,7 +193,19 @@ def check_gcal():
         found = any(course.lower() in (e[0] or "").lower() for e in events)
         record(f"Calendar event for '{course[:40]}...'", found)
 
-    return len(review_events) >= 10
+    # Verify date and time on at least one review event
+    correct_time = 0
+    for summary, desc, start_dt, end_dt in review_events:
+        if start_dt is None:
+            continue
+        s = str(start_dt)
+        if "2026-03-13" in s and "10:00" in s:
+            correct_time += 1
+    record("Review events scheduled on 2026-03-13 at 10:00",
+           correct_time >= max(1, len(review_events) // 2),
+           f"Found {correct_time}/{len(review_events)} with correct datetime")
+
+    return len(review_events) >= 22
 
 
 def check_emails():
@@ -233,6 +252,14 @@ def main():
     gt_dir = args.groundtruth_workspace or os.path.join(task_root, "groundtruth_workspace")
 
     excel_ok = check_excel(args.agent_workspace, gt_dir)
+    try:
+        check_gcal()
+    except Exception as e:
+        record("check_gcal ran without DB error", False, str(e))
+    try:
+        check_emails()
+    except Exception as e:
+        record("check_emails ran without DB error", False, str(e))
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

@@ -3,6 +3,20 @@ import os
 import argparse, json, os, sys
 import openpyxl
 
+# --- verify_v2 smart primitives ---
+_EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
+_PACK_ROOT = os.path.abspath(os.path.join(_EVAL_DIR, "..", "..", "..", ".."))
+if _PACK_ROOT not in sys.path:
+    sys.path.insert(0, _PACK_ROOT)
+try:
+    from utils.verify_v2 import smart_column_exists
+    from utils.verify_v2.eval_helpers import get_sheet_rows_as_dicts, get_gt_column_values
+    _HAS_VERIFY_V2 = True
+except Exception:
+    _HAS_VERIFY_V2 = False
+
+TASK_NAME = "fetch-email-gcal-scheduler-excel-word"
+
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
@@ -12,6 +26,7 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+_AGENT_DATA_ITEMS = []
 
 def check(name, condition, detail=""):
     global PASS_COUNT, FAIL_COUNT
@@ -48,17 +63,62 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         gt_path = os.path.join(groundtruth_workspace, "Scheduler_Report.xlsx")
         gt_wb = openpyxl.load_workbook(gt_path) if os.path.exists(gt_path) else None
 
+        def check_columns(sheet_name, expected_cols, min_rows):
+            """Verify sheet exists, >= min_rows, contains required columns.
+            Uses LLM semantic mapping via verify_v2, falls back to strict
+            header match."""
+            check(f"{sheet_name} sheet exists", sheet_name in wb.sheetnames)
+            if sheet_name not in wb.sheetnames:
+                return
+            _ws = wb[sheet_name]
+            _data_rows = list(_ws.iter_rows(min_row=2, values_only=True))
+            check(f"{sheet_name} has >= {min_rows} rows",
+                  len(_data_rows) >= min_rows, f"got {len(_data_rows)}")
+            if _HAS_VERIFY_V2 and gt_wb is not None:
+                _raw_headers, _agent_rows = get_sheet_rows_as_dicts(wb, sheet_name)
+                for _exp in expected_cols:
+                    _gt_vals = get_gt_column_values(gt_wb, sheet_name, _exp)
+                    _ok, _matched, _reason = smart_column_exists(
+                        expected_col=_exp, agent_headers=_raw_headers,
+                        gt_samples=_gt_vals[:3], agent_rows=_agent_rows,
+                        task_name=TASK_NAME,
+                    )
+                    _detail = _reason
+                    if _ok and _matched and _matched.lower() != _exp.lower():
+                        _detail = f"LLM-mapped to {_matched!r}"
+                    check(f"{sheet_name} has {_exp} column", _ok, _detail)
+            else:
+                _headers = [str(c.value).strip().lower() if c.value else "" for c in _ws[1]]
+                for _exp in expected_cols:
+                    check(f"{sheet_name} has {_exp} column",
+                          _exp.lower() in _headers, f"headers: {_headers[:8]}")
+
         check("Data_Analysis sheet exists", "Data_Analysis" in wb.sheetnames)
         if "Data_Analysis" in wb.sheetnames:
             ws = wb["Data_Analysis"]
             data_rows = list(ws.iter_rows(min_row=2, values_only=True))
             check("Data_Analysis has >= 2 rows", len(data_rows) >= 2, f"got {len(data_rows)}")
 
-            # Check headers
-            headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-            for expected_col in ['Item', 'Internal_Value', 'External_Benchmark', 'Gap']:
-                check(f"Data_Analysis has {expected_col} column",
-                      expected_col.lower() in headers, f"headers: {headers[:8]}")
+            check_columns('Data_Analysis', ['Item', 'Internal_Value', 'External_Benchmark', 'Gap'], 2)
+
+            # Value-level: at least ceil(50%) of GT items must appear in agent rows
+            agent_items_set = set()
+            if gt_wb is not None and "Data_Analysis" in gt_wb.sheetnames:
+                try:
+                    gt_ws = gt_wb["Data_Analysis"]
+                    gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
+                    gt_items = {str(r[0]).strip().lower() for r in gt_rows if r and r[0]}
+                    agent_items_set = {str(r[0]).strip().lower() for r in data_rows if r and r[0]}
+                    overlap = gt_items & agent_items_set
+                    # Require at least 50% of GT items to be in agent (rounded up).
+                    required = max(1, (len(gt_items) + 1) // 2)
+                    check(f"Data_Analysis Item values overlap GT (>= {required} of {len(gt_items)})",
+                          len(overlap) >= required, f"overlap={overlap}, gt={gt_items}")
+                except Exception as _e:
+                    check("Data_Analysis Item value-check", False, str(_e))
+            # Stash agent items list for email body verification later
+            global _AGENT_DATA_ITEMS
+            _AGENT_DATA_ITEMS = list(agent_items_set)
 
         check("Metrics sheet exists", "Metrics" in wb.sheetnames)
         if "Metrics" in wb.sheetnames:
@@ -66,57 +126,82 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
             data_rows = list(ws.iter_rows(min_row=2, values_only=True))
             check("Metrics has >= 2 rows", len(data_rows) >= 2, f"got {len(data_rows)}")
 
-            # Check headers
-            headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-            for expected_col in ['Metric', 'Value']:
-                check(f"Metrics has {expected_col} column",
-                      expected_col.lower() in headers, f"headers: {headers[:8]}")
-
+            check_columns('Metrics', ['Metric', 'Value'], 2)
         check("Recommendations sheet exists", "Recommendations" in wb.sheetnames)
         if "Recommendations" in wb.sheetnames:
             ws = wb["Recommendations"]
             data_rows = list(ws.iter_rows(min_row=2, values_only=True))
             check("Recommendations has >= 1 rows", len(data_rows) >= 1, f"got {len(data_rows)}")
 
-            # Check headers
-            headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-            for expected_col in ['Priority', 'Action']:
-                check(f"Recommendations has {expected_col} column",
-                      expected_col.lower() in headers, f"headers: {headers[:8]}")
+            check_columns('Recommendations', ['Priority', 'Action'], 1)
 
+    # NOTE: email/gcal/Word checks moved OUT of the `if excel exists` block (was a structural bug).
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        # Tightened: require recipient team-lead@company.com
+        cur.execute(
+            """SELECT subject, to_addr, body_text FROM email.messages
+               WHERE (to_addr::text ILIKE %s)
+                 AND (subject ILIKE %s OR subject ILIKE %s)""",
+            ('%team-lead@company.com%', '%analysis%', '%report%'))
+        emails = cur.fetchall()
+        check("Analysis email sent to team-lead@company.com",
+              len(emails) >= 1, f"found {len(emails)} matching emails")
+        # Tightened: body should mention at least one of the Data_Analysis items.
+        if emails and _AGENT_DATA_ITEMS:
+            body_combined = " ".join((e[2] or "").lower() for e in emails)
+            mentioned = [it for it in _AGENT_DATA_ITEMS if it and it in body_combined]
+            check("Email body mentions at least one Data_Analysis Item",
+                  len(mentioned) >= 1,
+                  f"items checked: {_AGENT_DATA_ITEMS[:5]}")
+        conn.close()
+    except Exception as e:
+        check("Email check", False, str(e))
+
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        # Tightened: require summary 'Analysis Review' AND date 2026-03-14 14:00 UTC.
+        cur.execute(
+            """SELECT summary, start_datetime FROM gcal.events
+               WHERE summary ILIKE %s
+                 AND start_datetime::date = '2026-03-14'
+                 AND EXTRACT(hour FROM start_datetime AT TIME ZONE 'UTC') = 14""",
+            ('%analysis review%',))
+        events = cur.fetchall()
+        check("'Analysis Review' event on 2026-03-14 14:00 UTC created",
+              len(events) >= 1, f"found {len(events)} matching events")
+        conn.close()
+    except Exception as e:
+        check("Calendar check", False, str(e))
+
+    # Check Word document
+    import glob as globmod
+    word_files = globmod.glob(os.path.join(agent_workspace, "*.docx"))
+    check("Word document exists", len(word_files) >= 1, f"found {len(word_files)} docx files")
+    if word_files:
+        from docx import Document
+        doc = Document(word_files[0])
+        text = " ".join(p.text for p in doc.paragraphs).lower()
+        check("Word has content (>=200 chars)", len(text) >= 200, f"text length: {len(text)}")
+        has_findings = any(kw in text for kw in ['finding', 'summary', 'analysis', 'overview'])
+        has_recs = any(kw in text for kw in ['recommendation', 'action', 'priority', 'next step'])
+        check("Word has summary/findings section", has_findings, f"text head: {text[:200]}")
+        check("Word has recommendations/action section", has_recs, f"text head: {text[:200]}")
+
+    proc_path = os.path.join(agent_workspace, "email_scheduler_processor.py")
+    check("email_scheduler_processor.py exists", os.path.exists(proc_path))
+    if os.path.exists(proc_path):
         try:
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT subject FROM email.messages WHERE subject ILIKE %s OR subject ILIKE %s",
-                        ('%report%', '%analysis%'))
-            emails = cur.fetchall()
-            check("Analysis email sent", len(emails) >= 1, f"found {len(emails)} matching emails")
-            conn.close()
-        except Exception as e:
-            check("Email check", False, str(e))
-
-        try:
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT summary FROM gcal.events WHERE summary ILIKE %s OR summary ILIKE %s",
-                        ('%review%', '%meeting%'))
-            events = cur.fetchall()
-            check("Review event created", len(events) >= 1, f"found {len(events)} events")
-            conn.close()
-        except Exception as e:
-            check("Calendar check", False, str(e))
-
-        # Check Word document
-        import glob as globmod
-        word_files = globmod.glob(os.path.join(agent_workspace, "*.docx"))
-        check("Word document exists", len(word_files) >= 1, f"found {len(word_files)} docx files")
-        if word_files:
-            from docx import Document
-            doc = Document(word_files[0])
-            text = " ".join(p.text for p in doc.paragraphs).lower()
-            check("Word has content", len(text) > 50, f"text length: {len(text)}")
-
-        check("email_scheduler_processor.py exists", os.path.exists(os.path.join(agent_workspace, "email_scheduler_processor.py")))
+            with open(proc_path, "r", encoding="utf-8", errors="ignore") as _pf:
+                _proc_content = _pf.read()
+            # Tightened: must be non-trivial - >200 bytes AND contains 'import'
+            check("email_scheduler_processor.py is non-trivial (>200 bytes + has import)",
+                  len(_proc_content) >= 200 and "import" in _proc_content,
+                  f"size={len(_proc_content)}, has import={'import' in _proc_content}")
+        except Exception as _e:
+            check("email_scheduler_processor.py readable", False, str(_e))
 
 
     return FAIL_COUNT == 0, f"Passed {PASS_COUNT}/{PASS_COUNT + FAIL_COUNT} checks"

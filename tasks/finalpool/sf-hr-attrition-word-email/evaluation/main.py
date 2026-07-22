@@ -127,7 +127,10 @@ def check_word_doc(agent_workspace, groundtruth_workspace):
     check("Summary mentions total employees", has_total)
 
     flight_count = str(summary_dict.get("Flight Risk Count", ""))
-    has_flight = flight_count in full_text or str(int(flight_count)) in full_text.replace(",", "") if flight_count else False
+    if flight_count:
+        has_flight = (flight_count in full_text) or (str(int(flight_count)) in full_text.replace(",", ""))
+    else:
+        has_flight = False
     check("Summary mentions flight risk count", has_flight)
 
     return True
@@ -159,14 +162,19 @@ def check_email():
           f"Found {len(emails)} messages, {len(sent)} sent_log")
 
     if all_msgs:
-        found_attrition = any("attrition" in str(m[0] or "").lower() or "risk" in str(m[0] or "").lower()
-                             for m in all_msgs)
-        check("Email subject mentions attrition or risk", found_attrition,
-              f"Subjects: {[m[0] for m in all_msgs[:5]]}")
-
-        found_recipient = any("hr-director" in str(m[2] or "").lower()
-                             for m in all_msgs)
-        check("Email sent to hr-director", found_recipient)
+        # Require SAME email to have BOTH attrition/risk subject AND hr-director recipient
+        matching_email = None
+        for m in all_msgs:
+            subj = str(m[0] or "").lower()
+            to_a = str(m[2] or "").lower()
+            has_subj = ("attrition" in subj or "flight risk" in subj or "risk" in subj)
+            has_to = "hr-director" in to_a
+            if has_subj and has_to:
+                matching_email = m
+                break
+        check("Email with attrition subject AND hr-director recipient",
+              matching_email is not None,
+              f"No matching email: subjects={[m[0] for m in all_msgs[:5]]}")
 
 
 def main():

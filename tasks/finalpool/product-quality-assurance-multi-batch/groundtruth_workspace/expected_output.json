@@ -1,4 +1,7 @@
 {
   "status": "completed",
-  "records_processed": 0
+  "deliverables": [
+    "Quality_Report.xlsx",
+    "QA_Recommendations.docx"
+  ]
 }

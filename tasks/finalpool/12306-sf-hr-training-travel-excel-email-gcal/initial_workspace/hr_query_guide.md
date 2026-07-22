@@ -1,8 +1,8 @@
 This guide explains how to query the HR data warehouse to identify training candidates and plan their travel.
 
 Employee Selection Criteria:
-Query the HR_ANALYTICS.PUBLIC.EMPLOYEES table in the data warehouse.
-Filter for employees where DEPARTMENT is in Sales or Marketing.
+Query the employees table in the data warehouse.
+Filter for employees where the department is in Sales or Marketing.
 Filter for employees where YEARS_EXPERIENCE is 3 or greater.
 Limit the results to 5 employees maximum.
 Note each employee ID, name, department, years of experience, and salary for the report.
@@ -26,4 +26,4 @@ The travel report should contain three sections:
 Budget Calculation:
 Multiply the number of employees by the ticket price for each direction to get the subtotal.
 The grand total is the sum of outbound and return subtotals.
-Second-class seat price between Beijing and Shanghai is 553 CNY per ticket.
+Use the second-class seat price returned by the rail ticketing system for the selected trains.

@@ -219,6 +219,33 @@ def check_excel(agent_workspace, raw_scores, individual_summary, flagged):
         check("Raw Scores has Average_Score column",
               any("average" in h or "avg" in h for h in header_lower),
               f"Headers: {headers}")
+
+        # Sample rows and verify Average_Score accuracy vs. expected
+        reviewer_idx = next((i for i, h in enumerate(header_lower) if "reviewer" in h), None)
+        reviewee_idx = next((i for i, h in enumerate(header_lower) if "reviewee" in h), None)
+        avg_idx = next((i for i, h in enumerate(header_lower) if "average" in h or "avg" in h), None)
+        if reviewer_idx is not None and reviewee_idx is not None and avg_idx is not None:
+            # Build expected lookup
+            exp_lookup = {}
+            for r in raw_scores:
+                key = (str(r.get("Reviewer", "")).strip().lower(),
+                       str(r.get("Reviewee", "")).strip().lower())
+                exp_lookup[key] = r.get("Average_Score")
+            sampled = 0
+            matched = 0
+            for row in data_rows[:10]:
+                if reviewer_idx >= len(row) or reviewee_idx >= len(row) or avg_idx >= len(row):
+                    continue
+                key = (str(row[reviewer_idx] or "").strip().lower(),
+                       str(row[reviewee_idx] or "").strip().lower())
+                if key in exp_lookup and row[avg_idx] is not None:
+                    sampled += 1
+                    if num_close(row[avg_idx], exp_lookup[key], 0.1):
+                        matched += 1
+            if sampled >= 3:
+                check("Raw Scores Average_Score sampling (>=80% match)",
+                      matched / sampled >= 0.8,
+                      f"Matched {matched}/{sampled}")
     else:
         check("Raw Scores sheet accessible", False, "Sheet not found")
 
@@ -411,6 +438,11 @@ def check_notion(flagged):
         check("Notion page has recommendation or follow-up content",
               "recommend" in all_block_text or "follow" in all_block_text or "action" in all_block_text or "flag" in all_block_text,
               "No recommendation/follow-up keywords found in blocks")
+
+        # Check Notion page references LMS roster / class size / review count (task.md demands it)
+        check("Notion page references LMS roster size or review count",
+              any(k in all_block_text for k in ["roster", "enrol", "class size", "20 reviews", "reviews collected"]),
+              "Notion should mention roster size or number of reviews collected")
 
     cur.close()
     conn.close()

@@ -91,9 +91,10 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         ws = wb[wb.sheetnames[sheet_names_lower.index(emp_match[0])]]
         rows = list(ws.iter_rows(values_only=True))
         data_rows = [r for r in rows[1:] if any(c for c in r)]
-        record("Employees has at least 4 data rows", len(data_rows) >= 4,
+        record("Employees has exactly 5 data rows", len(data_rows) == 5,
                f"Found {len(data_rows)} data rows")
         all_text = " ".join(str(c) for r in rows for c in r if c).lower()
+        # Task says employees from Sales OR Marketing depts (one or both acceptable).
         has_dept = "sales" in all_text or "marketing" in all_text
         record("Employees contains Sales or Marketing department", has_dept,
                f"Text: {all_text[:200]}")
@@ -107,7 +108,7 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         ws = wb[wb.sheetnames[sheet_names_lower.index(plan_match[0])]]
         rows = list(ws.iter_rows(values_only=True))
         data_rows = [r for r in rows[1:] if any(c for c in r)]
-        record("Travel_Plan has at least 8 data rows", len(data_rows) >= 8,
+        record("Travel_Plan has exactly 10 data rows", len(data_rows) == 10,
                f"Found {len(data_rows)} data rows")
 
     # Check Budget_Summary sheet
@@ -119,10 +120,11 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         ws = wb[wb.sheetnames[sheet_names_lower.index(budget_match[0])]]
         rows = list(ws.iter_rows(values_only=True))
         data_rows = [r for r in rows[1:] if any(c for c in r)]
-        record("Budget_Summary has at least 2 data rows", len(data_rows) >= 2,
-               f"Found {len(data_rows)} data rows")
+        record("Budget_Summary has exactly 3 data rows (outbound, return, total)",
+               len(data_rows) == 3, f"Found {len(data_rows)} data rows")
 
-        # Check total around 5530 (±500)
+        # Check total appears in the budget. We compare to GT-derived total
+        # (2 directions x 5 employees x ticket_price). GT is 553*10=5530 CNY.
         all_vals = []
         for r in rows:
             for c in r:
@@ -130,60 +132,192 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
                     all_vals.append(float(c))
                 except Exception:
                     pass
-        has_total = any(5030 <= v <= 6030 for v in all_vals)
-        record("Budget total approximately 5530 CNY (±500)", has_total,
+        # Tighter tolerance: ±50 CNY to allow round-off only.
+        has_total = any(5480 <= v <= 5580 for v in all_vals)
+        record("Budget total ~5530 CNY (5480-5580)", has_total,
                f"Numeric values found: {sorted(all_vals)}")
 
     # --- Groundtruth value comparison ---
+    # Critical: Task is open-ended ("up to 5 employees" with criteria,
+    # "one suitable return train"). The GT pins specific employees and a
+    # specific return train (G2), but any valid selection should pass.
+    # We validate criteria, not exact GT rows.
     gt_path = os.path.join(groundtruth_workspace, "Training_Travel_Report.xlsx")
     if not os.path.isfile(gt_path):
         record("Groundtruth xlsx exists", False, gt_path)
         return
 
+    # Validate Employees sheet by criteria (Sales OR Marketing department,
+    # >=3 years experience, Training_Eligible == Yes), NOT by exact names.
+    emp_match2 = [s for s in sheet_names_lower if "employ" in s or "staff" in s or "people" in s]
+    if emp_match2:
+        ws_e = wb[wb.sheetnames[sheet_names_lower.index(emp_match2[0])]]
+        rows_e = list(ws_e.iter_rows(values_only=True))
+        if rows_e:
+            headers_e = [str(c).lower().strip() if c else "" for c in rows_e[0]]
+            try:
+                dept_idx = next(i for i, h in enumerate(headers_e) if "department" in h or "dept" in h)
+            except StopIteration:
+                dept_idx = -1
+            try:
+                yrs_idx = next(i for i, h in enumerate(headers_e) if "year" in h or "experience" in h)
+            except StopIteration:
+                yrs_idx = -1
+            try:
+                elig_idx = next(i for i, h in enumerate(headers_e) if "elig" in h or "training" in h and "elig" in h)
+            except StopIteration:
+                # Try simpler
+                elig_idx = next((i for i, h in enumerate(headers_e) if "elig" in h or "training_elig" in h), -1)
+
+            data_rows_e = [r for r in rows_e[1:] if any(c is not None for c in r)]
+            criteria_ok = (dept_idx >= 0 and yrs_idx >= 0)
+            elig_ok = (elig_idx >= 0)
+            # Iterate over all rows; do NOT break early so structural
+            # mis-alignment (missing column header) still fails cleanly.
+            for r in data_rows_e:
+                if dept_idx >= 0 and dept_idx < len(r):
+                    d = str(r[dept_idx] or "").lower()
+                    if not ("sales" in d or "marketing" in d):
+                        criteria_ok = False
+                else:
+                    criteria_ok = False
+                if yrs_idx >= 0 and yrs_idx < len(r):
+                    try:
+                        yrs = float(r[yrs_idx])
+                        if yrs < 3:
+                            criteria_ok = False
+                    except (TypeError, ValueError):
+                        criteria_ok = False
+                else:
+                    criteria_ok = False
+                if elig_idx >= 0 and elig_idx < len(r):
+                    e = str(r[elig_idx] or "").strip().lower()
+                    if e != "yes":
+                        elig_ok = False
+                else:
+                    elig_ok = False
+            record("All Employees in Sales OR Marketing with >=3 yrs experience",
+                   criteria_ok,
+                   f"Inspected {len(data_rows_e)} employees")
+            record("All Employees have Training_Eligible == Yes",
+                   elig_ok, "")
+
+    # Validate Travel_Plan: structure - 10 rows, 5 unique employees, each with
+    # one Outbound + one Return row, outbound train G11/07:00 (derivable from
+    # task spec "earliest departure ... before early afternoon"), prices 553 CNY.
+    plan_match2 = [s for s in sheet_names_lower if "travel" in s or "plan" in s]
+    if plan_match2:
+        ws_p = wb[wb.sheetnames[sheet_names_lower.index(plan_match2[0])]]
+        rows_p = list(ws_p.iter_rows(values_only=True))
+        if rows_p:
+            headers_p = [str(c).lower().strip() if c else "" for c in rows_p[0]]
+            try:
+                name_idx = next(i for i, h in enumerate(headers_p) if "employee_name" in h or "name" in h)
+                train_idx = next(i for i, h in enumerate(headers_p) if "train" in h)
+                dir_idx = next(i for i, h in enumerate(headers_p) if "direction" in h or "type" in h)
+                price_idx = next(i for i, h in enumerate(headers_p) if "price" in h or "cny" in h)
+            except StopIteration:
+                name_idx = train_idx = dir_idx = price_idx = -1
+
+            data_rows_p = [r for r in rows_p[1:] if any(c is not None for c in r)]
+            unique_names = set()
+            outbound_count = 0
+            return_count = 0
+            outbound_train_g11 = True
+            prices_ok = True
+            return_trains = []
+            for r in data_rows_p:
+                if name_idx >= 0 and name_idx < len(r):
+                    unique_names.add(str(r[name_idx] or "").strip())
+                # Tighten direction matching: use word-boundary tokens, NOT
+                # loose substring "in". Outbound: starts with "out", "depart",
+                # contains "to shanghai". Return: starts with "return", "back",
+                # contains "to beijing", or "inbound" (full token, not "in").
+                if dir_idx >= 0 and dir_idx < len(r):
+                    direction = str(r[dir_idx] or "").lower().strip()
+                    is_outbound = (
+                        direction.startswith("out")
+                        or direction.startswith("depart")
+                        or "to shanghai" in direction
+                    )
+                    is_return = (
+                        direction.startswith("return")
+                        or direction.startswith("back")
+                        or direction.startswith("inbound")
+                        or "to beijing" in direction
+                    )
+                    if is_outbound and not is_return:
+                        outbound_count += 1
+                        if train_idx >= 0 and train_idx < len(r):
+                            tn = str(r[train_idx] or "").upper().strip()
+                            if "G11" not in tn:
+                                outbound_train_g11 = False
+                    elif is_return and not is_outbound:
+                        return_count += 1
+                        if train_idx >= 0 and train_idx < len(r):
+                            return_trains.append(str(r[train_idx] or "").upper().strip())
+                if price_idx >= 0 and price_idx < len(r):
+                    try:
+                        p = float(r[price_idx])
+                        # Second class price is 553 CNY (per GT, derivable from 12306)
+                        if abs(p - 553) > 5:
+                            prices_ok = False
+                    except (TypeError, ValueError):
+                        prices_ok = False
+
+            record("Travel_Plan has 5 unique employees", len(unique_names) == 5,
+                   f"unique names: {len(unique_names)}")
+            record("Travel_Plan has 5 outbound rows", outbound_count == 5,
+                   f"outbound rows: {outbound_count}")
+            record("Travel_Plan has 5 return rows", return_count == 5,
+                   f"return rows: {return_count}")
+            record("All outbound rows use train G11", outbound_train_g11,
+                   "Outbound is the earliest train (G11 07:00 per 12306 query)")
+            # Return train: enforce all return rows use the SAME train number
+            # (any valid Shanghai->Beijing train, but consistent across all 5 employees).
+            return_consistent = (
+                len(return_trains) == 5
+                and len({t for t in return_trains if t}) == 1
+                and all(t.startswith("G") for t in return_trains)
+            )
+            record("All return rows use the same return train (consistent G-series train)",
+                   return_consistent,
+                   f"return trains: {return_trains}")
+            record("All ticket prices ~553 CNY (second class Beijing-Shanghai)",
+                   prices_ok, "")
+
+    # Validate Budget_Summary: total ~5530 already checked above; further verify
+    # 3 rows: outbound, return, total; total_cny == count * unit_price.
+    budget_match2 = [s for s in sheet_names_lower if "budget" in s or "summar" in s]
+    if budget_match2:
+        ws_b = wb[wb.sheetnames[sheet_names_lower.index(budget_match2[0])]]
+        rows_b = list(ws_b.iter_rows(values_only=True))
+        if rows_b:
+            headers_b = [str(c).lower().strip() if c else "" for c in rows_b[0]]
+            try:
+                cnt_idx = next(i for i, h in enumerate(headers_b) if h == "count" or "count" in h)
+                up_idx = next(i for i, h in enumerate(headers_b) if "unit" in h or "unit_price" in h)
+                total_idx = next(i for i, h in enumerate(headers_b) if h == "total" or "total_cny" in h or "total" in h)
+            except StopIteration:
+                cnt_idx = up_idx = total_idx = -1
+
+            data_rows_b = [r for r in rows_b[1:] if any(c is not None for c in r)]
+            arith_ok = True
+            for r in data_rows_b:
+                try:
+                    c = float(r[cnt_idx]) if cnt_idx >= 0 else None
+                    u = float(r[up_idx]) if up_idx >= 0 else None
+                    t = float(r[total_idx]) if total_idx >= 0 else None
+                    if c is not None and u is not None and t is not None:
+                        if abs(t - c * u) > 1.0:
+                            arith_ok = False
+                            break
+                except (TypeError, ValueError):
+                    pass
+            record("Budget_Summary arithmetic Total = Count * Unit_Price",
+                   arith_ok, "")
+
     gt_wb = openpyxl.load_workbook(gt_path, data_only=True)
-    for gt_sheet_name in gt_wb.sheetnames:
-        gt_ws = gt_wb[gt_sheet_name]
-        agent_ws = None
-        for asn in wb.sheetnames:
-            if asn.strip().lower() == gt_sheet_name.strip().lower():
-                agent_ws = wb[asn]
-                break
-        if agent_ws is None:
-            record(f"GT sheet '{gt_sheet_name}' exists in agent", False, f"Available: {wb.sheetnames}")
-            continue
-
-        gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-        agent_rows = [r for r in agent_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-
-        record(f"GT '{gt_sheet_name}' row count", len(agent_rows) == len(gt_rows),
-               f"Expected {len(gt_rows)}, got {len(agent_rows)}")
-
-        check_indices = list(range(min(3, len(gt_rows))))
-        if len(gt_rows) > 3:
-            check_indices.append(len(gt_rows) - 1)
-        for idx in check_indices:
-            gt_row = gt_rows[idx]
-            if idx < len(agent_rows):
-                a_row = agent_rows[idx]
-                row_ok = True
-                for col_idx in range(min(len(gt_row), len(a_row) if a_row else 0)):
-                    gt_val = gt_row[col_idx]
-                    a_val = a_row[col_idx]
-                    if gt_val is None:
-                        continue
-                    if isinstance(gt_val, (int, float)):
-                        ok = num_close(a_val, gt_val, max(abs(gt_val) * 0.1, 1.0))
-                    else:
-                        ok = str_match(a_val, gt_val)
-                    if not ok:
-                        record(f"GT '{gt_sheet_name}' row {idx+1} col {col_idx+1}",
-                               False, f"Expected {gt_val}, got {a_val}")
-                        row_ok = False
-                        break
-                if row_ok:
-                    record(f"GT '{gt_sheet_name}' row {idx+1} values match", True)
-            else:
-                record(f"GT '{gt_sheet_name}' row {idx+1} exists", False, "Row missing in agent")
     gt_wb.close()
 
 
@@ -201,8 +335,19 @@ def check_gcal():
     events = cur.fetchall()
     cur.close()
     conn.close()
-    record("At least 2 new travel calendar events on 2026-03-10", len(events) >= 2,
-           f"Found {len(events)} events: {[e[0] for e in events]}")
+    summaries = [(e[0] or "").lower() for e in events]
+    has_depart = any(("depart" in s or "outbound" in s) and "shanghai" in s for s in summaries)
+    has_return = any(("return" in s or "inbound" in s) and "beijing" in s for s in summaries)
+    record(
+        "Calendar event 'Corporate Training - Depart for Shanghai' on Mar 10",
+        has_depart,
+        f"Mar10 events: {[e[0] for e in events]}",
+    )
+    record(
+        "Calendar event 'Corporate Training - Return to Beijing' on Mar 10",
+        has_return,
+        f"Mar10 events: {[e[0] for e in events]}",
+    )
 
 
 def _count_email(to_pattern, exclude_from_pattern=None):
@@ -249,7 +394,9 @@ def check_emails():
     record("Email sent to training@hr-dept.com", hr_cnt >= 1 or hr_sent >= 1,
            f"messages: {hr_cnt}, sent_log: {hr_sent}")
 
-    # At least 1 additional email (to any non-hr address)
+    # At least 1 additional email to a corporate-style employee address.
+    # Tighten: require employee email pattern (containing @company.com,
+    # @corp.com, or similar) AND outgoing (from_addr NOT employee).
     emp_cnt = 0
     emp_sent = 0
     try:
@@ -258,7 +405,14 @@ def check_emails():
         cur.execute(
             "SELECT COUNT(*) FROM email.messages"
             " WHERE to_addr::text NOT ILIKE '%training@hr-dept.com%'"
+            "   AND to_addr::text NOT ILIKE '%hr-dept.com%'"
             "   AND from_addr NOT ILIKE '%training@hr-dept.com%'"
+            "   AND ("
+            "     to_addr::text ILIKE '%@company.com%'"
+            "     OR to_addr::text ILIKE '%@corp.%'"
+            "     OR to_addr::text ILIKE '%@example.%'"
+            "     OR to_addr::text ~* '@[a-z0-9.-]+\\.(com|org|co|edu|net)'"
+            "   )"
         )
         emp_cnt = cur.fetchone()[0]
         cur.close()
@@ -271,13 +425,21 @@ def check_emails():
         cur2.execute(
             "SELECT COUNT(*) FROM email.sent_log"
             " WHERE to_addr::text NOT ILIKE '%training@hr-dept.com%'"
+            "   AND to_addr::text NOT ILIKE '%hr-dept.com%'"
+            "   AND ("
+            "     to_addr::text ILIKE '%@company.com%'"
+            "     OR to_addr::text ILIKE '%@corp.%'"
+            "     OR to_addr::text ILIKE '%@example.%'"
+            "     OR to_addr::text ~* '@[a-z0-9.-]+\\.(com|org|co|edu|net)'"
+            "   )"
         )
         emp_sent = cur2.fetchone()[0]
         cur2.close()
         conn2.close()
     except Exception:
         pass
-    record("At least 1 additional email to employee(s)", emp_cnt >= 1 or emp_sent >= 1,
+    record("At least 1 additional email to a non-HR corporate address (employee notification)",
+           emp_cnt >= 1 or emp_sent >= 1,
            f"messages: {emp_cnt}, sent_log: {emp_sent}")
 
 
@@ -302,7 +464,7 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0 and PASS_COUNT > 0:
         print("PASS")
         sys.exit(0)
     else:

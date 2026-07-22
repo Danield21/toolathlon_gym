@@ -1,0 +1,5 @@
+DOE-2023-ENRG-003 Renewable Energy Adoption Study
+Funder: DOE
+PI: Dr. Carol Wu
+Retention: 5 years
+Sensitive: false

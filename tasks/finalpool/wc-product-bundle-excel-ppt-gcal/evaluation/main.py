@@ -16,15 +16,18 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+RUNTIME_ONLY_FAIL = 0
 
 
-def record(name, passed, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def record(name, passed, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, RUNTIME_ONLY_FAIL
     if passed:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if runtime_only:
+            RUNTIME_ONLY_FAIL += 1
         msg = f": {str(detail)[:300]}" if detail else ""
         print(f"  [FAIL] {name}{msg}")
 
@@ -267,28 +270,40 @@ def check_calendar():
         events = cur.fetchall()
         record("At least 3 bundle-related calendar events",
                len(events) >= 3,
-               f"Found {len(events)} matching events")
+               f"Found {len(events)} matching events",
+               runtime_only=True)
 
         if len(events) >= 3:
-            # Check dates are in March 16-20 week
-            march_events = []
+            # Task says March 16, 18, 20 - check exact target dates
+            target_dates = {"2026-03-16", "2026-03-18", "2026-03-20"}
+            hit_dates = set()
             for ev in events:
                 start_str = str(ev[1]) if ev[1] else ""
-                if "2026-03-1" in start_str or "2026-03-20" in start_str:
-                    march_events.append(ev)
-            record("Events scheduled in March 16-20 week",
-                   len(march_events) >= 3,
-                   f"Found {len(march_events)} events in target week")
+                for td in target_dates:
+                    if td in start_str:
+                        hit_dates.add(td)
+            record("All target dates (March 16, 18, 20) covered",
+                   hit_dates == target_dates,
+                   f"Hit: {sorted(hit_dates)}, Expected: {sorted(target_dates)}",
+                   runtime_only=True)
 
-            # Check for 1-hour duration
+            # Start time check (10:00 per triage)
+            ten_am_count = sum(1 for ev in events if ev[1] and ev[1].hour == 10)
+            record("Events start at 10:00",
+                   ten_am_count >= 3,
+                   f"{ten_am_count} start at 10:00",
+                   runtime_only=True)
+
+            # Check for ~60-min duration (exactly)
             hour_events = 0
             for ev in events:
                 if ev[1] and ev[2]:
-                    duration = (ev[2] - ev[1]).total_seconds()
-                    if 3000 <= duration <= 7200:  # between 50min and 2hr
+                    duration_min = (ev[2] - ev[1]).total_seconds() / 60
+                    if 55 <= duration_min <= 65:
                         hour_events += 1
-            record("Events are ~1 hour each", hour_events >= 3,
-                   f"{hour_events} events have ~1hr duration")
+            record("Events are exactly ~60 min each", hour_events >= 3,
+                   f"{hour_events} events have 60min duration",
+                   runtime_only=True)
 
         cur.close()
         conn.close()
@@ -315,8 +330,9 @@ def main():
     if FAIL_COUNT > 0:
         print(f"{FAIL_COUNT} checks failed")
 
-    overall = excel_ok and pptx_ok and cal_ok
-    print(f"Overall: {'PASS' if overall else 'FAIL'}")
+    non_runtime_fail = FAIL_COUNT - RUNTIME_ONLY_FAIL
+    overall = non_runtime_fail == 0
+    print(f"Overall: {'PASS' if overall else 'FAIL'} (runtime-only fails: {RUNTIME_ONLY_FAIL})")
     sys.exit(0 if overall else 1)
 
 

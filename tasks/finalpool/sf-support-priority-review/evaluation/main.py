@@ -3,6 +3,10 @@ import argparse
 import os
 import sys
 import openpyxl
+import psycopg2
+
+
+DB = {"host": os.environ.get("PGHOST", "localhost"), "port": 5432, "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
 
 
 def num_close(a, b, tol=1.0):
@@ -138,8 +142,19 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 10.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=10.0)")
+                # Tighter tolerance for small-integer counts (Priorities_Meeting_SLA, Priorities_Missing_SLA)
+                metric_key = key
+                if "priorities" in metric_key:
+                    # Exact integer match for small-int counts
+                    tol = 0
+                elif "csat" in metric_key:
+                    tol = 0.1
+                elif "total_tickets" in metric_key or "total" in metric_key:
+                    tol = 10.0
+                else:
+                    tol = 1.0
+                if not num_close(a_row[1], g_row[1], tol):
+                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol={tol})")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -148,7 +163,34 @@ def main():
         else:
             print(f"    PASS")
 
-    
+
+    # Check email (required by task.md)
+    print("  Checking email...")
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT subject, to_addr, body_text
+            FROM email.messages
+            WHERE LOWER(to_addr::text) LIKE '%support-manager@company.com%'
+              AND LOWER(subject) LIKE '%support%priority%analysis%report%'
+        """)
+        emails = cur.fetchall()
+        cur.close()
+        conn.close()
+        if not emails:
+            all_errors.append("Email not found: required to=support-manager@company.com with subject 'Support Priority Analysis Report'")
+        else:
+            # Body should mention priorities not meeting SLA (3 priorities all No)
+            body = (emails[0][2] or "").lower()
+            # Per task.md: 'flagging any priorities that are not meeting SLA' -
+            # body should mention priority terms
+            mentioned_pri = sum(1 for p in ["high", "medium", "low"] if p in body)
+            if mentioned_pri < 1:
+                all_errors.append("Email body missing reference to priorities not meeting SLA (high/medium/low)")
+            print("    PASS" if not all_errors or all_errors[-1] != "" else "")
+    except Exception as e:
+        all_errors.append(f"Email DB check error: {e}")
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

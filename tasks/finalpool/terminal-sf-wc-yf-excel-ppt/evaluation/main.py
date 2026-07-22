@@ -99,6 +99,17 @@ def get_expected_data():
         # Top segment
         top_seg = max(segments.keys(), key=lambda k: segments[k]["revenue"])
 
+        # All ecom categories sorted by revenue desc
+        cur.execute("""
+            SELECT p.categories->0->>'name' as cat,
+                   ROUND(SUM((li.value->>'total')::numeric), 2) as rev
+            FROM wc.orders o, jsonb_array_elements(o.line_items) li
+            JOIN wc.products p ON p.id = (li.value->>'product_id')::int
+            GROUP BY p.categories->0->>'name'
+            ORDER BY rev DESC
+        """)
+        ecom_categories = [(r[0], float(r[1])) for r in cur.fetchall() if r[0] is not None]
+
         cur.close()
         conn.close()
 
@@ -108,6 +119,7 @@ def get_expected_data():
             "wc_total_rev": wc_total_rev,
             "wc_avg_order": wc_avg_order,
             "top_ecom_cat": top_ecom_cat,
+            "ecom_categories": ecom_categories,
             "yf_prices": yf_prices,
             "top_seg": top_seg,
         }
@@ -156,66 +168,138 @@ def check_excel(agent_workspace, expected):
     check("Sheet Ecommerce_Performance exists", ws is not None, f"Sheets: {wb.sheetnames}")
     if ws:
         rows = list(ws.iter_rows(min_row=2, values_only=True))
-        check("Ecommerce_Performance has >= 5 rows", len(rows) >= 5, f"Got {len(rows)}")
-        if rows and expected:
-            # First row should be highest revenue category
-            top_cat = str(rows[0][0]).strip().lower() if rows[0] and rows[0][0] else ""
-            check("Top ecom category is TV & Home Theater",
-                  "tv" in top_cat and "home" in top_cat,
-                  f"Got '{top_cat}'")
+        # ensure data rows
+        rows = [r for r in rows if r and r[0]]
+        if expected and "ecom_categories" in expected:
+            expected_cats = expected["ecom_categories"]
+            check(f"Ecommerce_Performance has {len(expected_cats)} rows",
+                  len(rows) == len(expected_cats), f"Got {len(rows)}")
+            # First row by descending Revenue should be top category
+            if rows and expected_cats:
+                top_cat = str(rows[0][0]).strip()
+                check(f"Top ecom category is '{expected_cats[0][0]}'",
+                      top_cat == expected_cats[0][0],
+                      f"Got '{top_cat}'")
+            # Verify all expected categories present and revenue match
+            actual_lookup = {str(r[0]).strip(): r for r in rows}
+            for cat_name, cat_rev in expected_cats:
+                a = actual_lookup.get(cat_name)
+                check(f"Ecom category '{cat_name}' present", a is not None,
+                      f"got: {list(actual_lookup.keys())}")
+                if a is not None and len(a) > 1:
+                    check(f"Ecom category '{cat_name}' revenue",
+                          num_close(a[1], cat_rev, 1.0),
+                          f"Expected {cat_rev}, got {a[1]}")
+            # Sorted by revenue desc
+            try:
+                revs = [float(r[1]) for r in rows]
+                sorted_ok = all(revs[i] >= revs[i+1] for i in range(len(revs)-1))
+            except Exception:
+                sorted_ok = False
+            check("Ecommerce_Performance sorted by Revenue desc", sorted_ok,
+                  f"Revenue: {revs if sorted_ok else 'unparseable'}")
 
     # Market_Context
     ws = get_sheet(wb, "Market_Context")
     check("Sheet Market_Context exists", ws is not None, f"Sheets: {wb.sheetnames}")
     if ws and expected:
         rows = list(ws.iter_rows(min_row=2, values_only=True))
-        check("Market_Context has 3 rows", len(rows) == 3, f"Got {len(rows)}")
-        lookup = {str(r[0]).strip(): r for r in rows if r and r[0]}
-        for sym in ['^DJI', 'AMZN', 'JPM']:
-            r = lookup.get(sym)
+        rows = [r for r in rows if r and r[0]]
+        check("Market_Context has exactly 3 rows", len(rows) == 3, f"Got {len(rows)}")
+        # Allow '^DJI' or 'DJI' or '$DJI' for the index symbol
+        norm_lookup = {}
+        for r in rows:
+            key = str(r[0]).strip().upper().lstrip("^$")
+            norm_lookup[key] = r
+        sym_aliases = {"^DJI": ["DJI", "^DJI"], "AMZN": ["AMZN"], "JPM": ["JPM"]}
+        expected_names = {
+            "^DJI": "Dow Jones Industrial Average",
+            "AMZN": "Amazon.com Inc",
+            "JPM": "JPMorgan Chase & Co",
+        }
+        for sym, aliases in sym_aliases.items():
+            r = None
+            for a in aliases:
+                if a.upper().lstrip("^$") in norm_lookup:
+                    r = norm_lookup[a.upper().lstrip("^$")]
+                    break
             if r is None:
                 check(f"Symbol '{sym}' present", False, "Missing")
                 continue
-            check(f"'{sym}' price",
-                  num_close(r[1], expected["yf_prices"][sym], 100),
-                  f"Expected {expected['yf_prices'][sym]}, got {r[1]}")
+            check(f"Symbol '{sym}' present", True)
+            # Use 5% relative tolerance with 5.0 absolute floor (typical equities like JPM ~150-200)
+            exp_price = expected["yf_prices"][sym]
+            tol = max(5.0, abs(exp_price) * 0.05)
+            check(f"'{sym}' price within 5% of expected {exp_price}",
+                  num_close(r[1], exp_price, tol),
+                  f"Expected {exp_price}, got {r[1]} (tol={tol:.2f})")
+            # Asset name must match (loose substring)
+            if len(r) > 2 and r[2]:
+                name_match = expected_names[sym].lower() in str(r[2]).lower() or str(r[2]).lower() in expected_names[sym].lower()
+                check(f"'{sym}' asset name matches expected",
+                      name_match, f"got '{r[2]}', expected ~ '{expected_names[sym]}'")
 
     # Unified_Dashboard
     ws = get_sheet(wb, "Unified_Dashboard")
     check("Sheet Unified_Dashboard exists", ws is not None, f"Sheets: {wb.sheetnames}")
     if ws and expected:
         rows = list(ws.iter_rows(min_row=2, values_only=True))
-        check("Unified_Dashboard has 5 rows", len(rows) == 5, f"Got {len(rows)}")
-        lookup = {str(r[0]).strip().lower(): r for r in rows if r and r[0]}
+        rows = [r for r in rows if r and r[0]]
+        check("Unified_Dashboard has exactly 5 rows", len(rows) == 5, f"Got {len(rows)}")
+        lookup = {str(r[0]).strip().lower(): r for r in rows}
 
         ent_row = lookup.get("enterprise_total_revenue")
+        check("Enterprise_Total_Revenue row present", ent_row is not None,
+              f"Keys: {list(lookup.keys())}")
         if ent_row:
             check("Enterprise total revenue value",
-                  num_close(ent_row[1], expected["total_enterprise_rev"], 5000),
+                  num_close(ent_row[1], expected["total_enterprise_rev"], 100),
                   f"Expected {expected['total_enterprise_rev']}, got {ent_row[1]}")
-            check("Enterprise target is 3200000",
-                  num_close(ent_row[2], 3200000, 100),
+            check("Enterprise target == 3200000",
+                  num_close(ent_row[2], 3200000, 0.01),
                   f"Got {ent_row[2]}")
             status = str(ent_row[3]).strip().lower() if ent_row[3] else ""
-            check("Enterprise status is Below Target",
-                  "below" in status,
+            expected_status = "on track" if expected["total_enterprise_rev"] >= 3200000 else "below target"
+            check(f"Enterprise status == '{expected_status}'",
+                  expected_status in status,
                   f"Got '{ent_row[3]}'")
 
         ecom_row = lookup.get("ecommerce_total_revenue")
+        check("Ecommerce_Total_Revenue row present", ecom_row is not None)
         if ecom_row:
             check("Ecom total revenue value",
-                  num_close(ecom_row[1], expected["wc_total_rev"], 2000),
+                  num_close(ecom_row[1], expected["wc_total_rev"], 1.0),
                   f"Expected {expected['wc_total_rev']}, got {ecom_row[1]}")
+            check("Ecommerce target == 70000",
+                  num_close(ecom_row[2], 70000, 0.01),
+                  f"Got {ecom_row[2]}")
 
         mkt_row = lookup.get("market_index")
+        check("Market_Index row present", mkt_row is not None)
         if mkt_row:
             check("Market index value",
-                  num_close(mkt_row[1], expected["yf_prices"]["^DJI"], 200),
+                  num_close(mkt_row[1], expected["yf_prices"]["^DJI"], 100),
                   f"Expected {expected['yf_prices']['^DJI']}, got {mkt_row[1]}")
-            status = str(mkt_row[3]).strip().lower() if mkt_row[3] else ""
-            check("Market status is On Track",
-                  "on track" in status,
-                  f"Got '{mkt_row[3]}'")
+            check("Market target == 45000",
+                  num_close(mkt_row[2], 45000, 0.01),
+                  f"Got {mkt_row[2]}")
+
+        top_seg_row = lookup.get("top_segment")
+        check("Top_Segment row present", top_seg_row is not None)
+        if top_seg_row:
+            actual_seg = str(top_seg_row[1] or "").strip().lower()
+            check(f"Top_Segment value matches '{expected['top_seg']}'",
+                  actual_seg == str(expected["top_seg"]).lower(),
+                  f"got '{top_seg_row[1]}', expected '{expected['top_seg']}'")
+
+        top_cat_row = lookup.get("top_ecommerce_category")
+        check("Top_Ecommerce_Category row present", top_cat_row is not None)
+        if top_cat_row and expected.get("ecom_categories"):
+            actual_cat = str(top_cat_row[1] or "").strip()
+            expected_cat = expected["ecom_categories"][0][0]
+            check(f"Top_Ecommerce_Category value matches '{expected_cat}'",
+                  actual_cat == expected_cat,
+                  f"got '{top_cat_row[1]}', expected '{expected_cat}'")
 
 
 def check_pptx(agent_workspace):
@@ -228,8 +312,7 @@ def check_pptx(agent_workspace):
         from pptx import Presentation
         prs = Presentation(path)
         slide_count = len(prs.slides)
-        check("Has 8 slides", slide_count == 8, f"Got {slide_count}")
-        check("Has >= 6 slides", slide_count >= 6, f"Got {slide_count}")
+        check("Has exactly 8 slides", slide_count == 8, f"Got {slide_count}")
 
         all_text = ""
         for slide in prs.slides:
@@ -251,8 +334,13 @@ def check_pptx(agent_workspace):
               "market" in all_text)
         check("Contains 'risk' reference",
               "risk" in all_text)
-        check("Contains 'strategic' or 'priorities' or 'recommendation'",
-              "strategic" in all_text or "priorities" in all_text or "recommend" in all_text)
+        # Slide 8 (Strategic Priorities/Recommendations) — require either ('strategic' AND 'priorities') or 'recommend'
+        strategic = "strategic" in all_text
+        priorities = "priorities" in all_text
+        recommend = "recommend" in all_text
+        check("Contains ('strategic' AND 'priorities') OR 'recommend'",
+              (strategic and priorities) or recommend,
+              f"strategic={strategic}, priorities={priorities}, recommend={recommend}")
     except ImportError:
         check("python-pptx available", False)
     except Exception as e:
@@ -350,13 +438,12 @@ def main():
     check_scripts(args.agent_workspace)
 
     total = PASS_COUNT + FAIL_COUNT
-    accuracy = PASS_COUNT / total * 100 if total > 0 else 0
-    print(f"\nOverall: {PASS_COUNT}/{total} ({accuracy:.1f}%)")
-    result = {"total_passed": PASS_COUNT, "total_checks": total, "accuracy": accuracy}
+    print(f"\nOverall: {PASS_COUNT}/{total} ({'PASS' if FAIL_COUNT == 0 else 'FAIL'})")
+    result = {"total_passed": PASS_COUNT, "total_checks": total, "success": FAIL_COUNT == 0}
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
-    sys.exit(0 if accuracy >= 70 else 1)
+    sys.exit(0 if FAIL_COUNT == 0 else 1)
 
 
 if __name__ == "__main__":

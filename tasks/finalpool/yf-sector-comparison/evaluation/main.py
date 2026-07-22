@@ -87,8 +87,25 @@ def main():
                     errors.append(f"{key}.Stock_Count: {a_row[1]} vs {g_row[1]} (tol=1)")
 
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 50.0):
-                    errors.append(f"{key}.Avg_Market_Cap_B: {a_row[2]} vs {g_row[2]} (tol=50.0)")
+                # Tighten Avg_Market_Cap_B: 10% relative tolerance, min 5.0B abs
+                try:
+                    g_num = float(g_row[2])
+                    tol = max(5.0, abs(g_num) * 0.10)
+                    if not num_close(a_row[2], g_row[2], tol):
+                        errors.append(f"{key}.Avg_Market_Cap_B: {a_row[2]} vs {g_row[2]} (tol={tol:.2f})")
+                except (TypeError, ValueError):
+                    if not str_match(a_row[2], g_row[2]):
+                        errors.append(f"{key}.Avg_Market_Cap_B: {a_row[2]} vs {g_row[2]}")
+
+            # Validate Avg_PE_Ratio (col 3) - was previously not checked at all
+            if len(a_row) > 3 and len(g_row) > 3:
+                try:
+                    g_pe = float(g_row[3])
+                    if not num_close(a_row[3], g_row[3], max(1.0, abs(g_pe) * 0.10)):
+                        errors.append(f"{key}.Avg_PE_Ratio: {a_row[3]} vs {g_row[3]} (tol=10% or 1.0)")
+                except (TypeError, ValueError):
+                    if not str_match(a_row[3], g_row[3]):
+                        errors.append(f"{key}.Avg_PE_Ratio: {a_row[3]} vs {g_row[3]}")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -126,8 +143,18 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 5.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=5.0)")
+                # Tighter tolerances: counts must be exact; strings exact-match
+                try:
+                    g_num = float(g_row[1])
+                    if key in ("total_sectors", "total_stocks"):
+                        tol = 0  # exact
+                    else:
+                        tol = max(0.5, abs(g_num) * 0.01)
+                    if not num_close(a_row[1], g_row[1], tol):
+                        errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol={tol})")
+                except (TypeError, ValueError):
+                    if not str_match(a_row[1], g_row[1]):
+                        errors.append(f"{key}.Value: '{a_row[1]}' vs '{g_row[1]}'")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -148,10 +175,14 @@ def main():
             _headings = " ".join(p.text for p in _doc.paragraphs if p.style.name.startswith("Heading")).lower()
             if len(_text.strip()) < 50:
                 all_errors.append("Sector_Analysis.docx has too little text content (< 50 chars)")
-            _kws = ["sector", "analysis"]
+            # Require ALL keywords (was: only fails if both missing)
+            _kws = ["sector", "valuation"]
             _missing = [k for k in _kws if k not in _text and k not in _headings]
-            if len(_missing) == len(_kws):
-                all_errors.append(f"Sector_Analysis.docx missing expected keywords: {_missing}")
+            if _missing:
+                all_errors.append(f"Sector_Analysis.docx missing required keywords: {_missing}")
+            # Require at least 200 chars (raised from 50)
+            if len(_text.strip()) < 200:
+                all_errors.append(f"Sector_Analysis.docx text too short ({len(_text.strip())} chars, expected >=200)")
         except ImportError:
             if os.path.getsize(docx_path) < 100:
                 all_errors.append("Sector_Analysis.docx too small")

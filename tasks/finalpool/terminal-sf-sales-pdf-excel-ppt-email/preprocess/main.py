@@ -12,7 +12,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -33,10 +33,12 @@ def clear_tables(conn):
 
 
 def inject_noise_emails(conn, launch_dt):
-    """Inject noise emails."""
+    """Inject noise emails. All placed BEFORE launch_dt to avoid target conflict."""
     dt1 = (launch_dt + timedelta(days=-61)).strftime('%Y-%m-%d')
     dt2 = (launch_dt + timedelta(days=-58)).strftime('%Y-%m-%d')
     dt3 = (launch_dt + timedelta(days=-56)).strftime('%Y-%m-%d')
+    dt4 = (launch_dt + timedelta(days=-52)).strftime('%Y-%m-%d')
+    dt5 = (launch_dt + timedelta(days=-49)).strftime('%Y-%m-%d')
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM email.folders WHERE name = 'INBOX' LIMIT 1")
         row = cur.fetchone()
@@ -56,10 +58,16 @@ def inject_noise_emails(conn, launch_dt):
              'The Q2 product launch is on track. Key milestones attached.', '{dt2} 14:00:00'),
             (%s, 'RE: Sales Team Retreat Planning', 'hr@company.com',
              '["regional_managers@company.com"]'::jsonb,
-             'The retreat venue has been confirmed for April 15-17.', '{dt3} 11:30:00')
-        """, (folder_id, folder_id, folder_id))
+             'The retreat venue has been confirmed for April 15-17.', '{dt3} 11:30:00'),
+            (%s, 'Office Expansion Discussion', 'facilities@company.com',
+             '["leadership@company.com"]'::jsonb,
+             'Proposal for expanding office space in the APAC region.', '{dt4} 10:00:00'),
+            (%s, 'Travel Policy Update Reminder', 'hr@company.com',
+             '["all_employees@company.com"]'::jsonb,
+             'Updated travel expense policy effective next quarter.', '{dt5} 16:00:00')
+        """, (folder_id, folder_id, folder_id, folder_id, folder_id))
     conn.commit()
-    print("[preprocess] Injected noise email data.")
+    print("[preprocess] Injected 5 noise emails.")
 
 
 def main():

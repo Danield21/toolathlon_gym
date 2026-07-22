@@ -367,18 +367,33 @@ def check_reverse_validation(ws_path):
             check("No noise arxiv papers in Notion tracker", True, "No Research Pipeline DB to check")
 
         # --- Check no emails to wrong recipients ---
-        noise_recipients = ["team@firm.com", "office@firm.com", "social@firm.com", "admin@firm.com"]
+        # Use exact recipient match against parsed recipient list
+        noise_recipients = {"team@firm.com", "office@firm.com", "social@firm.com",
+                            "admin@firm.com", "facilities@firm.com", "staff@firm.com", "hr@firm.com"}
 
         cur.execute("""
             SELECT subject, to_addr FROM email.messages
             WHERE folder_id = (SELECT id FROM email.folders WHERE name = 'Sent' LIMIT 1)
         """)
         sent_emails = cur.fetchall()
-        all_to = " ".join(json.dumps(to).lower() for _, to in sent_emails if to)
-        no_noise_email = not any(na in all_to for na in noise_recipients)
+        sent_recipients = set()
+        for _subj, to in sent_emails:
+            if to is None:
+                continue
+            to_list = to if isinstance(to, list) else ([to] if isinstance(to, str) else [])
+            if isinstance(to, str):
+                try:
+                    to_list = json.loads(to)
+                except Exception:
+                    to_list = [to]
+            for r in to_list:
+                sent_recipients.add(str(r).strip().lower())
+
+        contaminated = sent_recipients & noise_recipients
+        no_noise_email = len(contaminated) == 0
         check("No emails sent to noise recipients (team@firm, office@firm, social@firm)",
               no_noise_email,
-              f"Sent to: {all_to[:200]}")
+              f"Contaminated recipients: {contaminated}")
 
         cur.close()
         conn.close()
@@ -407,6 +422,19 @@ def check_reverse_validation(ws_path):
               no_noise_ids,
               "Found noise paper ID in Excel")
 
+    # --- Reverse: noise arxiv papers still exist in DB (agent should not delete) ---
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM arxiv.papers WHERE id = ANY(%s)", (list(NOISE_PAPER_IDS),))
+        remaining = {r[0] for r in cur.fetchall()}
+        check("Reverse: noise arxiv papers preserved in DB",
+              len(remaining) == len(NOISE_PAPER_IDS),
+              f"Missing: {NOISE_PAPER_IDS - remaining}")
+        cur.close(); conn.close()
+    except Exception as e:
+        check("Reverse: noise arxiv papers preserved", False, str(e))
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -434,7 +462,8 @@ def main():
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
-    sys.exit(0 if accuracy >= 70 else 1)
+    # Tightened: require ALL checks to pass (previously accuracy >= 70%).
+    sys.exit(0 if FAIL_COUNT == 0 else 1)
 
 
 if __name__ == "__main__":

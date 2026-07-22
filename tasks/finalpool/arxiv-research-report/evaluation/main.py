@@ -94,6 +94,23 @@ def main():
     check("Has Methodology Comparison section", has_methodology, "No 'Methodology' heading or text found")
     check("Has Conclusion section", has_conclusion, "No 'Conclusion' heading or text found")
 
+    # Section order validation: Introduction -> Literature Review -> Methodology Comparison -> Conclusion
+    SECTIONS_ORDER = ['introduction', 'literature review', 'methodology comparison', 'conclusion']
+    positions = []
+    for sec in SECTIONS_ORDER:
+        idx = normalized.find(sec)
+        positions.append(idx)
+    sections_in_order = all(p >= 0 for p in positions) and positions == sorted(positions)
+    check("Sections appear in correct order", sections_in_order,
+          f"positions={positions}")
+
+    # Sample citation counts from Literature Review (all 5 papers: 850/420/650/280/190)
+    CITATION_SAMPLES = ['850', '420', '650', '280', '190']
+    for cnt in CITATION_SAMPLES:
+        check(f"Citation count '{cnt}' referenced",
+              cnt in normalized,
+              f"citation_count {cnt} not found in document")
+
     # ── Check 5: Has at least 4 headings ─────────────────────────────────────
     # Count headings from styles or text patterns
     heading_count = len(headings)

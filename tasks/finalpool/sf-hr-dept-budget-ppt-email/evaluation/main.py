@@ -33,8 +33,28 @@ def load_sheet_rows(wb, sheet_name):
     return None
 
 
+def _fetch_dept_expected():
+    """Fetch expected dept budgets/headcount from Snowflake mirror with fallback."""
+    try:
+        conn = psycopg2.connect(**DB, connect_timeout=5)
+        cur = conn.cursor()
+        cur.execute('SELECT "DEPARTMENT_NAME", "HEADCOUNT"::integer, "BUDGET"::numeric '
+                    'FROM sf_data."HR_ANALYTICS__PUBLIC__DEPARTMENTS"')
+        data = {}
+        for name, hc, bud in cur.fetchall():
+            data[str(name).strip().lower()] = {"headcount": int(hc), "budget": float(bud)}
+        cur.close(); conn.close()
+        if data:
+            return data
+    except Exception as e:
+        print(f"[WARN] DB fetch failed: {e}")
+    return None
+
+
 def check_excel(agent_workspace, gt_dir):
     errors = []
+    # Fetch dynamic expected values
+    dept_expected = _fetch_dept_expected()
     try:
         import openpyxl
     except ImportError:
@@ -73,15 +93,18 @@ def check_excel(agent_workspace, gt_dir):
                 if a_row is None:
                     errors.append(f"Missing department row: {g_row[0]}")
                     continue
-                # Headcount col 1
-                if len(a_row) > 1 and not num_close(a_row[1], g_row[1], 10):
-                    errors.append(f"{g_row[0]} Headcount: got {a_row[1]}, expected {g_row[1]} (tol=10)")
-                # Budget col 2 (large numbers, use tol=1000)
-                if len(a_row) > 2 and not num_close(a_row[2], g_row[2], 1000.0):
-                    errors.append(f"{g_row[0]} Budget: got {a_row[2]}, expected {g_row[2]} (tol=1000)")
-                # Budget_Per_Employee col 4
-                if len(a_row) > 4 and not num_close(a_row[4], g_row[4], 10.0):
-                    errors.append(f"{g_row[0]} Budget_Per_Employee: got {a_row[4]}, expected {g_row[4]} (tol=10.0)")
+                # Use DB-fetched expected when available (more robust), else GT
+                exp_headcount = (dept_expected or {}).get(key, {}).get("headcount", g_row[1]) if dept_expected else g_row[1]
+                exp_budget = (dept_expected or {}).get(key, {}).get("budget", g_row[2]) if dept_expected else g_row[2]
+                # Headcount exact int
+                if len(a_row) > 1 and not num_close(a_row[1], exp_headcount, 0):
+                    errors.append(f"{g_row[0]} Headcount: got {a_row[1]}, expected {exp_headcount}")
+                # Budget tol=1 (rounded to 2 decimals in source)
+                if len(a_row) > 2 and not num_close(a_row[2], exp_budget, 1.0):
+                    errors.append(f"{g_row[0]} Budget: got {a_row[2]}, expected {exp_budget}")
+                # Budget_Per_Employee col 4 - tol=1
+                if len(a_row) > 4 and not num_close(a_row[4], g_row[4], 1.0):
+                    errors.append(f"{g_row[0]} Budget_Per_Employee: got {a_row[4]}, expected {g_row[4]}")
 
     # Check Summary sheet
     a_sum = load_sheet_rows(agent_wb, "Summary")
@@ -92,26 +115,41 @@ def check_excel(agent_workspace, gt_dir):
         a_sum_data = {str(r[0]).strip().lower(): r[1] for r in (a_sum[1:] if len(a_sum) > 1 else []) if r and r[0]}
         g_sum_data = {str(r[0]).strip().lower(): r[1] for r in (g_sum[1:] if g_sum and len(g_sum) > 1 else []) if r and r[0]}
 
-        # Total_Headcount
+        # Compute dynamic expected totals from DB when available
+        if dept_expected:
+            exp_tot_hc = sum(v["headcount"] for v in dept_expected.values())
+            exp_tot_bud = sum(v["budget"] for v in dept_expected.values())
+            exp_top_dept = max(dept_expected.items(), key=lambda kv: kv[1]["budget"])[0]
+        else:
+            exp_tot_hc, exp_tot_bud, exp_top_dept = 50000, 4564347744.31, "r&d"
+
+        # Total_Headcount - exact int
         th = a_sum_data.get("total_headcount")
         if th is None:
             errors.append("Summary missing Total_Headcount")
-        elif not num_close(th, 50000, 100):
-            errors.append(f"Total_Headcount: got {th}, expected 50000 (tol=100)")
+        elif not num_close(th, exp_tot_hc, 0):
+            errors.append(f"Total_Headcount: got {th}, expected {exp_tot_hc}")
 
-        # Total_Budget
+        # Total_Budget - tol=1
         tb = a_sum_data.get("total_budget")
         if tb is None:
             errors.append("Summary missing Total_Budget")
-        elif not num_close(tb, 4564347744.31, 10000.0):
-            errors.append(f"Total_Budget: got {tb}, expected 4564347744.31 (tol=10000)")
+        elif not num_close(tb, exp_tot_bud, 1.0):
+            errors.append(f"Total_Budget: got {tb}, expected {exp_tot_bud}")
 
-        # Highest_Budget_Dept
+        # Highest_Budget_Dept - exact match (case insensitive)
         hbd = a_sum_data.get("highest_budget_dept")
         if hbd is None:
             errors.append("Summary missing Highest_Budget_Dept")
-        elif not str_match(hbd, "R&D"):
-            errors.append(f"Highest_Budget_Dept: got '{hbd}', expected 'R&D'")
+        elif str(hbd).strip().lower() != exp_top_dept:
+            errors.append(f"Highest_Budget_Dept: got '{hbd}', expected '{exp_top_dept}'")
+
+        # Avg_Budget_Per_Employee validation (if present)
+        abpe = a_sum_data.get("avg_budget_per_employee")
+        if abpe is not None and exp_tot_hc > 0:
+            expected_avg = exp_tot_bud / exp_tot_hc
+            if not num_close(abpe, expected_avg, 10.0):
+                errors.append(f"Avg_Budget_Per_Employee: got {abpe}, expected ~{expected_avg:.2f}")
 
     return errors
 

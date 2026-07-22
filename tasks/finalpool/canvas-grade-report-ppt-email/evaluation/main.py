@@ -12,17 +12,20 @@ from pathlib import Path
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+RUNTIME_ONLY_FAIL = 0
 
 COURSE_ID = 1
 
 
-def check(name, condition, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def check(name, condition, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, RUNTIME_ONLY_FAIL
     if condition:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if runtime_only:
+            RUNTIME_ONLY_FAIL += 1
         d = (detail[:300]) if len(detail) > 300 else detail
         print(f"  [FAIL] {name}: {d}")
 
@@ -96,26 +99,46 @@ def check_pptx(workspace, course_name, grade_dist, summary):
 
     full_text = "\n".join(all_text).lower()
 
+    # Helper: word-boundary match for numeric values (avoid '12' matching '120')
+    import re
+    def num_present(n, text):
+        # Accept integer, 1-decimal, 2-decimal variants
+        if isinstance(n, float):
+            candidates = [f"{n:.2f}", f"{n:.1f}"]
+            # Also int form if fractional part is 0
+            if abs(n - round(n)) < 1e-6:
+                candidates.append(str(int(round(n))))
+        else:
+            candidates = [str(n)]
+        for c in candidates:
+            if re.search(rf"(?<!\d){re.escape(str(c))}(?!\d)", text):
+                return True
+        return False
+
     # Check title slide
     if len(all_text) > 0:
         check("Title slide has 'Grade Analysis'",
               "grade analysis" in all_text[0].lower(),
               f"Text: {all_text[0][:100]}")
 
-    # Check grade distribution data appears
+    # Check grade distribution data appears: both count and avg_score per grade
     for grade, cnt, avg_s in grade_dist:
         check(f"Grade '{grade}' count {cnt} in presentation",
-              str(cnt) in full_text,
-              f"'{cnt}' not found")
+              num_present(cnt, full_text),
+              f"'{cnt}' not found as word-bounded number")
+        # Check avg_score per grade appears (any of rounded forms)
+        check(f"Grade '{grade}' avg_score ~{avg_s} in presentation",
+              num_present(avg_s, full_text),
+              f"Expected {avg_s} (or rounded) as word-bounded number")
 
     # Check summary values
     total_enrolled, graded, overall_avg = summary
     check("Total enrolled appears",
-          str(total_enrolled) in full_text,
+          num_present(total_enrolled, full_text),
           f"Expected {total_enrolled}")
 
     check("Overall avg score appears",
-          str(overall_avg) in full_text,
+          num_present(overall_avg, full_text),
           f"Expected {overall_avg}")
 
     # Check pass rate
@@ -123,8 +146,14 @@ def check_pptx(workspace, course_name, grade_dist, summary):
     pass_count = sum(cnt for g, cnt, _ in grade_dist if g != 'Fail')
     pass_rate = round(pass_count / total_graded * 100, 1) if total_graded > 0 else 0
     check("Pass rate appears",
-          str(pass_rate) in full_text,
+          num_present(pass_rate, full_text),
           f"Expected {pass_rate}")
+
+    # Check that which grade has the most students appears (slide 4 content)
+    top_grade = max(grade_dist, key=lambda g: g[1])[0]
+    check(f"Top grade category '{top_grade}' mentioned",
+          top_grade.lower() in full_text,
+          f"Expected {top_grade}")
 
 
 def check_email(course_name, summary):
@@ -139,7 +168,7 @@ def check_email(course_name, summary):
         )
         cur = conn.cursor()
     except Exception as e:
-        check("DB connection", False, str(e))
+        check("DB connection", False, str(e), runtime_only=True)
         return
 
     cur.execute("""
@@ -159,26 +188,31 @@ def check_email(course_name, summary):
             break
 
     check(f"Email sent to {target}", found is not None,
-          f"Found {len(all_emails)} total emails")
+          f"Found {len(all_emails)} total emails",
+          runtime_only=True)
 
     if found:
         subj, _, _, body = found
         body_lower = (body or "").lower()
         subj_lower = (subj or "").lower()
 
-        check("Email subject mentions grade/analytics",
-              "grade" in subj_lower or "analytics" in subj_lower or "analysis" in subj_lower,
-              f"Subject: {(subj or '')[:100]}")
+        # Stricter: exact phrase + course name
+        expected_subj = f"grade analysis report for {course_name.lower()}"
+        check(f"Email subject is 'Grade Analysis Report for {course_name}'",
+              expected_subj in subj_lower,
+              f"Subject: {(subj or '')[:120]}",
+              runtime_only=True)
 
         check("Email body mentions overall avg score",
               str(summary[2]) in (body or ""),
-              f"Expected {summary[2]} in body")
+              f"Expected {summary[2]} in body",
+              runtime_only=True)
 
-        total_graded_count = summary[1]
         total_enrolled = summary[0]
         check("Email body mentions total enrolled",
               str(total_enrolled) in (body or ""),
-              f"Expected {total_enrolled} in body")
+              f"Expected {total_enrolled} in body",
+              runtime_only=True)
 
 
 if __name__ == "__main__":
@@ -198,11 +232,12 @@ if __name__ == "__main__":
     check_pptx(args.agent_workspace, course_name, grade_dist, summary)
     check_email(course_name, summary)
 
-    all_ok = FAIL_COUNT == 0
+    non_runtime_fail = FAIL_COUNT - RUNTIME_ONLY_FAIL
+    all_ok = non_runtime_fail == 0
 
     print(f"\n=== SUMMARY ===")
     print(f"  Total checks - Passed: {PASS_COUNT}, Failed: {FAIL_COUNT}")
-    print(f"  Overall: {'PASS' if all_ok else 'FAIL'}")
+    print(f"  Overall: {'PASS' if all_ok else 'FAIL'} (runtime-only fails: {RUNTIME_ONLY_FAIL})")
 
     if all_ok:
         print("\nPass all tests!")

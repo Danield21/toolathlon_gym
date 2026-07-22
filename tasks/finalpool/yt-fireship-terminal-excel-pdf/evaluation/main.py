@@ -1,14 +1,5 @@
 """
 Evaluation for yt-fireship-terminal-excel-pdf task.
-
-Checks:
-1. fireship_raw.csv exists with at least 100 rows and required columns
-2. quarterly_stats.json exists with correct structure (at least 4 quarters)
-3. Fireship_Analytics.xlsx exists with Raw_Data, Quarterly_Stats, and Summary sheets
-4. Raw_Data sheet has at least 100 rows
-5. Quarterly_Stats sheet has at least 4 quarters sorted chronologically
-6. Summary sheet has Total_Videos, Best_Quarter, Worst_Quarter entries
-7. Fireship_Analytics_Report.docx exists with required sections
 """
 import csv
 import json
@@ -33,7 +24,42 @@ def record(name, passed, detail=""):
         print(f"  [FAIL] {name}{msg}")
 
 
-def check_csv(agent_workspace):
+def num_close(a, b, abs_tol=1.0, rel_tol=0.0):
+    try:
+        a_f, b_f = float(a), float(b)
+        return abs(a_f - b_f) <= max(abs_tol, abs(b_f) * rel_tol)
+    except (TypeError, ValueError):
+        return False
+
+
+def str_match(a, b):
+    if a is None or b is None:
+        return a is None and b is None
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+def load_gt_quarterly_stats(groundtruth_workspace):
+    path = os.path.join(groundtruth_workspace, "quarterly_stats.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def load_gt_xlsx(groundtruth_workspace):
+    path = os.path.join(groundtruth_workspace, "Fireship_Analytics.xlsx")
+    if not os.path.exists(path):
+        return None
+    try:
+        return openpyxl.load_workbook(path, data_only=True)
+    except Exception:
+        return None
+
+
+def check_csv(agent_workspace, groundtruth_workspace):
     print("\n=== Check 1: fireship_raw.csv ===")
     csv_path = os.path.join(agent_workspace, "fireship_raw.csv")
     if not os.path.exists(csv_path):
@@ -41,27 +67,59 @@ def check_csv(agent_workspace):
         return
     record("fireship_raw.csv exists", True)
 
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-        headers = reader.fieldnames or []
+    try:
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            headers = reader.fieldnames or []
+    except Exception as e:
+        record("CSV readable", False, str(e))
+        return
+    record("CSV readable", True)
 
-    required_cols = ["video_id", "title", "published_date", "duration_sec", "view_count", "like_count"]
+    required_cols = ["video_id", "title", "published_date", "duration_sec",
+                     "view_count", "like_count"]
     headers_lower = [h.lower().strip() for h in headers]
     has_required = all(col in headers_lower for col in required_cols)
-    record("CSV has required columns", has_required, f"Found: {headers}")
+    record("CSV has all required columns", has_required, f"Found: {headers}")
+    record("CSV has correct column ORDER",
+           [h.lower().strip() for h in headers[:6]] == required_cols,
+           f"Got: {headers[:6]}")
 
-    record("CSV has at least 100 rows", len(rows) >= 100, f"Found {len(rows)} rows")
+    # Compare to GT row count (104)
+    gt_path = os.path.join(groundtruth_workspace, "fireship_raw.csv")
+    expected_n = None
+    if os.path.exists(gt_path):
+        with open(gt_path, newline="", encoding="utf-8") as f:
+            expected_n = sum(1 for _ in csv.DictReader(f))
+    if expected_n is not None:
+        record(f"CSV row count == {expected_n}", len(rows) == expected_n,
+               f"Got {len(rows)}")
+    else:
+        record("CSV has at least 100 rows", len(rows) >= 100,
+               f"Got {len(rows)}")
 
-    # Check for some known video titles
-    titles = [r.get("title", "") for r in rows]
-    all_titles = " ".join(titles).lower()
-    has_deepseek = "deepseek" in all_titles
-    record("CSV contains Fireship video titles (DeepSeek)", has_deepseek,
-           "No DeepSeek title found")
+    # YYYY-MM-DD date format
+    if rows:
+        bad_dates = sum(1 for r in rows if not (
+            len(r.get("published_date", "")) == 10 and
+            r.get("published_date", "")[4] == "-" and
+            r.get("published_date", "")[7] == "-"))
+        record("All published_date values are YYYY-MM-DD",
+               bad_dates == 0, f"{bad_dates} bad dates out of {len(rows)}")
+
+        # duration_sec is integer
+        bad_dur = 0
+        for r in rows:
+            try:
+                int(r.get("duration_sec", ""))
+            except Exception:
+                bad_dur += 1
+        record("All duration_sec values are integers",
+               bad_dur == 0, f"{bad_dur} bad duration values")
 
 
-def check_json(agent_workspace):
+def check_json(agent_workspace, groundtruth_workspace):
     print("\n=== Check 2: quarterly_stats.json ===")
     json_path = os.path.join(agent_workspace, "quarterly_stats.json")
     if not os.path.exists(json_path):
@@ -77,40 +135,50 @@ def check_json(agent_workspace):
         return
     record("quarterly_stats.json is valid JSON", True)
 
-    record("Has at least 4 quarters", len(data) >= 4, f"Found {len(data)} entries")
+    gt = load_gt_quarterly_stats(groundtruth_workspace) or []
+    expected_n = len(gt) if gt else 4
+    record(f"Has {expected_n} quarters", len(data) == expected_n,
+           f"Found {len(data)} entries")
 
-    if data:
-        first = data[0]
-        has_keys = all(k in first for k in ["Quarter", "Video_Count", "Total_Views", "Avg_Engagement_Rate"])
-        record("Each entry has Quarter, Video_Count, Total_Views, Avg_Engagement_Rate",
-               has_keys, f"Keys found: {list(first.keys())}")
+    if not data:
+        return
 
-        # Check sorting
-        quarters = [d.get("Quarter", "") for d in data]
-        record("Quarters are sorted chronologically", quarters == sorted(quarters),
-               f"Quarters: {quarters}")
+    first = data[0]
+    has_keys = all(k in first for k in ["Quarter", "Video_Count",
+                                         "Total_Views", "Avg_Engagement_Rate"])
+    record("Each entry has Quarter/Video_Count/Total_Views/Avg_Engagement_Rate",
+           has_keys, f"Keys found: {list(first.keys())}")
 
-        # Check 2025-Q1 is best (should have highest views ~37M)
-        q1_2025 = next((d for d in data if d.get("Quarter") == "2025-Q1"), None)
-        if q1_2025:
-            record("2025-Q1 has over 20M total views", q1_2025.get("Total_Views", 0) >= 20000000,
-                   f"Found {q1_2025.get('Total_Views')}")
+    quarters_actual = [d.get("Quarter", "") for d in data]
+    record("Quarters sorted chronologically",
+           quarters_actual == sorted(quarters_actual),
+           f"Got: {quarters_actual}")
+
+    # Compare to GT for each quarter
+    gt_by_q = {d["Quarter"]: d for d in gt}
+    a_by_q = {d.get("Quarter"): d for d in data}
+    for q, gt_d in gt_by_q.items():
+        a_d = a_by_q.get(q)
+        if a_d is None:
+            record(f"Quarter '{q}' present", False)
+            continue
+        record(f"Quarter '{q}' present", True)
+        record(f"'{q}' Video_Count == {gt_d['Video_Count']}",
+               num_close(a_d.get("Video_Count"), gt_d["Video_Count"], abs_tol=0),
+               f"got {a_d.get('Video_Count')}")
+        # Total_Views: tight tol (1% relative or abs 100)
+        record(f"'{q}' Total_Views ~ {gt_d['Total_Views']}",
+               num_close(a_d.get("Total_Views"), gt_d["Total_Views"],
+                         abs_tol=100, rel_tol=0.01),
+               f"got {a_d.get('Total_Views')}")
+        # Engagement: 0.01% tol
+        record(f"'{q}' Avg_Engagement_Rate ~ {gt_d['Avg_Engagement_Rate']}",
+               num_close(a_d.get("Avg_Engagement_Rate"),
+                         gt_d["Avg_Engagement_Rate"], abs_tol=0.01),
+               f"got {a_d.get('Avg_Engagement_Rate')}")
 
 
-def num_close(a, b, tol=1.0):
-    try:
-        return abs(float(a) - float(b)) <= tol
-    except (TypeError, ValueError):
-        return False
-
-
-def str_match(a, b):
-    if a is None or b is None:
-        return a is None and b is None
-    return str(a).strip().lower() == str(b).strip().lower()
-
-
-def check_excel(agent_workspace, groundtruth_workspace="."):
+def check_excel(agent_workspace, groundtruth_workspace):
     print("\n=== Check 3: Fireship_Analytics.xlsx ===")
     xlsx_path = os.path.join(agent_workspace, "Fireship_Analytics.xlsx")
     if not os.path.exists(xlsx_path):
@@ -119,85 +187,136 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
     record("Fireship_Analytics.xlsx exists", True)
 
     try:
-        wb = openpyxl.load_workbook(xlsx_path)
+        wb = openpyxl.load_workbook(xlsx_path, data_only=True)
     except Exception as e:
         record("Excel file readable", False, str(e))
         return
     record("Excel file readable", True)
 
     sheet_names_lower = [s.lower() for s in wb.sheetnames]
-    record("Has Raw_Data sheet", "raw_data" in sheet_names_lower, f"Sheets: {wb.sheetnames}")
-    record("Has Quarterly_Stats sheet", "quarterly_stats" in sheet_names_lower, f"Sheets: {wb.sheetnames}")
-    record("Has Summary sheet", "summary" in sheet_names_lower, f"Sheets: {wb.sheetnames}")
+    record("Has Raw_Data sheet", "raw_data" in sheet_names_lower)
+    record("Has Quarterly_Stats sheet", "quarterly_stats" in sheet_names_lower)
+    record("Has Summary sheet", "summary" in sheet_names_lower)
 
-    # Check Raw_Data
+    gt_wb = load_gt_xlsx(groundtruth_workspace)
+
+    # Raw_Data: rows match GT count
     if "raw_data" in sheet_names_lower:
         ws = wb[wb.sheetnames[sheet_names_lower.index("raw_data")]]
-        rows = list(ws.iter_rows(values_only=True))
-        data_rows = [r for r in rows[1:] if any(c for c in r)]
-        record("Raw_Data has at least 100 videos", len(data_rows) >= 100,
-               f"Found {len(data_rows)} data rows")
+        a_rows = [r for r in ws.iter_rows(values_only=True) if any(c is not None for c in r)]
+        a_data = a_rows[1:]  # skip header
+        if gt_wb and "Raw_Data" in gt_wb.sheetnames:
+            gt_rows = [r for r in gt_wb["Raw_Data"].iter_rows(values_only=True)
+                       if any(c is not None for c in r)]
+            gt_data = gt_rows[1:]
+            record(f"Raw_Data row count == {len(gt_data)}",
+                   len(a_data) == len(gt_data),
+                   f"Got {len(a_data)}")
+        else:
+            record("Raw_Data has at least 100 rows", len(a_data) >= 100)
 
-    # Check Quarterly_Stats
+        # Header order
+        if a_rows:
+            req_hdrs = ["video_id", "title", "published_date",
+                        "duration_sec", "view_count", "like_count"]
+            actual_hdrs = [str(c).strip().lower() if c else "" for c in a_rows[0][:6]]
+            record("Raw_Data header order", actual_hdrs == req_hdrs,
+                   f"Got {a_rows[0][:6]}")
+
+    # Quarterly_Stats
     if "quarterly_stats" in sheet_names_lower:
         ws = wb[wb.sheetnames[sheet_names_lower.index("quarterly_stats")]]
-        rows = list(ws.iter_rows(values_only=True))
-        data_rows = [r for r in rows[1:] if any(c for c in r)]
-        record("Quarterly_Stats has at least 4 quarters", len(data_rows) >= 4,
-               f"Found {len(data_rows)} rows")
+        a_rows = [r for r in ws.iter_rows(values_only=True)
+                  if any(c is not None for c in r)]
+        if a_rows:
+            req_hdrs = ["quarter", "video_count", "total_views", "avg_engagement_rate"]
+            actual_hdrs = [str(c).strip().lower() if c else "" for c in a_rows[0][:4]]
+            record("Quarterly_Stats header order matches",
+                   actual_hdrs == req_hdrs, f"Got {a_rows[0][:4]}")
 
-        # Check headers
-        if rows:
-            headers = [str(c).strip().lower() if c else "" for c in rows[0]]
-            record("Quarterly_Stats has Quarter and Total_Views columns",
-                   any("quarter" in h for h in headers) and any("view" in h for h in headers),
-                   f"Headers: {rows[0]}")
+        if gt_wb and "Quarterly_Stats" in gt_wb.sheetnames:
+            gt_rows = [r for r in gt_wb["Quarterly_Stats"].iter_rows(values_only=True)
+                       if any(c is not None for c in r)]
+            gt_data = gt_rows[1:]
+            a_data = a_rows[1:]
+            record(f"Quarterly_Stats row count == {len(gt_data)}",
+                   len(a_data) == len(gt_data),
+                   f"Got {len(a_data)}")
 
-    # Check Summary
+            # Sort: chronological
+            a_quarters = [str(r[0]).strip() for r in a_data if r and r[0]]
+            record("Quarterly_Stats sorted chronologically",
+                   a_quarters == sorted(a_quarters), f"Got {a_quarters}")
+
+            # Check each row matches GT
+            gt_by_q = {str(r[0]).strip(): r for r in gt_data if r and r[0]}
+            a_by_q = {str(r[0]).strip(): r for r in a_data if r and r[0]}
+            for q, gt_r in gt_by_q.items():
+                ar = a_by_q.get(q)
+                if ar is None:
+                    record(f"Quarterly_Stats '{q}' present", False)
+                    continue
+                # Video_Count exact
+                record(f"Q-Stats '{q}' Video_Count exact",
+                       num_close(ar[1], gt_r[1], abs_tol=0))
+                # Total_Views with 1% tol
+                record(f"Q-Stats '{q}' Total_Views (1% tol)",
+                       num_close(ar[2], gt_r[2], abs_tol=100, rel_tol=0.01))
+                # Engagement rate with 0.01 tol
+                record(f"Q-Stats '{q}' Avg_Engagement_Rate (0.01)",
+                       num_close(ar[3], gt_r[3], abs_tol=0.01))
+
+    # Summary sheet
     if "summary" in sheet_names_lower:
         ws = wb[wb.sheetnames[sheet_names_lower.index("summary")]]
-        all_text = " ".join(str(c) for row in ws.iter_rows(values_only=True) for c in row if c).lower()
-        record("Summary has Total_Videos entry", "total_videos" in all_text, "No Total_Videos found")
-        record("Summary has Best_Quarter entry", "best_quarter" in all_text, "No Best_Quarter found")
-        record("Summary has Worst_Quarter entry", "worst_quarter" in all_text, "No Worst_Quarter found")
+        rows = [r for r in ws.iter_rows(values_only=True)
+                if any(c is not None for c in r)]
+        if rows:
+            hdrs = [str(c).strip().lower() if c else "" for c in rows[0][:2]]
+            record("Summary headers Metric/Value",
+                   hdrs == ["metric", "value"],
+                   f"Got {rows[0][:2]}")
+        # Build lookup
+        lookup = {}
+        for r in rows[1:]:
+            if r and r[0] is not None:
+                lookup[str(r[0]).strip().lower()] = r[1] if len(r) > 1 else None
 
-    # --- Groundtruth XLSX value comparison ---
-    gt_path = os.path.join(groundtruth_workspace, "Fireship_Analytics.xlsx")
-    if os.path.isfile(gt_path):
-        gt_wb = openpyxl.load_workbook(gt_path, data_only=True)
-        for gt_sname in gt_wb.sheetnames:
-            gt_ws = gt_wb[gt_sname]
-            a_ws = None
-            for asn in wb.sheetnames:
-                if asn.strip().lower() == gt_sname.strip().lower():
-                    a_ws = wb[asn]
-                    break
-            if a_ws is None:
-                record(f"GT sheet '{gt_sname}' exists in agent xlsx", False, f"Available: {wb.sheetnames}")
-                continue
-            gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-            a_rows = [r for r in a_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-            record(f"GT '{gt_sname}' row count", len(a_rows) == len(gt_rows),
-                   f"Expected {len(gt_rows)}, got {len(a_rows)}")
-            for ri in range(min(3, len(gt_rows))):
-                if ri >= len(a_rows):
-                    break
-                ok = True
-                for ci in range(min(len(gt_rows[ri]), len(a_rows[ri]))):
-                    gv, av = gt_rows[ri][ci], a_rows[ri][ci]
-                    if gv is None:
-                        continue
-                    if isinstance(gv, (int, float)):
-                        if not num_close(av, gv, max(abs(gv) * 0.1, 1.0)):
-                            ok = False
-                            break
-                    else:
-                        if not str_match(av, gv):
-                            ok = False
-                            break
-                record(f"GT '{gt_sname}' row {ri+1} values", ok,
-                       f"gt={gt_rows[ri][:4]}, agent={a_rows[ri][:4] if ri < len(a_rows) else 'missing'}")
-        gt_wb.close()
+        if gt_wb and "Summary" in gt_wb.sheetnames:
+            gt_rows = [r for r in gt_wb["Summary"].iter_rows(values_only=True)
+                       if any(c is not None for c in r)]
+            gt_lookup = {}
+            for r in gt_rows[1:]:
+                if r and r[0] is not None:
+                    gt_lookup[str(r[0]).strip().lower()] = r[1] if len(r) > 1 else None
+
+            # Required keys (per task.md): Total_Videos, Total_Views, Best_Quarter,
+            # Worst_Quarter, Overall_Avg_Engagement
+            for key in ["total_videos", "total_views", "best_quarter",
+                        "worst_quarter", "overall_avg_engagement"]:
+                a_val = lookup.get(key)
+                gt_val = gt_lookup.get(key)
+                record(f"Summary has '{key}'", a_val is not None,
+                       f"Available keys: {list(lookup.keys())}")
+                if gt_val is None:
+                    continue
+                if isinstance(gt_val, (int, float)):
+                    if key == "overall_avg_engagement":
+                        record(f"Summary '{key}' value (0.01 tol)",
+                               num_close(a_val, gt_val, abs_tol=0.01),
+                               f"got {a_val}, expected {gt_val}")
+                    elif key == "total_videos":
+                        record(f"Summary '{key}' exact",
+                               num_close(a_val, gt_val, abs_tol=0),
+                               f"got {a_val}, expected {gt_val}")
+                    elif key == "total_views":
+                        record(f"Summary '{key}' (1% tol)",
+                               num_close(a_val, gt_val, abs_tol=100, rel_tol=0.01),
+                               f"got {a_val}, expected {gt_val}")
+                else:
+                    record(f"Summary '{key}' string match",
+                           str_match(a_val, gt_val),
+                           f"got {a_val}, expected {gt_val}")
 
 
 def check_word(agent_workspace):
@@ -217,14 +336,23 @@ def check_word(agent_workspace):
         return
     record("Word document readable", True)
 
-    record("Contains Executive Summary section", "executive summary" in full_text,
-           "No 'Executive Summary' found")
-    record("Contains Quarterly Performance section", "quarterly performance" in full_text,
-           "No 'Quarterly Performance' found")
-    record("Contains Key Observations section", "key observations" in full_text,
-           "No 'Key Observations' found")
-    record("Contains Appendix section", "appendix" in full_text, "No 'Appendix' found")
-    record("Mentions Fireship channel", "fireship" in full_text, "No 'Fireship' mention found")
+    record("Has Executive Summary section", "executive summary" in full_text)
+    record("Has Quarterly Performance section", "quarterly performance" in full_text)
+    record("Has Key Observations section", "key observations" in full_text)
+    record("Has Appendix section", "appendix" in full_text)
+    record("Mentions Fireship channel", "fireship" in full_text)
+    # Should mention total videos count (104) — require 104 to co-occur with 'video' wording
+    # (avoid matching '104' that appears in dates like '2024-10-04')
+    import re as _re
+    # Accept: "104 videos", "104 in total", "total ... 104", etc.
+    total_videos_104 = (
+        bool(_re.search(r"\b104\s+videos?\b", full_text)) or
+        bool(_re.search(r"\b104\s+in\s+total\b", full_text)) or
+        bool(_re.search(r"total[^.\n]{0,60}\b104\b", full_text)) or
+        bool(_re.search(r"\b104\b[^.\n]{0,30}\s+total", full_text))
+    )
+    record("Mentions total videos count 104 (co-located with 'video'/'total')", total_videos_104,
+           "Word doc should mention total video count (104) in context of videos/total")
 
 
 def main():
@@ -235,30 +363,23 @@ def main():
     parser.add_argument("--res_log_file", required=False)
     args = parser.parse_args()
 
-    check_csv(args.agent_workspace)
-    check_json(args.agent_workspace)
+    check_csv(args.agent_workspace, args.groundtruth_workspace)
+    check_json(args.agent_workspace, args.groundtruth_workspace)
     check_excel(args.agent_workspace, args.groundtruth_workspace)
     check_word(args.agent_workspace)
 
     total = PASS_COUNT + FAIL_COUNT
-    if total == 0:
-        print("\nFAIL: No checks were performed.")
-        sys.exit(1)
-
-    accuracy = PASS_COUNT / total * 100
-    print(f"\nOverall: {PASS_COUNT}/{total} checks passed ({accuracy:.1f}%)")
+    print(f"\nOverall: {PASS_COUNT}/{total} checks passed")
 
     result = {
         "total_passed": PASS_COUNT,
         "total_checks": total,
-        "accuracy": accuracy,
     }
-
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

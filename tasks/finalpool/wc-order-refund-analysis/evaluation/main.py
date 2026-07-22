@@ -20,7 +20,7 @@ def check(name, condition, detail=""):
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
-        detail_str = f": {detail[:200]}" if detail else ""
+        detail_str = f": {str(detail)[:200]}" if detail else ""
         print(f"  [FAIL] {name}{detail_str}")
 
 
@@ -37,8 +37,17 @@ def str_match(a, b):
     return str(a).strip().lower() == str(b).strip().lower()
 
 
+def get_expected_refund_summary():
+    conn = psycopg2.connect(**DB)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*), ROUND(SUM(total::numeric), 2), ROUND(AVG(total::numeric), 2) FROM wc.orders WHERE status = 'refunded'")
+    cnt, total, avg = cur.fetchone()
+    cur.close()
+    conn.close()
+    return {"count": int(cnt), "total": float(total) if total is not None else 0.0, "avg": float(avg) if avg is not None else 0.0}
+
+
 def check_excel(agent_workspace, groundtruth_workspace):
-    """Check Excel output against groundtruth."""
     print("\n=== Checking Excel Output ===")
 
     agent_file = os.path.join(agent_workspace, "Refund_Report.xlsx")
@@ -61,18 +70,21 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 return wb[s]
         return None
 
-    # Check Refund Details sheet
-    print("\n--- Refund Details ---")
+    print("--- Refund Details ---")
     agent_ws = get_sheet(agent_wb, "Refund Details")
     gt_ws = get_sheet(gt_wb, "Refund Details")
-    check("Sheet 'Refund Details' exists", agent_ws is not None,
-          f"Found: {agent_wb.sheetnames}")
+    check("Sheet 'Refund Details' exists", agent_ws is not None, f"Found: {agent_wb.sheetnames}")
 
     if agent_ws and gt_ws:
         gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
         agent_rows = list(agent_ws.iter_rows(min_row=2, values_only=True))
+        agent_rows = [r for r in agent_rows if any(c is not None for c in r)]
         check("Refund Details row count", len(agent_rows) == len(gt_rows),
               f"Expected {len(gt_rows)}, got {len(agent_rows)}")
+
+        # Sort order: Order_ID ascending
+        oids = [r[0] for r in agent_rows if r and r[0] is not None]
+        check("Sorted by Order_ID ascending", oids == sorted(oids), f"got {oids}")
 
         for gt_row in gt_rows:
             oid, cname, total, date_str = gt_row
@@ -82,102 +94,111 @@ def check_excel(agent_workspace, groundtruth_workspace):
                     matched = ar
                     break
             if matched:
-                check(f"Order {oid} Customer_Name",
+                check(f"Order {oid} Customer_Name == '{cname}'",
                       str_match(matched[1], cname),
-                      f"Expected '{cname}', got '{matched[1]}'")
-                check(f"Order {oid} Total",
-                      num_close(matched[2], total, 0.5),
-                      f"Expected {total}, got {matched[2]}")
+                      f"got '{matched[1]}'")
+                check(f"Order {oid} Total ≈ {total}",
+                      num_close(matched[2], total, 0.01),
+                      f"got {matched[2]}")
+                # Date: accept date object or YYYY-MM-DD string
+                date_val = matched[3]
+                if hasattr(date_val, "isoformat"):
+                    date_str_a = date_val.isoformat()[:10]
+                else:
+                    date_str_a = str(date_val).strip()[:10]
+                check(f"Order {oid} Date == '{date_str}'",
+                      date_str_a == date_str,
+                      f"got '{date_str_a}'")
             else:
                 check(f"Order {oid} found", False)
 
-    # Check Summary sheet
-    print("\n--- Summary ---")
+    print("--- Summary ---")
     agent_sum = get_sheet(agent_wb, "Summary")
     gt_sum = get_sheet(gt_wb, "Summary")
-    check("Sheet 'Summary' exists", agent_sum is not None,
-          f"Found: {agent_wb.sheetnames}")
+    check("Sheet 'Summary' exists", agent_sum is not None, f"Found: {agent_wb.sheetnames}")
 
     if agent_sum and gt_sum:
         gt_data = {}
         for row in gt_sum.iter_rows(min_row=2, values_only=True):
             if row and row[0]:
                 gt_data[str(row[0]).strip().lower()] = row[1]
-
         agent_data = {}
         for row in agent_sum.iter_rows(min_row=2, values_only=True):
             if row and row[0]:
                 agent_data[str(row[0]).strip().lower()] = row[1]
-
         for key, gt_val in gt_data.items():
             agent_val = agent_data.get(key)
-            if agent_val is None:
-                for ak, av in agent_data.items():
-                    if key.replace("_", "") in ak.replace("_", ""):
-                        agent_val = av
-                        break
             if isinstance(gt_val, (int, float)):
-                check(f"Summary '{key}'",
-                      num_close(agent_val, gt_val, 1.0),
-                      f"Expected {gt_val}, got {agent_val}")
+                check(f"Summary '{key}' == {gt_val}",
+                      num_close(agent_val, gt_val, 0.01),
+                      f"got {agent_val}")
             else:
-                check(f"Summary '{key}'",
+                check(f"Summary '{key}' == '{gt_val}'",
                       str_match(agent_val, gt_val),
-                      f"Expected '{gt_val}', got '{agent_val}'")
+                      f"got '{agent_val}'")
 
     return True
 
 
 def check_emails():
-    """Check that summary email was sent to manager."""
     print("\n=== Checking Emails ===")
-
-    conn = psycopg2.connect(**DB)
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT subject, from_addr, to_addr, body_text
-        FROM email.messages
-    """)
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+    except psycopg2.Error as e:
+        check("DB connect", False, str(e))
+        return False
+    cur.execute("SELECT subject, from_addr, to_addr, body_text FROM email.messages")
     all_emails = cur.fetchall()
     conn.close()
 
+    expected = get_expected_refund_summary()
+
     def find_email_for_recipient(recipient):
         for subj, from_addr, to_addr, body in all_emails:
-            if to_addr:
-                recipients = []
-                if isinstance(to_addr, list):
-                    recipients = [str(r).strip().lower() for r in to_addr]
-                elif isinstance(to_addr, str):
-                    try:
-                        parsed = json.loads(to_addr)
-                        if isinstance(parsed, list):
-                            recipients = [str(r).strip().lower() for r in parsed]
-                        else:
-                            recipients = [str(to_addr).strip().lower()]
-                    except (json.JSONDecodeError, TypeError):
+            if to_addr is None:
+                continue
+            recipients = []
+            if isinstance(to_addr, list):
+                recipients = [str(r).strip().lower() for r in to_addr]
+            elif isinstance(to_addr, str):
+                try:
+                    parsed = json.loads(to_addr)
+                    if isinstance(parsed, list):
+                        recipients = [str(r).strip().lower() for r in parsed]
+                    else:
                         recipients = [str(to_addr).strip().lower()]
-                if recipient.lower() in recipients:
-                    return subj, from_addr, to_addr, body
+                except (json.JSONDecodeError, TypeError):
+                    recipients = [str(to_addr).strip().lower()]
+            if recipient.lower() in recipients:
+                return subj, from_addr, to_addr, body
         return None
 
     result = find_email_for_recipient("manager@store.example.com")
-    check("Summary email sent to manager", result is not None)
-
-    if result:
-        subj, from_addr, to_addr, body = result
-        has_refund_subject = "refund" in (subj or "").lower()
-        check("Email subject contains 'Refund'", has_refund_subject,
-              f"Subject: {(subj or '')[:100]}")
-
-        body_lower = (body or "").lower()
-        check("Email body mentions total refunds (9)",
-              "9" in body_lower or "nine" in body_lower,
-              "Expected mention of 9 refunds")
-        check("Email body mentions total amount",
-              "4256" in body_lower or "4,256" in body_lower,
-              "Expected mention of ~$4256")
-
+    check("Summary email sent to manager@store.example.com", result is not None)
+    if not result:
+        return False
+    subj, from_addr, to_addr, body = result
+    check("Email subject == 'Refund Analysis Report'",
+          (subj or "").strip().lower() == "refund analysis report",
+          f"got: {subj}")
+    check("Email from_addr == 'analytics@store.example.com'",
+          str(from_addr or "").strip().lower() == "analytics@store.example.com",
+          f"got: {from_addr}")
+    body_text = body or ""
+    body_lower = body_text.lower()
+    check(f"Email body mentions total refund count {expected['count']}",
+          str(expected["count"]) in body_text,
+          f"missing {expected['count']}")
+    total_2 = f"{expected['total']:.2f}"
+    total_int = str(int(expected['total']))
+    check(f"Email body mentions total amount {expected['total']}",
+          total_2 in body_text or total_int in body_text or f"{int(expected['total']):,}" in body_text,
+          f"missing total {expected['total']}")
+    avg_2 = f"{expected['avg']:.2f}"
+    check(f"Email body mentions average refund {expected['avg']}",
+          avg_2 in body_text or str(int(expected['avg'])) in body_text,
+          f"missing avg {expected['avg']}")
     return True
 
 
@@ -197,6 +218,7 @@ def main():
     print("=" * 70)
 
     check_excel(args.agent_workspace, gt_dir)
+    check_emails()
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

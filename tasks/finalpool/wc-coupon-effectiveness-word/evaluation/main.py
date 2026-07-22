@@ -144,6 +144,22 @@ def check_excel(workspace):
         if "total" not in summary_text:
             errors.append("Summary sheet missing 'total' related metrics")
 
+        # Validate specific metric values
+        total_coupons_used = len(used_codes)
+        unused_count = len(defined_codes - used_codes)
+        total_discount = sum(s[2] if len(s) > 2 else 0 for s in coupon_stats)
+        # Check numeric presence for each metric
+        if str(total_coupons_used) not in summary_text:
+            errors.append(f"Summary missing Total_Coupons_Used value {total_coupons_used}")
+        if str(total_orders_with_coupons) not in summary_text:
+            errors.append(f"Summary missing Total_Orders_With_Coupons value {total_orders_with_coupons}")
+        if str(unused_count) not in summary_text:
+            errors.append(f"Summary missing Coupons_Never_Used value {unused_count}")
+        # Discount: try a few precisions
+        discount_candidates = [f"{total_discount:.2f}", f"{total_discount:.1f}", f"{int(round(total_discount))}"]
+        if not any(c in summary_text for c in discount_candidates):
+            errors.append(f"Summary missing Overall_Discount_Total ~{total_discount:.2f}")
+
     return errors
 
 

@@ -51,26 +51,29 @@ def str_contains(haystack, needle):
     return needle.strip().lower() in str(haystack).strip().lower()
 
 
-# Expected our averages from Canvas data
-OUR_AVG_ENROLLMENT = {
-    "applied analytics & algorithms": 374,
-    "biochemistry & bioinformatics": 1977,
-    "creative computing & culture": 2217,
-    "data-driven design": 1568,
-    "environmental economics & ethics": 978,
-    "foundations of finance": 1941,
-    "global governance & geopolitics": 845,
+# Expected our averages from Canvas data (validated against GT file).
+# Per course type (lower-cased key): enrollment, assignments, quizzes.
+OUR_AVG = {
+    "applied analytics & algorithms":     {"enr": 374,  "asg": 6,    "quz": 0},
+    "biochemistry & bioinformatics":      {"enr": 1977, "asg": 10.5, "quz": 3.8},
+    "creative computing & culture":       {"enr": 2217, "asg": 10,   "quz": 4},
+    "data-driven design":                 {"enr": 1568, "asg": 8.8,  "quz": 1.8},
+    "environmental economics & ethics":   {"enr": 978,  "asg": 5,    "quz": 0},
+    "foundations of finance":             {"enr": 1941, "asg": 13,   "quz": 7},
+    "global governance & geopolitics":    {"enr": 845,  "asg": 10,   "quz": 6},
 }
 
-NATIONAL_AVG_ENROLLMENT = {
-    "applied analytics & algorithms": 250,
-    "biochemistry & bioinformatics": 1500,
-    "creative computing & culture": 1800,
-    "data-driven design": 1200,
-    "environmental economics & ethics": 800,
-    "foundations of finance": 1600,
-    "global governance & geopolitics": 600,
+NATIONAL_AVG = {
+    "applied analytics & algorithms":     {"enr": 250,  "asg": 8,  "quz": 4},
+    "biochemistry & bioinformatics":      {"enr": 1500, "asg": 12, "quz": 6},
+    "creative computing & culture":       {"enr": 1800, "asg": 8,  "quz": 3},
+    "data-driven design":                 {"enr": 1200, "asg": 10, "quz": 5},
+    "environmental economics & ethics":   {"enr": 800,  "asg": 7,  "quz": 3},
+    "foundations of finance":             {"enr": 1600, "asg": 11, "quz": 5},
+    "global governance & geopolitics":    {"enr": 600,  "asg": 9,  "quz": 4},
 }
+
+ALL_COURSE_TYPES = set(OUR_AVG.keys())
 
 
 def check_excel(agent_workspace):
@@ -150,22 +153,60 @@ def check_excel(agent_workspace):
         if not ok:
             all_ok = False
 
-        # Check a few enrollment values
+        # Verify ALL 7 course types present with correct our_avg and national_avg
+        # Comparison cols layout (header):
+        #   0: Course_Type
+        #   1: Our_Avg_Enrollment
+        #   2: National_Avg_Enrollment
+        #   3: Enrollment_Diff
+        #   4: Our_Avg_Assignments
+        #   5: National_Avg_Assignments
+        #   6: Assignment_Diff
+        #   7: Our_Avg_Quizzes
+        #   8: National_Avg_Quizzes
+        #   9: Quiz_Diff
+        types_seen = set()
         for row in data_rows:
-            if row and row[0]:
-                ct = str(row[0]).strip().lower()
-                if ct in OUR_AVG_ENROLLMENT:
-                    expected = OUR_AVG_ENROLLMENT[ct]
-                    found = False
-                    for cell in row[1:4]:
-                        if num_close(cell, expected, tol=100):
-                            found = True
-                            break
-                    if ct in ["biochemistry & bioinformatics", "foundations of finance"]:
-                        record(f"Enrollment for {ct[:30]}", found,
-                               f"Expected ~{expected}, row: {str(row[:5])[:200]}")
-                        if not found:
-                            all_ok = False
+            if not row or not row[0]:
+                continue
+            ct = str(row[0]).strip().lower()
+            if ct not in OUR_AVG:
+                continue
+            types_seen.add(ct)
+            our = OUR_AVG[ct]
+            nat = NATIONAL_AVG[ct]
+            # Enrollment: tolerance 50
+            e_our_ok = num_close(row[1] if len(row) > 1 else None, our["enr"], tol=50)
+            e_nat_ok = num_close(row[2] if len(row) > 2 else None, nat["enr"], tol=50)
+            record(f"Comparison[{ct[:30]}] Our_Avg_Enrollment~={our['enr']}", e_our_ok,
+                   f"row: {row[:4]}")
+            record(f"Comparison[{ct[:30]}] National_Avg_Enrollment~={nat['enr']}", e_nat_ok,
+                   f"row: {row[:4]}")
+            if not (e_our_ok and e_nat_ok):
+                all_ok = False
+            # Assignments: tolerance 0.5 because avg can be fractional
+            a_our_ok = num_close(row[4] if len(row) > 4 else None, our["asg"], tol=0.5)
+            a_nat_ok = num_close(row[5] if len(row) > 5 else None, nat["asg"], tol=0.5)
+            record(f"Comparison[{ct[:30]}] Our_Avg_Assignments~={our['asg']}", a_our_ok,
+                   f"got {row[4] if len(row) > 4 else None}")
+            record(f"Comparison[{ct[:30]}] National_Avg_Assignments~={nat['asg']}", a_nat_ok,
+                   f"got {row[5] if len(row) > 5 else None}")
+            if not (a_our_ok and a_nat_ok):
+                all_ok = False
+            # Quizzes: tolerance 0.5
+            q_our_ok = num_close(row[7] if len(row) > 7 else None, our["quz"], tol=0.5)
+            q_nat_ok = num_close(row[8] if len(row) > 8 else None, nat["quz"], tol=0.5)
+            record(f"Comparison[{ct[:30]}] Our_Avg_Quizzes~={our['quz']}", q_our_ok,
+                   f"got {row[7] if len(row) > 7 else None}")
+            record(f"Comparison[{ct[:30]}] National_Avg_Quizzes~={nat['quz']}", q_nat_ok,
+                   f"got {row[8] if len(row) > 8 else None}")
+            if not (q_our_ok and q_nat_ok):
+                all_ok = False
+        missing = ALL_COURSE_TYPES - types_seen
+        record("Comparison covers all 7 course types", not missing,
+               f"Missing: {missing}")
+        if missing:
+            all_ok = False
 
     wb.close()
     return all_ok
@@ -220,8 +261,9 @@ def check_pptx(agent_workspace):
                     if ct in text:
                         course_types_found.add(ct)
 
-    ok = len(course_types_found) >= 5
-    record(f"PPT covers >= 5 course types", ok,
+    # Task requires all 7 course-type slides
+    ok = len(course_types_found) == 7
+    record(f"PPT covers all 7 course types", ok,
            f"Found {len(course_types_found)}: {course_types_found}")
     if not ok:
         all_ok = False
@@ -248,10 +290,13 @@ def check_email():
     found_email = False
 
     for subject, from_addr, to_addr, body_text in emails:
-        subj_lower = (subject or "").lower()
-        if "benchmark" in subj_lower or "course" in subj_lower:
+        subj_lower = (subject or "").lower().strip()
+        # Exact required subject per task.md: "Annual Course Benchmark Report"
+        if "annual course benchmark report" in subj_lower or (
+            "annual" in subj_lower and "benchmark" in subj_lower and ("course" in subj_lower or "report" in subj_lower)):
             found_email = True
-            record("Benchmark report email exists", True)
+            record("Benchmark report email exists with correct subject", True,
+                   f"Subject: {subject}")
 
             from_ok = str_contains(from_addr, "academic") or str_contains(from_addr, "university")
             record("Email from academic address", from_ok, f"From: {from_addr}")

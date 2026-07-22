@@ -40,7 +40,48 @@ def record(name, passed, detail=""):
         print(f"  [FAIL] {name}{msg}")
 
 
-def check_pptx(agent_workspace):
+def _fetch_top_videos():
+    """Query DB for top video per month + total monthly count."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("""
+            WITH ranked AS (
+                SELECT TO_CHAR(published_at, 'YYYY-MM') as ym, title, view_count, duration,
+                       ROW_NUMBER() OVER (PARTITION BY TO_CHAR(published_at, 'YYYY-MM')
+                                          ORDER BY view_count DESC) as rn
+                FROM youtube.videos
+                WHERE channel_title ILIKE '%fireship%'
+                  AND published_at >= '2025-01-01' AND published_at < '2025-07-01'
+            )
+            SELECT ym, title, view_count, duration FROM ranked WHERE rn = 1 ORDER BY ym
+        """)
+        top_per_month = cur.fetchall()
+        cur.execute("""
+            SELECT TO_CHAR(published_at, 'YYYY-MM'), COUNT(*)
+            FROM youtube.videos
+            WHERE channel_title ILIKE '%fireship%'
+              AND published_at >= '2025-01-01' AND published_at < '2025-07-01'
+            GROUP BY 1 ORDER BY 1
+        """)
+        monthly_total = {r[0]: r[1] for r in cur.fetchall()}
+        cur.close()
+        conn.close()
+        # Build dict by ym
+        result = {}
+        for ym, title, vc, dur in top_per_month:
+            try:
+                dur_min = round(float(dur) / 60.0, 1)
+            except (TypeError, ValueError):
+                dur_min = None
+            result[ym] = {"title": title, "view_count": int(vc), "duration_min": dur_min}
+        return result, monthly_total
+    except Exception as e:
+        print(f"[WARN] _fetch_top_videos: {e}")
+        return None, None
+
+
+def check_pptx(agent_workspace, top_per_month, monthly_total):
     print("\n=== Check 1: Fireship_2025_Digest.pptx ===")
     pptx_path = os.path.join(agent_workspace, "Fireship_2025_Digest.pptx")
     if not os.path.exists(pptx_path):
@@ -60,35 +101,91 @@ def check_pptx(agent_workspace):
     record("PPTX has at least 7 slides (title + 6 months)", slide_count >= 7,
            f"Found {slide_count} slides")
 
-    # Collect all text from slides
-    all_text = []
+    # Per-slide text (use both .text attr and text_frame.text where available)
+    slide_texts = []
     for slide in prs.slides:
+        stext = ""
         for shape in slide.shapes:
-            if hasattr(shape, "text"):
-                all_text.append(shape.text)
-    full_text = " ".join(all_text).lower()
+            t = getattr(shape, "text", "") or ""
+            if not t and getattr(shape, "has_text_frame", False):
+                try:
+                    t = shape.text_frame.text or ""
+                except Exception:
+                    t = ""
+            if t:
+                stext += " " + t
+        slide_texts.append(stext)
+    full_text = " ".join(slide_texts).lower()
 
     record("Title slide contains 'Fireship 2025 Monthly Tech Digest'",
-           "fireship 2025 monthly tech digest" in full_text,
+           "fireship 2025 monthly tech digest" in slide_texts[0].lower() if slide_texts else False,
            "Title text not found")
 
-    # Check months present
-    months_found = sum(1 for m in ["january 2025", "february 2025", "march 2025",
-                                   "april 2025", "may 2025", "june 2025"]
-                       if m in full_text)
-    record("Slides contain at least 5 of 6 month names", months_found >= 5,
-           f"Found {months_found}/6 months")
+    # Check ALL 6 months present
+    expected_months = [("january", "01"), ("february", "02"), ("march", "03"),
+                       ("april", "04"), ("may", "05"), ("june", "06")]
+    months_found = 0
+    for mname, _ in expected_months:
+        if f"{mname} 2025" in full_text:
+            months_found += 1
+    record("All 6 month names appear in slides", months_found == 6,
+           f"Found {months_found}/6")
 
-    # Check for some video title keywords
-    has_deepseek = "deepseek" in full_text or "bubble" in full_text
-    has_microsoft = "microsoft" in full_text or "chip" in full_text
-    has_vibe = "vibe" in full_text or "coding" in full_text
-    keywords_found = sum([has_deepseek, has_microsoft, has_vibe])
-    record("Slides reference top video titles (at least 2 keywords)", keywords_found >= 2,
-           f"DeepSeek:{has_deepseek}, Microsoft:{has_microsoft}, Vibe:{has_vibe}")
+    # If we have DB data, validate per-month content
+    if top_per_month and monthly_total:
+        for mname, mnum in expected_months:
+            ym = f"2025-{mnum}"
+            tv = top_per_month.get(ym)
+            mt = monthly_total.get(ym)
+            if not tv:
+                continue
+            # Find slide containing this month name (case-insensitive)
+            slide_idx = None
+            for i, st in enumerate(slide_texts):
+                if f"{mname} 2025".lower() in st.lower() and i > 0:
+                    slide_idx = i
+                    break
+            if slide_idx is None:
+                record(f"Slide for {mname.title()} 2025", False, "no slide with month title")
+                continue
+            stxt = slide_texts[slide_idx]
+            stxt_lower = stxt.lower()
+            # Top video title: check for distinctive keyword (>=5 alphabetic chars)
+            import re as _re
+            title_lower = (tv["title"] or "").lower()
+            # Extract alphabetic words (>=5 chars), strip punctuation
+            words = [w for w in _re.findall(r"[a-z]+", title_lower) if len(w) >= 5]
+            keyword_found = False
+            for w in words[:5]:
+                if w in stxt_lower:
+                    keyword_found = True
+                    break
+            # Fallback: check first 15 chars of original
+            if not keyword_found and len(tv["title"]) >= 15:
+                if tv["title"][:15].lower() in stxt_lower:
+                    keyword_found = True
+            record(f"Slide for {mname.title()} 2025 has top video title",
+                   keyword_found, f"Looking for keyword from '{(tv['title'] or '')[:30]}' in slide")
+            # View count (formatted with commas or plain)
+            vc_str = str(tv["view_count"])
+            vc_comma = f"{tv['view_count']:,}"
+            record(f"Slide for {mname.title()} 2025 has view count {tv['view_count']}",
+                   vc_str in stxt or vc_comma in stxt,
+                   f"Looking for {vc_str} or {vc_comma}")
+            # Duration in minutes (1 decimal)
+            if tv["duration_min"] is not None:
+                dur_str = f"{tv['duration_min']:.1f}"
+                record(f"Slide for {mname.title()} 2025 has duration {dur_str} min",
+                       dur_str in stxt or str(int(tv["duration_min"])) in stxt,
+                       f"Looking for {dur_str}")
+            # Total monthly count
+            if mt is not None:
+                record(f"Slide for {mname.title()} 2025 has monthly count {mt}",
+                       str(mt) in stxt,
+                       f"Looking for {mt}")
 
 
-def check_gcal():
+def check_gcal(top_per_month):
     print("\n=== Check 2: Google Calendar events ===")
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
@@ -107,72 +204,128 @@ def check_gcal():
         if "monthly tech digest review" in (e[0] or "").lower()
     ]
 
-    record("At least 6 Monthly Tech Digest Review events in Jan-Jun 2025",
-           len(digest_events) >= 6,
+    # Strict count == 6
+    record("Exactly 6 Monthly Tech Digest Review events",
+           len(digest_events) == 6,
            f"Found {len(digest_events)} matching events out of {len(events)} total")
 
-    if digest_events:
-        # Check duration (09:00-09:30 = 30 minutes)
-        summary, desc, start_dt, end_dt = digest_events[0]
-        if start_dt and end_dt:
-            duration_min = (end_dt - start_dt).total_seconds() / 60
-            record("Events are 30 minutes (09:00-09:30)", 25 <= duration_min <= 35,
-                   f"Duration: {duration_min:.0f} minutes")
+    # Assert DB returned 6 months of top videos so per-month checks can't silently skip.
+    if top_per_month is not None:
+        record(
+            "DB has top videos for all 6 months (2025-01..2025-06)",
+            len(top_per_month) == 6,
+            f"got months: {sorted(top_per_month.keys()) if top_per_month else []}",
+        )
 
-        # Check event descriptions mention video titles
-        all_desc = " ".join((e[1] or "") for e in digest_events).lower()
-        has_video_mention = any(kw in all_desc for kw in
-                                ["deepseek", "microsoft", "vibe", "programming", "google", "cli"])
-        record("Event descriptions mention top video titles", has_video_mention,
-               "No video title keywords found in event descriptions")
+    # Expected exact dates and event titles
+    expected_events = [
+        ("2025-01-07", "January 2025"),
+        ("2025-02-04", "February 2025"),
+        ("2025-03-04", "March 2025"),
+        ("2025-04-01", "April 2025"),
+        ("2025-05-06", "May 2025"),
+        ("2025-06-03", "June 2025"),
+    ]
 
-        # Check months covered - should have Jan-Jun
-        months_in_titles = set()
-        for ev in digest_events:
-            title_lower = (ev[0] or "").lower()
-            for m in ["january", "february", "march", "april", "may", "june"]:
-                if m in title_lower:
-                    months_in_titles.add(m)
-        record("Events cover at least 5 different months",
-               len(months_in_titles) >= 5, f"Months found: {months_in_titles}")
+    # Build event lookup by date
+    by_date = {}
+    for ev in digest_events:
+        if ev[2]:
+            try:
+                d = ev[2].date().isoformat()
+            except AttributeError:
+                d = str(ev[2])[:10]
+            by_date[d] = ev
+
+    for exp_date, exp_month_year in expected_events:
+        ev = by_date.get(exp_date)
+        if ev is None:
+            record(f"GCal event on {exp_date}", False,
+                   f"available dates: {list(by_date.keys())}")
+            continue
+        # Title pattern - exact equality (case-insensitive, trimmed) to prevent
+        # extra prefixes/suffixes from sneaking through.
+        summary = (ev[0] or "")
+        expected_title = f"Monthly Tech Digest Review - {exp_month_year}"
+        record(f"Event on {exp_date} title is exactly '{expected_title}'",
+               summary.strip().lower() == expected_title.strip().lower(),
+               f"got '{summary}'")
+        # Time 09:00 start
+        try:
+            if ev[2].hour != 9 or ev[2].minute != 0:
+                record(f"Event on {exp_date} starts at 09:00", False,
+                       f"got {ev[2].hour:02d}:{ev[2].minute:02d}")
+            else:
+                record(f"Event on {exp_date} starts at 09:00", True)
+        except AttributeError:
+            pass
+        # Duration 30 min
+        if ev[2] and ev[3]:
+            duration_min = (ev[3] - ev[2]).total_seconds() / 60
+            record(f"Event on {exp_date} is 30 minutes",
+                   25 <= duration_min <= 35,
+                   f"duration {duration_min:.0f} min")
+        # Description mentions that month's top video title
+        if top_per_month:
+            import re as _re2
+            ym = exp_date[:7]
+            tv = top_per_month.get(ym)
+            if tv:
+                desc = (ev[1] or "").lower()
+                title_words = [w for w in _re2.findall(r"[a-z]+", (tv["title"] or "").lower())
+                               if len(w) >= 5]
+                found = any(w in desc for w in title_words[:5]) or (tv["title"] or "")[:20].lower() in desc
+                record(f"Event on {exp_date} description mentions top video",
+                       found, f"description: {desc[:120]}")
 
 
-def check_email():
+def check_email(top_per_month):
     print("\n=== Check 3: Email to team@company.com ===")
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     cur.execute("""
         SELECT to_addr, subject, body_text FROM email.messages
         WHERE to_addr::text ILIKE '%team@company.com%'
-        AND subject ILIKE '%fireship%digest%'
-        ORDER BY id DESC LIMIT 5
+        ORDER BY id DESC LIMIT 10
     """)
     emails = cur.fetchall()
     cur.close()
     conn.close()
 
-    record("Email to team@company.com with Fireship digest subject exists",
-           len(emails) > 0,
-           "No matching email found")
+    # Find email with exact subject
+    target = None
+    for to, subj, body in emails:
+        if subj and "fireship 2025 monthly digest ready" in subj.lower():
+            target = (to, subj, body)
+            break
 
-    if emails:
-        to_addr, subject, body = emails[0]
-        record("Email subject contains 'Fireship 2025 Monthly Digest Ready'",
-               "fireship 2025 monthly digest ready" in subject.lower(),
-               f"Subject: {subject}")
+    record("Email with subject 'Fireship 2025 Monthly Digest Ready' to team@company.com exists",
+           target is not None,
+           f"subjects: {[e[1] for e in emails]}")
 
+    if target:
+        to_addr, subject, body = target
         body_lower = (body or "").lower()
-        # Check that top video titles are mentioned
-        has_deepseek = "deepseek" in body_lower or "bubble" in body_lower
-        has_microsoft = "microsoft" in body_lower
-        has_vibe = "vibe" in body_lower
-        has_programming = "programming" in body_lower
-        has_google = "google" in body_lower
-        mentions = sum([has_deepseek, has_microsoft, has_vibe, has_programming, has_google])
-        record("Email body mentions at least 4 top video topic keywords",
-               mentions >= 4,
-               f"Keywords found: deepseek={has_deepseek}, microsoft={has_microsoft}, "
-               f"vibe={has_vibe}, programming={has_programming}, google={has_google}")
+        # All 6 months mentioned
+        for m in ["january", "february", "march", "april", "may", "june"]:
+            record(f"Email body mentions {m.title()}",
+                   m in body_lower, "missing month name")
+        # All 6 top videos mentioned (by keyword)
+        if top_per_month:
+            import re as _re3
+            for ym, tv in top_per_month.items():
+                title_words = [w for w in _re3.findall(r"[a-z]+", (tv["title"] or "").lower())
+                               if len(w) >= 5]
+                found = any(w in body_lower for w in title_words[:5]) or (tv["title"] or "")[:20].lower() in body_lower
+                record(f"Email body mentions top video for {ym}",
+                       found, f"title keyword from '{(tv['title'] or '')[:30]}'")
+                # View count mention
+                vc = tv["view_count"]
+                vc_str = str(vc)
+                vc_comma = f"{vc:,}"
+                record(f"Email body mentions view count for {ym}",
+                       vc_str in (body or "") or vc_comma in (body or ""),
+                       f"view count {vc}")
 
 
 def main():
@@ -183,9 +336,10 @@ def main():
     parser.add_argument("--res_log_file", required=False)
     args = parser.parse_args()
 
-    check_pptx(args.agent_workspace)
-    check_gcal()
-    check_email()
+    top_per_month, monthly_total = _fetch_top_videos()
+    check_pptx(args.agent_workspace, top_per_month, monthly_total)
+    check_gcal(top_per_month)
+    check_email(top_per_month)
 
     total = PASS_COUNT + FAIL_COUNT
     if total == 0:
@@ -205,7 +359,8 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    # Require all checks pass
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

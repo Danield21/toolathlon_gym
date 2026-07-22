@@ -69,20 +69,24 @@ def load_sheet_rows(wb, sheet_name):
 
 
 def get_at_risk_emails():
-    """Get expected at-risk customer emails from DB."""
+    """Get expected at-risk customer emails from DB (returns set of emails only for back-compat)."""
+    return set(get_at_risk_customers().keys())
+
+
+def get_at_risk_customers():
+    """Get at-risk customers with name info. Returns dict: email -> (first_name, last_name)."""
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     cur.execute("""
-        SELECT c.email, c.first_name, c.last_name, c.orders_count, c.total_spent
+        SELECT c.email, c.first_name, c.last_name
         FROM wc.customers c
         WHERE c.orders_count <= 1
-        ORDER BY c.email
     """)
-    single_order = {row[0].lower() for row in cur.fetchall()}
+    single_order = {row[0].lower(): (row[1] or "", row[2] or "") for row in cur.fetchall()}
 
     # Also get customers whose last order > 60 days ago
     cur.execute("""
-        SELECT c.email
+        SELECT c.email, c.first_name, c.last_name
         FROM wc.customers c
         LEFT JOIN (
             SELECT customer_id, MAX(date_created) as last_order
@@ -93,11 +97,12 @@ def get_at_risk_emails():
         WHERE c.orders_count > 1
           AND (o.last_order IS NULL OR o.last_order < NOW() - INTERVAL '60 days')
     """)
-    stale_order = {row[0].lower() for row in cur.fetchall()}
-
+    stale_order = {row[0].lower(): (row[1] or "", row[2] or "") for row in cur.fetchall()}
     cur.close()
     conn.close()
-    return single_order | stale_order
+    combined = dict(single_order)
+    combined.update(stale_order)
+    return combined
 
 
 def check_excel(agent_workspace, gt_workspace):
@@ -405,6 +410,59 @@ def check_email():
     check("At-risk customers received emails (>= 50%)",
           matched >= len(at_risk_emails) * 0.5,
           f"Matched {matched} out of {len(at_risk_emails)} at-risk customers")
+
+    # Check that retention emails are personalized: at least 30% mention a tier name
+    tier_names = ["platinum", "gold", "silver", "bronze"]
+    personalized_count = 0
+    for em in retention_emails:
+        body_lc = em["body"].lower()
+        if any(tn in body_lc for tn in tier_names):
+            personalized_count += 1
+    if retention_emails:
+        pct = personalized_count / len(retention_emails)
+        check("Retention emails are tier-personalized (>= 30%)",
+              pct >= 0.3,
+              f"Personalized {personalized_count}/{len(retention_emails)} ({pct:.1%})")
+
+    # Check that retention emails address recipient by first name (>=30%)
+    at_risk_customers = get_at_risk_customers()
+    firstname_hits = 0
+    firstname_total = 0
+    for em in retention_emails:
+        body_lc = em["body"].lower()
+        # Try each recipient
+        for recipient in em["to"]:
+            if recipient in at_risk_customers:
+                first_name = at_risk_customers[recipient][0].strip().lower()
+                if first_name:
+                    firstname_total += 1
+                    if first_name in body_lc:
+                        firstname_hits += 1
+    if firstname_total > 0:
+        pct_name = firstname_hits / firstname_total
+        check("Retention emails address recipient by first name (>=30%)",
+              pct_name >= 0.3,
+              f"{firstname_hits}/{firstname_total} ({pct_name:.1%})")
+
+    # Check that tier-specific phrases appear (personal outreach / exclusive offers / discount codes / re-engagement)
+    tier_phrase_hits = {
+        "platinum": ["personal outreach", "account manager"],
+        "gold": ["exclusive offer", "early access"],
+        "silver": ["discount code", "targeted discount"],
+        "bronze": ["re-engagement", "reengagement", "engagement campaign"],
+    }
+    if retention_emails:
+        tier_phrase_count = 0
+        for em in retention_emails:
+            body_lc = em["body"].lower()
+            for tier, phrases in tier_phrase_hits.items():
+                if tier in body_lc and any(p in body_lc for p in phrases):
+                    tier_phrase_count += 1
+                    break
+        pct_tier_phrase = tier_phrase_count / len(retention_emails)
+        check("Retention emails use tier-specific phrasing (>=25%)",
+              pct_tier_phrase >= 0.25,
+              f"{tier_phrase_count}/{len(retention_emails)} ({pct_tier_phrase:.1%})")
 
     cur.close()
     conn.close()

@@ -8,7 +8,7 @@ from datetime import datetime
 
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym", user="eigent", password="camel")
+DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym", user="eigent", password="camel")
 
 
 def clear_writable_schemas(conn):

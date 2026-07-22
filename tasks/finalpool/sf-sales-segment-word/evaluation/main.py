@@ -36,7 +36,37 @@ def str_match(a, b):
     return str(a).strip().lower() == str(b).strip().lower()
 
 
-def check_word_doc(agent_workspace):
+def parse_targets_from_pdf(pdf_path):
+    """Parse Q4 targets from the PDF; falls back to hardcoded values if parse fails.
+
+    Keeps the hardcoded values in sync with Q4_Targets.pdf by re-reading at runtime.
+    """
+    fallback = {"Consumer": 210000, "Enterprise": 200000, "Government": 170000, "SMB": 180000}
+    if not pdf_path or not os.path.isfile(pdf_path):
+        return fallback
+    try:
+        import fitz
+        doc = fitz.open(pdf_path)
+        text = ""
+        for p in doc:
+            text += p.get_text()
+        doc.close()
+        import re
+        out = {}
+        for seg in ("Enterprise", "SMB", "Consumer", "Government"):
+            # Match "Segment\n<number>" or "Segment <number>" (with commas)
+            m = re.search(rf"{seg}\s*[:\n]?\s*\$?\s*([0-9][0-9,]*)", text, re.IGNORECASE)
+            if m:
+                out[seg] = int(m.group(1).replace(",", ""))
+        # Only accept if we have all 4
+        if len(out) == 4:
+            return out
+    except Exception as e:
+        print(f"  (PDF parse failed: {e}; using fallback)")
+    return fallback
+
+
+def check_word_doc(agent_workspace, initial_workspace=None):
     """Check the Word document structure and content."""
     print("\n=== Checking Word Document ===")
     try:
@@ -80,7 +110,12 @@ def check_word_doc(agent_workspace):
     expected = cur.fetchall()
     conn.close()
 
-    targets = {"Consumer": 210000, "Enterprise": 200000, "Government": 170000, "SMB": 180000}
+    # Parse targets from PDF (runtime) to avoid hardcode/PDF drift
+    pdf_dir = initial_workspace
+    if not pdf_dir:
+        pdf_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "initial_workspace")
+    pdf_path = os.path.join(pdf_dir, "Q4_Targets.pdf") if pdf_dir else None
+    targets = parse_targets_from_pdf(pdf_path)
 
     # Check table content
     table = doc.tables[0]
@@ -94,24 +129,33 @@ def check_word_doc(agent_workspace):
     for segment, count, actual in expected:
         actual_f = float(actual)
         target = targets[segment]
+        exp_variance = actual_f - target
+        exp_pct = round(actual_f / target * 100, 2) if target else 0
         matched = None
         for r in rows:
             if r and r[0].lower() == segment.lower():
                 matched = r
                 break
         if matched:
-            # Check actual sales value (column index may vary)
-            found_actual = False
+            # Parse all numeric cells
+            nums = []
             for cell in matched[1:]:
                 try:
-                    val = float(cell.replace(",", "").replace("$", ""))
-                    if num_close(val, actual_f, 50.0):
-                        found_actual = True
-                        break
+                    nums.append(float(str(cell).replace(",", "").replace("$", "").replace("%", "")))
                 except (ValueError, AttributeError):
                     continue
+            found_target = any(num_close(v, target, 50.0) for v in nums)
+            found_actual = any(num_close(v, actual_f, 50.0) for v in nums)
+            found_variance = any(num_close(v, exp_variance, 100.0) for v in nums)
+            found_pct = any(num_close(v, exp_pct, 1.0) for v in nums)
+            check(f"Segment {segment} Q4_Target (~{target}) in table", found_target,
+                  f"Expected target {target}, nums={nums}")
             check(f"Segment {segment} actual value in table", found_actual,
-                  f"Expected ~{actual_f}")
+                  f"Expected ~{actual_f}, nums={nums}")
+            check(f"Segment {segment} Variance (~{exp_variance:.0f}) in table", found_variance,
+                  f"Expected ~{exp_variance}, nums={nums}")
+            check(f"Segment {segment} Achievement_Pct (~{exp_pct}%) in table", found_pct,
+                  f"Expected ~{exp_pct}%, nums={nums}")
         else:
             check(f"Segment {segment} found in table", False)
 
@@ -119,6 +163,15 @@ def check_word_doc(agent_workspace):
     full_text = " ".join(p.text for p in doc.paragraphs).lower()
     has_summary = "total" in full_text or "overall" in full_text
     check("Document has summary text", has_summary)
+    # Check summary mentions total target and total actual
+    total_target = sum(targets.values())
+    total_actual = sum(float(e[2]) for e in expected)
+    import re
+    nums_in_text = re.findall(r"\d[\d,]*(?:\.\d+)?", full_text.replace(",", ""))
+    found_total_target = any(abs(float(n) - total_target) < 500 for n in nums_in_text if n)
+    found_total_actual = any(abs(float(n) - total_actual) < 500 for n in nums_in_text if n)
+    check(f"Summary mentions total target (~{total_target})", found_total_target)
+    check(f"Summary mentions total actual (~{total_actual:.0f})", found_total_actual)
 
     return True
 
@@ -175,7 +228,8 @@ def main():
     print("SF SALES SEGMENT WORD - EVALUATION")
     print("=" * 70)
 
-    check_word_doc(args.agent_workspace)
+    initial_ws = os.path.join(task_root, "initial_workspace")
+    check_word_doc(args.agent_workspace, initial_workspace=initial_ws)
     check_excel_groundtruth(args.agent_workspace, gt_dir)
 
     print(f"\n=== SUMMARY ===")

@@ -236,8 +236,10 @@ def check_emails():
             # Check subject contains department name
             dept_lower = dept.lower()
             if dept == "R&D":
-                dept_in_subject = any(
-                    v in subj_lower for v in ["r&d", "r & d", "r and d", "r&amp;d", "rd"]
+                # Use word boundary for 'rd' to avoid matching 'rd' in words like 'Quarterly'
+                dept_in_subject = (
+                    bool(re.search(r"\brd\b", subj_lower))
+                    or any(v in subj_lower for v in ["r&d", "r & d", "r and d", "r&amp;d"])
                 )
             else:
                 dept_in_subject = dept_lower in subj_lower

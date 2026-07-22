@@ -11,5 +11,5 @@ with separate pages for each product category.
 Analysis Requirements:
 - Compare our average rating per category against competitor averages
 - Identify products that fall below the competitor benchmark for their category
-- Create a Notion knowledge base page summarizing the analysis
+- Create a knowledge base page summarizing the analysis
 - Products below benchmark should be flagged with specific improvement actions

@@ -15,7 +15,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -299,7 +299,7 @@ def main():
         clear_tables(conn)
         inject_arxiv_papers(conn)
         inject_arxiv_latex(conn)
-        inject_notion_pages(conn)
+        # Note: We do NOT inject Notion pages — the agent is required to create them.
         ensure_email_folder(conn)
     finally:
         conn.close()

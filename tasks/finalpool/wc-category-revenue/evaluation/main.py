@@ -68,7 +68,22 @@ def main():
         errors = []
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
-        
+
+        # Verify Est_Revenue sort descending (task.md explicit requirement)
+        est_revs = []
+        for row in a_data:
+            if row and row[0] is not None and len(row) > 4 and row[4] is not None:
+                try:
+                    est_revs.append(float(row[4]))
+                except (TypeError, ValueError):
+                    pass
+        if est_revs and est_revs != sorted(est_revs, reverse=True):
+            errors.append(f"Category Revenue not sorted by Est_Revenue descending: {est_revs}")
+
+        # Verify row count matches GT exactly (no extras, no missing)
+        if len(a_data) != len(g_data):
+            errors.append(f"Category Revenue row count: agent={len(a_data)} vs gt={len(g_data)}")
+
         a_lookup = {}
         for row in a_data:
             if row and row[0] is not None:
@@ -81,22 +96,27 @@ def main():
             if a_row is None:
                 errors.append(f"Missing row: {g_row[0]}")
                 continue
-            
+
+            # Products is a count - require exact match (tol=0)
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 2):
-                    errors.append(f"{key}.Products: {a_row[1]} vs {g_row[1]} (tol=2)")
+                if not num_close(a_row[1], g_row[1], 0):
+                    errors.append(f"{key}.Products: {a_row[1]} vs {g_row[1]} (exact)")
 
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 1.0):
-                    errors.append(f"{key}.Avg_Price: {a_row[2]} vs {g_row[2]} (tol=1.0)")
+                if not num_close(a_row[2], g_row[2], 0.5):
+                    errors.append(f"{key}.Avg_Price: {a_row[2]} vs {g_row[2]} (tol=0.5)")
 
+            # Units_Sold tolerance kept proportional
             if len(a_row) > 3 and len(g_row) > 3:
                 if not num_close(a_row[3], g_row[3], 10):
                     errors.append(f"{key}.Units_Sold: {a_row[3]} vs {g_row[3]} (tol=10)")
 
+            # Est_Revenue: 1% tolerance instead of fixed 100
             if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 100.0):
-                    errors.append(f"{key}.Est_Revenue: {a_row[4]} vs {g_row[4]} (tol=100.0)")
+                gt_rev = g_row[4]
+                tol = max(abs(float(gt_rev or 0)) * 0.01, 50.0)
+                if not num_close(a_row[4], g_row[4], tol):
+                    errors.append(f"{key}.Est_Revenue: {a_row[4]} vs {g_row[4]} (tol={tol:.2f})")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")

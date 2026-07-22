@@ -132,10 +132,21 @@ def main():
             if a_row is None:
                 errors.append(f"Missing row: {g_row[0]}")
                 continue
-            
+
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 10.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=10.0)")
+                gv = g_row[1]
+                av = a_row[1]
+                # Scaled tolerance per metric type
+                if "total_eligible" in key:
+                    tol = 1  # exact integer count
+                elif "avg_salary" in key:
+                    tol = 1.0  # rounded to 2 decimals
+                elif "avg_experience" in key:
+                    tol = 0.1  # rounded to 1 decimal
+                else:
+                    tol = 1.0
+                if not num_close(av, gv, tol):
+                    errors.append(f"{key}.Value: {av} vs {gv} (tol={tol})")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -144,7 +155,37 @@ def main():
         else:
             print(f"    PASS")
 
-    
+    # Check email (BLOCKING)
+    print("  Checking email (blocking)...")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
+                                user="eigent", password="camel")
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT subject, to_addr, body_text FROM email.messages
+            WHERE to_addr::text ILIKE '%%hr-director@company.com%%'
+              AND subject ILIKE '%%promotion cycle%%'
+        """)
+        rows = cur.fetchall()
+        if not rows:
+            all_errors.append("Email to hr-director@company.com with subject 'Promotion Cycle: Eligible Candidates Summary' not found")
+        else:
+            # Validate body mentions total count and a department name
+            body_concat = " ".join((r[2] or "").lower() for r in rows)
+            has_total = "9814" in body_concat or "9,814" in body_concat
+            if not has_total:
+                all_errors.append("Email body missing total eligible count (9814)")
+            # Check at least one department mentioned
+            dept_count = sum(1 for d in ["engineering", "finance", "hr", "operations", "r&d", "sales", "support"]
+                             if d in body_concat)
+            if dept_count < 1:
+                all_errors.append("Email body missing department name with highest count")
+            print(f"    PASS (found {len(rows)} matching emails)")
+        cur.close()
+        conn.close()
+    except Exception as e:
+        all_errors.append(f"Email check failed: {e}")
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

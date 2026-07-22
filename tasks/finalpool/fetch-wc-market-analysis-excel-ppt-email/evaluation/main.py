@@ -138,6 +138,7 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                             go_match += 1
                         gt_sp = str(gt_rows[cat][5]).strip().lower()
                         ag_sp = str(agent_rows[cat][5]).strip().lower()
+                        # Strict match now that task.md gives an exact definition (A AND B / A XOR B / neither)
                         if gt_sp == ag_sp:
                             sp_match += 1
 
@@ -183,14 +184,69 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         slide_count = len(prs.slides)
         check("PPT has >= 6 slides", slide_count >= 6, f"got {slide_count}")
 
+        # Structural verification per slide: title + body/content
+        slide_titles = []
+        slide_body_lens = []
+        has_any_table = False
         all_text = ""
         for slide in prs.slides:
+            title_txt = ""
+            body_len = 0
             for shape in slide.shapes:
-                if hasattr(shape, "text"):
-                    all_text += shape.text.lower() + " "
+                if shape.has_table:
+                    has_any_table = True
+                if not hasattr(shape, "text"):
+                    continue
+                txt = shape.text or ""
+                all_text += txt.lower() + " "
+                is_title = False
+                try:
+                    if shape.is_placeholder and shape.placeholder_format is not None:
+                        if shape.placeholder_format.idx == 0:
+                            is_title = True
+                except Exception:
+                    pass
+                if is_title and not title_txt:
+                    title_txt = txt.strip()
+                else:
+                    body_len += len(txt.strip())
+            slide_titles.append(title_txt)
+            slide_body_lens.append(body_len)
 
+        # At least 5 slides have non-empty title text
+        titled = sum(1 for t in slide_titles if t)
+        check("At least 5 slides have titles", titled >= 5,
+              f"titled {titled}/{len(slide_titles)}")
+
+        # At least 4 content slides have body text (>20 chars)
+        body_slides = sum(1 for b in slide_body_lens if b >= 20)
+        check("At least 4 slides have body content (>=20 chars)",
+              body_slides >= 4, f"body slides: {body_slides}")
+
+        # At least one slide contains a table (category comparison / strategic matrix)
+        check("PPT contains at least one table", has_any_table,
+              "No table shape found across slides")
+
+        # Required themes referenced in task narrative
         for term in ["market", "competitive", "growth", "strategy", "priority"]:
             check(f"PPT mentions '{term}'", term in all_text)
+
+        # PPT must reference at least 3 actual categories (anchor to data)
+        try:
+            gt_xl = os.path.join(groundtruth_workspace, "Competitive_Analysis.xlsx")
+            cat_refs = 0
+            if os.path.exists(gt_xl):
+                gwb = openpyxl.load_workbook(gt_xl)
+                if "Category_Comparison" in gwb.sheetnames:
+                    gws = gwb["Category_Comparison"]
+                    gt_cats = [str(r[0]).strip() for r in gws.iter_rows(min_row=2, values_only=True) if r and r[0]]
+                    for c in gt_cats:
+                        if c and c.lower() in all_text:
+                            cat_refs += 1
+            check("PPT references at least 3 data categories",
+                  cat_refs >= 3, f"matched {cat_refs} categories")
+        except Exception as e:
+            check("PPT category reference check", False, str(e))
 
     # --- Email checks ---
     try:

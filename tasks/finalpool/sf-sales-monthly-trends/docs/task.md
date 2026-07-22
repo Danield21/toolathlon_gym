@@ -1,4 +1,4 @@
-I need to review our monthly sales trends from the analytics data in our data warehouse. There should be a pre-aggregated monthly revenue summary available. Pull all available months of data.
+I need to review our monthly sales trends from the analytics data in our data warehouse. There should be a pre-aggregated monthly revenue summary available. Pull all available months of data. The exact warehouse table is not always obvious, so please start by listing the available schemas and tables in the warehouse and looking for a pre-aggregated monthly revenue summary (for example, something under a SALES_DW schema with a name like MONTHLY_REVENUE). Do not compute monthly figures from scratch off raw orders if a pre-aggregated summary exists; prefer the summary.
 
 Create an Excel file called Sales_Monthly_Trends.xlsx with two sheets. The first sheet "Monthly Trends" should have columns Month (as date string), Revenue rounded to 2 decimals, Order_Count, Unique_Customers, and Avg_Order_Value rounded to 2 decimals. Sort chronologically by Month.
 

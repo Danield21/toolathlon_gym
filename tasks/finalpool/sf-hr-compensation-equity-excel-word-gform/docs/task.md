@@ -1,6 +1,6 @@
 Hi, I need your help with something important for our HR compliance team. We are conducting an annual pay equity audit and need a thorough analysis of salary distribution across our organization. There is a PDF called Equity_Policy.pdf in the workspace that outlines our compensation equity policy, including how we define experience bands, pay gap thresholds, and equity ratios. Please read through it first so you understand the methodology.
 
-Once you have the policy context, pull employee data from the data warehouse. We need to look at salaries broken down by department, education level, and experience band (the bands are defined in the policy document). Use the terminal for any statistical computations you need.
+Once you have the policy context, pull employee data from the data warehouse. We need to look at salaries broken down by department, education level, and experience band (the bands are defined in the policy document). For convenience, the policy defines the bands and thresholds as follows; please still open the PDF to confirm, and if anything in the PDF differs, the PDF is authoritative: experience bands are Junior (0 to 3 years inclusive), Mid (4 to 7 years inclusive), Senior (8 to 12 years inclusive), and Expert (13 years or more); equity status is "Concerning" when the equity ratio is below 0.85, "Monitor" when it is at least 0.85 and strictly below 0.90, and "Acceptable" when it is at least 0.90. Use the terminal for any statistical computations you need.
 
 Create an Excel file called Compensation_Equity.xlsx with three sheets.
 

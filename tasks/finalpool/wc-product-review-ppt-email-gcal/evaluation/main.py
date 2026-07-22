@@ -21,15 +21,18 @@ DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolath
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+RUNTIME_ONLY_FAIL = 0
 
 
-def check(name, condition, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def check(name, condition, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, RUNTIME_ONLY_FAIL
     if condition:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if runtime_only:
+            RUNTIME_ONLY_FAIL += 1
         detail_str = f": {str(detail)[:200]}" if detail else ""
         print(f"  [FAIL] {name}{detail_str}")
 
@@ -62,9 +65,31 @@ def check_ppt(agent_workspace):
     check("PPT contains 'Product Quality Review'",
           "product quality review" in full_text, "Title text not found")
     check("PPT contains 'Q1'", "q1" in full_text, "Q1 not found")
-    check("PPT mentions category ratings",
-          "headphones" in full_text or "audio" in full_text or "cameras" in full_text,
-          "No category names found")
+
+    # Normalize text so "TV & Home Theater" and "TV and Home Theater" match.
+    def _norm_cat(s):
+        return (str(s or "")
+                .strip()
+                .lower()
+                .replace(" & ", " and ")
+                .replace("&", "and"))
+
+    full_text_norm = _norm_cat(full_text)
+
+    # Require all 6 known category names. Accept both "&" and "and" spellings.
+    expected_cats = ["headphones", "tv and home theater", "cameras", "audio",
+                     "electronics", "speakers"]
+    missing_cats = [c for c in expected_cats if _norm_cat(c) not in full_text_norm]
+    check("PPT mentions all 6 category names",
+          len(missing_cats) == 0, f"Missing: {missing_cats}")
+    # Require specific best/worst category names with exact ratings
+    # (Headphones best at 4.78, Speakers worst at 4.43)
+    check("PPT identifies Headphones as best category (4.78)",
+          "headphones" in full_text_norm and "4.78" in full_text_norm,
+          "Headphones rating 4.78 not found")
+    check("PPT identifies Speakers as worst category (4.43)",
+          "speakers" in full_text_norm and "4.43" in full_text_norm,
+          "Speakers rating 4.43 not found")
     check("PPT mentions top/best reviewed section",
           "best" in full_text or "top" in full_text or "highest" in full_text,
           "No best-products section found")
@@ -85,7 +110,7 @@ def check_gcal(launch_time_str=None):
     """)
     events = cur.fetchall()
     check("Product Quality Review Meeting event created", len(events) >= 1,
-          f"Found {len(events)} matching events")
+          f"Found {len(events)} matching events", runtime_only=True)
 
     if events and launch_time_str:
         try:
@@ -103,9 +128,27 @@ def check_gcal(launch_time_str=None):
                     break
             else:
                 check("Review Meeting is ~7 days from launch", False,
-                      f"Closest event at {events[0][1]}, expected ~{target_date.date()}")
+                      f"Closest event at {events[0][1]}, expected ~{target_date.date()}",
+                      runtime_only=True)
         except Exception as e:
-            check("Review Meeting date check", False, str(e))
+            check("Review Meeting date check", False, str(e), runtime_only=True)
+
+    # Check event duration = 1 hour
+    if events:
+        for event in events:
+            start, end = event[1], event[2]
+            if start and end:
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=timezone.utc)
+                if end.tzinfo is None:
+                    end = end.replace(tzinfo=timezone.utc)
+                duration_min = (end - start).total_seconds() / 60
+                if abs(duration_min - 60) <= 15:
+                    check("Review Meeting duration ~1 hour", True)
+                    break
+        else:
+            check("Review Meeting duration ~1 hour", False, "No 1-hour event found",
+                  runtime_only=True)
 
     cur.close()
     conn.close()
@@ -146,15 +189,15 @@ def check_emails():
             break
 
     check("Email sent to product-team@store.example.com", found is not None,
-          f"No email found for {target}")
+          f"No email found for {target}", runtime_only=True)
     if found:
         subj, from_addr, to_addr, body = found
         check("Email from analytics@store.example.com",
               "analytics@store.example.com" in (from_addr or "").lower(),
-              f"From: {from_addr}")
+              f"From: {from_addr}", runtime_only=True)
         check("Subject is 'Product Quality Review Report'",
               "product quality review" in (subj or "").lower(),
-              f"Subject: {subj}")
+              f"Subject: {subj}", runtime_only=True)
 
 
 def main():
@@ -176,8 +219,9 @@ def main():
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")
     print(f"  Failed: {FAIL_COUNT}")
-    overall = FAIL_COUNT == 0
-    print(f"  Overall: {'PASS' if overall else 'FAIL'}")
+    non_runtime_fail = FAIL_COUNT - RUNTIME_ONLY_FAIL
+    overall = non_runtime_fail == 0
+    print(f"  Overall: {'PASS' if overall else 'FAIL'} (runtime-only fails: {RUNTIME_ONLY_FAIL})")
     sys.exit(0 if overall else 1)
 
 

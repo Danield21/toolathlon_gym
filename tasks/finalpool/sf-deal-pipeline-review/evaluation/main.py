@@ -78,18 +78,30 @@ def main():
             if a_row is None:
                 errors.append(f"Missing region: {g_row[0]}")
                 continue
-            # Target
+            # Target (exact - from mock dashboard)
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 100):
+                if not num_close(a_row[1], g_row[1], 1):
                     errors.append(f"{key}.Target: {a_row[1]} vs {g_row[1]}")
-            # Actual
+            # Actual (tighter; values around 60k-90k, tol 100)
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 500):
+                if not num_close(a_row[2], g_row[2], 100):
                     errors.append(f"{key}.Actual: {a_row[2]} vs {g_row[2]}")
-            # Gap_Pct
+            # Gap (=Actual-Target; same tol)
+            if len(a_row) > 3 and len(g_row) > 3:
+                if not num_close(a_row[3], g_row[3], 100):
+                    errors.append(f"{key}.Gap: {a_row[3]} vs {g_row[3]}")
+            # Gap_Pct (1-decimal percentage)
             if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 2.0):
+                if not num_close(a_row[4], g_row[4], 0.5):
                     errors.append(f"{key}.Gap_Pct: {a_row[4]} vs {g_row[4]}")
+            # On_Track (Yes/No)
+            if len(a_row) > 5 and len(g_row) > 5:
+                if not str_match(a_row[5], g_row[5]):
+                    errors.append(f"{key}.On_Track: {a_row[5]} vs {g_row[5]}")
+        # Verify alphabetical sort
+        agent_regions = [str(r[0]).strip() for r in a_data if r and r[0] is not None]
+        if agent_regions != sorted(agent_regions):
+            errors.append(f"Regional Performance not sorted alphabetically: {agent_regions}")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -115,6 +127,9 @@ def main():
                 k = f"{str(r[0]).strip().lower()}|{str(r[1]).strip().lower()}"
                 a_lookup[k] = r
         errors = []
+        # Row count check
+        if len(a_data) != len(g_data):
+            errors.append(f"Segment Breakdown row count: {len(a_data)} vs {len(g_data)}")
         for g_row in g_data:
             if not g_row or g_row[0] is None:
                 continue
@@ -123,9 +138,22 @@ def main():
             if a_row is None:
                 errors.append(f"Missing: {g_row[0]}|{g_row[1]}")
                 continue
+            # Target
+            if len(a_row) > 2 and len(g_row) > 2:
+                if not num_close(a_row[2], g_row[2], 1):
+                    errors.append(f"{key}.Target: {a_row[2]} vs {g_row[2]}")
+            # Actual
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 500):
+                if not num_close(a_row[3], g_row[3], 100):
                     errors.append(f"{key}.Actual: {a_row[3]} vs {g_row[3]}")
+            # Gap_Pct (tighter)
+            if len(a_row) > 5 and len(g_row) > 5:
+                if not num_close(a_row[5], g_row[5], 0.5):
+                    errors.append(f"{key}.Gap_Pct: {a_row[5]} vs {g_row[5]}")
+            # On_Track
+            if len(a_row) > 6 and len(g_row) > 6:
+                if not str_match(a_row[6], g_row[6]):
+                    errors.append(f"{key}.On_Track: {a_row[6]} vs {g_row[6]}")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -160,10 +188,15 @@ def main():
                     if not str_match(a_row[1], g_row[1]):
                         errors.append(f"{key}: {a_row[1]} vs {g_row[1]}")
                 elif key in ("regions_on_track", "regions_behind"):
-                    if not num_close(a_row[1], g_row[1], 1):
+                    if not num_close(a_row[1], g_row[1], 0):
+                        errors.append(f"{key}: {a_row[1]} vs {g_row[1]}")
+                elif key.endswith("_pct"):
+                    # percentage: tol 0.5
+                    if not num_close(a_row[1], g_row[1], 0.5):
                         errors.append(f"{key}: {a_row[1]} vs {g_row[1]}")
                 else:
-                    if not num_close(a_row[1], g_row[1], 1000):
+                    # money: tol 200 (vs base ~480k)
+                    if not num_close(a_row[1], g_row[1], 200):
                         errors.append(f"{key}: {a_row[1]} vs {g_row[1]}")
         if errors:
             all_errors.extend(errors)
@@ -183,17 +216,72 @@ def main():
         }
         conn = psycopg2.connect(**db_config)
         cur = conn.cursor()
-        cur.execute("SELECT summary FROM gcal.events WHERE summary LIKE '%Pipeline Review%'")
+        cur.execute("""
+            SELECT summary, description, start_datetime, end_datetime
+            FROM gcal.events
+            WHERE summary ILIKE '%Pipeline%' AND summary ILIKE '%Review%'
+            ORDER BY start_datetime
+        """)
         events = cur.fetchall()
         cur.close()
         conn.close()
 
-        # All 5 regions are behind target, so expect 5 meetings
-        if len(events) < 5:
-            all_errors.append(f"Expected 5 review meetings, found {len(events)}")
-            print(f"    FAIL: expected 5 meetings, found {len(events)}")
+        # Determine expected event count by reading GT (regions with Gap_Pct < -15)
+        gt_data = load_sheet_rows(gt_wb, "Regional Performance") or []
+        behind_regions = []
+        for r in (gt_data[1:] if len(gt_data) > 1 else []):
+            if r and len(r) > 4 and r[4] is not None:
+                try:
+                    if float(r[4]) < -15:
+                        behind_regions.append(str(r[0]))
+                except (TypeError, ValueError):
+                    pass
+        expected_n = len(behind_regions)
+        if len(events) != expected_n:
+            all_errors.append(f"Expected {expected_n} review meetings, found {len(events)}")
+            print(f"    FAIL: expected {expected_n} meetings, found {len(events)}")
         else:
-            print("    PASS")
+            # Region names appear in summary
+            for region in behind_regions:
+                if not any(region.lower() in (e[0] or "").lower() for e in events):
+                    all_errors.append(f"GCal: missing meeting for region '{region}'")
+            # Each event 1-hour — require ALL events to conform
+            ok_1h = 0
+            for ev in events:
+                if ev[2] and ev[3]:
+                    delta = (ev[3] - ev[2]).total_seconds() / 3600
+                    if 0.9 <= delta <= 1.1:
+                        ok_1h += 1
+            if events and ok_1h != len(events):
+                all_errors.append(f"GCal: {ok_1h}/{len(events)} events are exactly 1 hour")
+            # Start at 9 AM UTC — check ALL events, not just first violation
+            non_9am = []
+            for ev in events:
+                if ev[2]:
+                    try:
+                        if ev[2].hour != 9:
+                            non_9am.append((ev[0], ev[2].hour))
+                    except AttributeError:
+                        pass
+            if non_9am:
+                all_errors.append(f"GCal: {len(non_9am)} events not at 9AM UTC: {non_9am[:3]}")
+            # First event on 2026-03-10 (Tuesday) or after consecutive business days
+            if events:
+                first_dt = events[0][2]
+                if first_dt:
+                    first_date = first_dt.date() if hasattr(first_dt, 'date') else first_dt
+                    if str(first_date) != "2026-03-10":
+                        all_errors.append(f"GCal: first event not on 2026-03-10 (got {first_date})")
+            # Description mentions gap percentage
+            desc_ok = 0
+            for ev in events:
+                d = str(ev[1] or "").lower()
+                if "%" in d or "gap" in d:
+                    desc_ok += 1
+            if desc_ok < len(events) - 1:
+                all_errors.append(f"GCal: {desc_ok}/{len(events)} descriptions mention gap%")
+            if not [e for e in all_errors if e.startswith("GCal:")]:
+                print("    PASS")
     except Exception as e:
         all_errors.append(f"GCal check error: {e}")
         print(f"    ERROR: {e}")

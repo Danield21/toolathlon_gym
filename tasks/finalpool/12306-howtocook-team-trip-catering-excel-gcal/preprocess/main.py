@@ -14,7 +14,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -115,7 +115,7 @@ def inject_email(conn, folder_id):
                 "for 15 team members. We need you to coordinate the full plan including train tickets, "
                 "a team dinner menu, and a day schedule.\n\n"
                 "Please prepare:\n"
-                "1. Rail travel plan (prefer the early G11 train departing 07:00)\n"
+                "1. Rail travel plan (prefer an early-morning train departure to maximize the day)\n"
                 "2. A catered team dinner menu for the evening (around 18:00)\n"
                 "3. A full day timeline in Excel\n"
                 "4. Post the plan to our team knowledge base\n"

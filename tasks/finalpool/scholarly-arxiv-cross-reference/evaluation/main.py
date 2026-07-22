@@ -27,9 +27,10 @@ FAIL_COUNT = 0
 
 # scholarly.arxiv_papers has 5 papers, arxiv.papers has 6
 # Overlap IDs: 1602.05629, 1812.06127, 1908.07873 (3 papers)
-# Scholarly only: 2001.08361, 2005.14165
-# Arxiv only: 1207.00580, 1502.03167, 1912.04977
+# Scholarly only: 2001.08361, 2005.14165 (2 papers)
+# Arxiv only: 1207.00580, 1502.03167, 1912.04977 (3 papers)
 OVERLAP_IDS = {"1602.05629", "1812.06127", "1908.07873"}
+SCHOLARLY_ONLY_IDS = {"2001.08361", "2005.14165"}
 ARXIV_ONLY_IDS = {"1207.00580", "1502.03167", "1912.04977"}
 
 
@@ -93,8 +94,17 @@ def check_excel(agent_workspace):
         record("Sheet 'Scholarly_Papers' exists", True)
         data_rows = scholarly_rows[1:] if len(scholarly_rows) > 1 else []
         # scholarly.arxiv_papers has 5 papers
-        record("Scholarly_Papers has >= 5 rows", len(data_rows) >= 5,
+        record("Scholarly_Papers has exactly 5 rows", len(data_rows) == 5,
                f"Found {len(data_rows)} rows")
+        # Check expected paper IDs
+        sch_header = scholarly_rows[0] if scholarly_rows else []
+        id_col = find_col(sch_header, ["Paper_ID", "Paper ID", "ID", "paper_id"])
+        if id_col is not None:
+            ids_in_sheet = {str(r[id_col]).strip() for r in data_rows if id_col < len(r) and r[id_col] is not None}
+            expected_sch = OVERLAP_IDS | SCHOLARLY_ONLY_IDS
+            record("Scholarly_Papers contains expected paper IDs",
+                   expected_sch.issubset(ids_in_sheet),
+                   f"missing={expected_sch - ids_in_sheet}, extra={ids_in_sheet - expected_sch}")
     else:
         record("Sheet 'Scholarly_Papers' exists", False, f"Available: {wb.sheetnames}")
 
@@ -107,6 +117,14 @@ def check_excel(agent_workspace):
         data_rows = arxiv_rows[1:] if len(arxiv_rows) > 1 else []
         record("Arxiv_Papers has 6 rows", len(data_rows) == 6,
                f"Found {len(data_rows)} rows")
+        ax_header = arxiv_rows[0] if arxiv_rows else []
+        id_col_ax = find_col(ax_header, ["Paper_ID", "Paper ID", "ID", "paper_id"])
+        if id_col_ax is not None:
+            ids_ax = {str(r[id_col_ax]).strip() for r in data_rows if id_col_ax < len(r) and r[id_col_ax] is not None}
+            expected_ax = OVERLAP_IDS | ARXIV_ONLY_IDS
+            record("Arxiv_Papers contains expected paper IDs",
+                   expected_ax.issubset(ids_ax),
+                   f"missing={expected_ax - ids_ax}, extra={ids_ax - expected_ax}")
     else:
         record("Sheet 'Arxiv_Papers' exists", False, f"Available: {wb.sheetnames}")
 
@@ -128,23 +146,37 @@ def check_excel(agent_workspace):
         record("Overlap has In_Arxiv column", in_arxiv_col is not None, f"Header: {header}")
 
         # Check total rows (should be union of both databases = 8)
-        record("Overlap_Analysis has >= 8 rows", len(data_rows) >= 8,
+        record("Overlap_Analysis has exactly 8 rows", len(data_rows) == 8,
                f"Found {len(data_rows)} rows")
 
-        # Check overlap papers are marked Yes/Yes
+        # Check that each ID is correctly flagged
         if id_col is not None and in_scholarly_col is not None and in_arxiv_col is not None:
             overlap_found = 0
+            scholarly_only_found = 0
+            arxiv_only_found = 0
             for row in data_rows:
-                if id_col < len(row) and row[id_col]:
-                    pid = str(row[id_col]).strip()
-                    if pid in OVERLAP_IDS:
-                        s_val = str(row[in_scholarly_col]).strip().lower() if in_scholarly_col < len(row) and row[in_scholarly_col] else ""
-                        a_val = str(row[in_arxiv_col]).strip().lower() if in_arxiv_col < len(row) and row[in_arxiv_col] else ""
-                        if "yes" in s_val and "yes" in a_val:
-                            overlap_found += 1
+                if id_col >= len(row) or not row[id_col]:
+                    continue
+                pid = str(row[id_col]).strip()
+                s_val = str(row[in_scholarly_col]).strip().lower() if in_scholarly_col < len(row) and row[in_scholarly_col] is not None else ""
+                a_val = str(row[in_arxiv_col]).strip().lower() if in_arxiv_col < len(row) and row[in_arxiv_col] is not None else ""
+                s_yes = "yes" in s_val
+                a_yes = "yes" in a_val
+                if pid in OVERLAP_IDS and s_yes and a_yes:
+                    overlap_found += 1
+                elif pid in SCHOLARLY_ONLY_IDS and s_yes and not a_yes:
+                    scholarly_only_found += 1
+                elif pid in ARXIV_ONLY_IDS and not s_yes and a_yes:
+                    arxiv_only_found += 1
 
-            record("Overlap papers marked correctly", overlap_found >= 3,
-                   f"Found {overlap_found} correctly marked overlap papers out of {len(OVERLAP_IDS)}")
+            record("Overlap papers marked Yes/Yes (3)", overlap_found == 3,
+                   f"Found {overlap_found}/3 correctly marked overlap papers")
+            record("Scholarly-only papers marked Yes/No (2)",
+                   scholarly_only_found == 2,
+                   f"Found {scholarly_only_found}/2")
+            record("Arxiv-only papers marked No/Yes (3)",
+                   arxiv_only_found == 3,
+                   f"Found {arxiv_only_found}/3")
     else:
         record("Sheet 'Overlap_Analysis' exists", False, f"Available: {wb.sheetnames}")
 
@@ -163,43 +195,80 @@ def check_email():
             cur.execute("SELECT id FROM email.folders WHERE name ILIKE '%%sent%%' LIMIT 1")
             sent_row = cur.fetchone()
 
-        # Check for email with cross-reference subject
-        cur.execute("""
-            SELECT id, subject, from_addr, to_addr, body_text
-            FROM email.messages
-            WHERE subject ILIKE '%%cross%%reference%%'
-               OR subject ILIKE '%%cross-reference%%'
-        """)
-        emails = cur.fetchall()
+        expected_subject = "Cross-Reference Analysis: Scholarly vs Arxiv Paper Databases"
+        cur.execute("SELECT id, subject, from_addr, to_addr, body_text FROM email.messages")
+        all_emails = cur.fetchall()
 
-        if not emails:
-            # Broader search
-            cur.execute("""
-                SELECT id, subject, from_addr, to_addr, body_text
-                FROM email.messages
-                WHERE subject ILIKE '%%scholarly%%'
-                   OR subject ILIKE '%%arxiv%%'
-            """)
-            emails = cur.fetchall()
+        target = None
+        for em in all_emails:
+            subj = (em[1] or "").strip().lower()
+            if subj == expected_subject.lower():
+                target = em
+                break
+        record("Email with exact subject 'Cross-Reference Analysis: Scholarly vs Arxiv Paper Databases'",
+               target is not None,
+               f"Subjects: {[e[1] for e in all_emails]}")
 
-        record("Email with cross-reference subject sent", len(emails) > 0,
-               "No matching email found")
-
-        if emails:
-            email = emails[0]
-            to_addr = email[3]
-            if isinstance(to_addr, str):
-                to_addr = json.loads(to_addr)
-
-            to_str = str(to_addr).lower()
+        if target is not None:
+            _, subject, from_addr, to_addr, body_text = target
+            from_str = str(from_addr or "").lower()
+            record("Email from librarian@university.edu",
+                   "librarian@university.edu" in from_str,
+                   f"From: {from_addr}")
+            try:
+                if isinstance(to_addr, str):
+                    to_parsed = json.loads(to_addr)
+                else:
+                    to_parsed = to_addr
+            except Exception:
+                to_parsed = to_addr
+            to_str = json.dumps(to_parsed).lower() if to_parsed is not None else ""
             record("Email to research-lead@university.edu",
                    "research-lead@university.edu" in to_str,
                    f"To: {to_addr}")
 
-            body = str(email[4]).lower() if email[4] else ""
-            has_summary = ("overlap" in body or "common" in body or "shared" in body)
-            record("Email body mentions overlap analysis", has_summary,
+            import re
+            body = str(body_text).lower() if body_text else ""
+
+            # Word-boundary digit checks contextualized to a count-word
+            # Scholarly count 5 — match patterns like "5 papers ... scholarly", "scholarly ... 5",
+            # accept also "5 in scholarly".
+            sch5_re = (
+                r"\b5\s*(?:papers|in\s+scholarly|scholarly)"
+                r"|scholarly[^\n]{0,80}\b5\b"
+                r"|\b5\b[^\n]{0,80}scholarly"
+            )
+            arxiv6_re = (
+                r"\b6\s*(?:papers|in\s+arxiv|arxiv)"
+                r"|arxiv[^\n]{0,80}\b6\b"
+                r"|\b6\b[^\n]{0,80}arxiv"
+            )
+            overlap3_re = (
+                r"(?:overlap|shared|common|both)[^\n]{0,80}\b3\b"
+                r"|\b3\b[^\n]{0,80}(?:overlap|shared|common|both)"
+            )
+
+            record("Body mentions Scholarly count 5 (contextual)",
+                   re.search(sch5_re, body) is not None,
                    f"Body preview: {body[:200]}")
+            record("Body mentions Arxiv count 6 (contextual)",
+                   re.search(arxiv6_re, body) is not None,
+                   f"Body preview: {body[:200]}")
+            record("Body mentions overlap count 3 (contextual)",
+                   re.search(overlap3_re, body) is not None,
+                   f"Body preview: {body[:200]}")
+            record("Body mentions overlap/shared/common term",
+                   "overlap" in body or "common" in body or "shared" in body,
+                   f"Body preview: {body[:200]}")
+            # Mention unique papers
+            record("Body mentions unique papers",
+                   "unique" in body or "only in" in body or "exclusive" in body,
+                   f"Body preview: {body[:200]}")
+            # Both database names mentioned
+            record("Body mentions 'scholarly' database",
+                   "scholarly" in body, f"Body preview: {body[:200]}")
+            record("Body mentions 'arxiv' database",
+                   "arxiv" in body, f"Body preview: {body[:200]}")
 
         conn.close()
     except Exception as e:

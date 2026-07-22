@@ -257,9 +257,34 @@ def check_reverse_validation(workspace):
                             pass
                 else:
                     check("No negative revenue in WC_Summary", True)
+
+            # Noise-file reverse check: agent's data must NOT mimic the distractor files
+            ws_wc = get_sheet(wb, "WC_Summary")
+            if ws_wc:
+                noise_markers = []
+                for row in ws_wc.iter_rows(min_row=2, values_only=True):
+                    if row and row[0]:
+                        status_str = str(row[0]).strip().lower()
+                        # "archived" and "legacy" came from the noise Old_Revenue_Report.xlsx
+                        if status_str in ("archived", "legacy"):
+                            noise_markers.append(status_str)
+                check("WC_Summary did not copy noise statuses (archived/legacy)",
+                      len(noise_markers) == 0,
+                      f"Noise markers found: {noise_markers}")
             wb.close()
         except Exception as e:
             check("Reverse validation readable", False, str(e))
+
+    # Confirm agent did not just rename the draft / old noise files as output
+    draft_path = os.path.join(workspace, "Draft_Report.xlsx")
+    if os.path.isfile(draft_path) and os.path.isfile(excel_path):
+        try:
+            same_size = os.path.getsize(draft_path) == os.path.getsize(excel_path)
+            check("Agent output is not a copy of the draft noise file",
+                  not same_size,
+                  "Output Excel has same byte size as Draft_Report.xlsx")
+        except Exception:
+            pass
 
 
 def main():

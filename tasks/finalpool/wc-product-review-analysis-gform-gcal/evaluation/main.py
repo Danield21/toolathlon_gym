@@ -89,12 +89,15 @@ def check_gcal_event():
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
-        cur.execute("SELECT count(*) FROM gcal.events WHERE (LOWER(summary) LIKE '%quality%' OR LOWER(summary) LIKE '%product%') AND DATE(start_datetime) = '2026-03-20'")
+        # Require a matching event on the specific date (2026-03-20).
+        # Removed the dateless fallback because it made the date requirement
+        # effectively optional (FP path).
+        cur.execute(
+            "SELECT count(*) FROM gcal.events "
+            "WHERE (LOWER(summary) LIKE '%quality%' OR LOWER(summary) LIKE '%product%') "
+            "AND DATE(start_datetime) = '2026-03-20'"
+        )
         cnt = cur.fetchone()[0]
-        if cnt == 0:
-            # Try without date filter
-            cur.execute("SELECT count(*) FROM gcal.events WHERE LOWER(summary) LIKE '%quality%' OR LOWER(summary) LIKE '%product%review%'")
-            cnt = cur.fetchone()[0]
         cur.close()
         conn.close()
         return cnt >= 1

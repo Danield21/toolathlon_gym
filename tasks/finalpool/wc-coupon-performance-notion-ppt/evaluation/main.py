@@ -53,22 +53,44 @@ def get_coupon_data():
 
 
 def check_notion_page():
+    """Return (bool, detail) — True only if page title exists AND blocks contain
+    top coupon code, recommendation keyword, and key metric references."""
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
         cur.execute("SELECT id FROM notion.pages WHERE LOWER(properties::text) LIKE '%coupon strategy overview 2026%'")
-        rows = cur.fetchall()
-        if rows:
-            cur.close()
-            conn.close()
-            return True
-        cur.execute("SELECT id FROM notion.blocks WHERE LOWER(block_data::text) LIKE '%coupon strategy overview 2026%'")
-        rows = cur.fetchall()
+        page_rows = cur.fetchall()
+        found_title = len(page_rows) > 0
+        if not found_title:
+            cur.execute("SELECT id FROM notion.blocks WHERE LOWER(block_data::text) LIKE '%coupon strategy overview 2026%'")
+            if len(cur.fetchall()) > 0:
+                found_title = True
+        # Verify block content includes specific required items
+        cur.execute("SELECT LOWER(block_data::text) FROM notion.blocks")
+        all_block_text = " ".join(r[0] for r in cur.fetchall() if r[0])
         cur.close()
         conn.close()
-        return len(rows) > 0
-    except Exception:
-        return False
+        # Strict recommendation keyword: require explicit actionable word, not
+        # generic "top"/"highest" which often appear in analysis descriptions.
+        has_recommend = any(kw in all_block_text for kw in ["recommend", "strategy", "suggest", "propose", "action", "should"])
+        # Require mention of top coupon code (most used)
+        has_top_code = any(code in all_block_text for code in ["holiday30", "save20", "flash50"])
+        # Require explicit analytical keywords
+        has_analysis_kw = ("performing" in all_block_text or "performance" in all_block_text
+                           or "analysis" in all_block_text or "finding" in all_block_text)
+        ok = found_title and has_recommend and has_top_code and has_analysis_kw
+        detail = ""
+        if not found_title:
+            detail = "title not found"
+        elif not has_top_code:
+            detail = "top coupon code not referenced"
+        elif not has_recommend:
+            detail = "recommendation keyword missing"
+        elif not has_analysis_kw:
+            detail = "analysis keyword missing"
+        return ok, detail
+    except Exception as e:
+        return False, str(e)
 
 
 def check_email_sent():
@@ -91,8 +113,21 @@ def check_ppt_file(agent_workspace):
     try:
         from pptx import Presentation
         prs = Presentation(ppt_path)
-        if len(prs.slides) < 7:
-            return False, f"PPT has only {len(prs.slides)} slides, expected >= 7 (1 title + coupons + 1 summary)"
+        n_slides = len(prs.slides)
+        if n_slides < 12:
+            return False, f"PPT has only {n_slides} slides, expected >= 12 (1 title + 10 coupons + 1 summary)"
+        # Additionally: check slides contain coupon code names
+        all_text = ""
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    all_text += shape.text_frame.text + " "
+        all_text_upper = all_text.upper()
+        # Verify at least top coupon codes HOLIDAY30, SAVE20 appear
+        required_codes = ["HOLIDAY30", "SAVE20"]
+        missing = [c for c in required_codes if c not in all_text_upper]
+        if missing:
+            return False, f"PPT missing coupon codes: {missing}"
         return True, ""
     except Exception as e:
         # If pptx not importable, just check file exists
@@ -217,10 +252,11 @@ def main():
 
     # Check Notion page
     print("  Checking Notion page...")
-    if check_notion_page():
+    ok_n, notion_detail = check_notion_page()
+    if ok_n:
         print("    PASS")
     else:
-        all_errors.append("Notion page 'Coupon Strategy Overview 2026' not found")
+        all_errors.append(f"Notion page 'Coupon Strategy Overview 2026' check failed: {notion_detail}")
 
     # Check email sent
     print("  Checking email to marketing...")

@@ -142,4 +142,21 @@ def check_email():
             failed += 1
             errors.append(f"No email found for course {code}")
 
+    # Reverse validation: grade report subjects must not reuse noise subject
+    # phrases, and the agent must not forward/rewrap noise subjects as reports.
+    noise_subjects = [
+        "it maintenance window scheduled",
+        "library renewal notice",
+        "fall 2014 enrollment reminder",
+    ]
+    for subject, from_addr, to_addr, body_text in all_emails:
+        subj_lower = str(subject or "").lower()
+        if "end-of-semester grade report" in subj_lower:
+            for ns in noise_subjects:
+                if ns in subj_lower:
+                    failed += 1
+                    errors.append(
+                        f"Grade report email unexpectedly contains noise subject phrase '{ns}'"
+                    )
+
     return passed, failed, errors

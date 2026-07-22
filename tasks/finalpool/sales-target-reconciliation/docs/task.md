@@ -1,6 +1,6 @@
 I need help putting together a Q1 2025 sales reconciliation report. There's a PDF called Q1_2025_Regional_Targets.pdf in the workspace that has the revenue targets for each region set by management — please read that first.
 
-Then pull the actual Q1 2025 sales numbers from our company data warehouse. Q1 means January through March 2025. I need the actual revenue broken down by region, and also the top 3 best-selling products by revenue within each region.
+Then pull the actual Q1 2025 sales numbers from our company data warehouse. Q1 means January through March 2025. I need the actual revenue broken down by region, and also the top 3 best-selling products by revenue within each region. The data warehouse tracks exactly 5 regions (Asia Pacific, Europe, Latin America, Middle East, and North America), and the PDF's target table also lists targets for all 5; the Regional Performance sheet should therefore have exactly 5 data rows and the Top Products sheet should have 15 rows (5 regions times 3 products).
 
 There's also an internal analytics dashboard running at http://localhost:30160 that has industry benchmark figures — grab those too so we can see how we compare.
 

@@ -140,6 +140,63 @@ def check_excel(agent_workspace, gt_workspace):
         check("Question Analysis row count", abs(len(a_data) - len(g_data)) <= 5,
               f"Agent={len(a_data)}, GT={len(g_data)}")
 
+        # Determine difficulty column by looking at header
+        a_header = a_rows[0] if a_rows else []
+        g_header = g_rows[0] if g_rows else []
+
+        def find_col(header, keyword):
+            for i, h in enumerate(header):
+                if h and keyword.lower() in str(h).lower():
+                    return i
+            return None
+
+        a_quiz_col = find_col(a_header, "Quiz_Title")
+        g_quiz_col = find_col(g_header, "Quiz_Title")
+        a_pos_col = find_col(a_header, "Question_Position")
+        g_pos_col = find_col(g_header, "Question_Position")
+        a_diff_col = find_col(a_header, "Difficulty_Category")
+        g_diff_col = find_col(g_header, "Difficulty_Category")
+
+        if (a_quiz_col is not None and g_quiz_col is not None and
+                a_pos_col is not None and g_pos_col is not None and
+                a_diff_col is not None and g_diff_col is not None):
+            def qa_key_a(row):
+                if row and len(row) > max(a_quiz_col, a_pos_col):
+                    return (str(row[a_quiz_col]).strip().lower() if row[a_quiz_col] is not None else "",
+                            str(row[a_pos_col]).strip() if row[a_pos_col] is not None else "")
+                return None
+
+            def qa_key_g(row):
+                if row and len(row) > max(g_quiz_col, g_pos_col):
+                    return (str(row[g_quiz_col]).strip().lower() if row[g_quiz_col] is not None else "",
+                            str(row[g_pos_col]).strip() if row[g_pos_col] is not None else "")
+                return None
+
+            a_qa_lookup = {qa_key_a(r): r for r in a_data if qa_key_a(r)}
+            qa_errors = []
+            checked = 0
+            for g_row in g_data[:5]:
+                k = qa_key_g(g_row)
+                if k is None:
+                    continue
+                a_row = a_qa_lookup.get(k)
+                if a_row is None:
+                    qa_errors.append(f"Missing key: {k}")
+                    continue
+                if len(a_row) > a_diff_col and len(g_row) > g_diff_col and g_row[g_diff_col] is not None:
+                    if not str_match(a_row[a_diff_col], g_row[g_diff_col]):
+                        qa_errors.append(f"{k}.difficulty: {a_row[a_diff_col]} vs {g_row[g_diff_col]}")
+                    checked += 1
+            if qa_errors:
+                for e in qa_errors[:3]:
+                    check(f"Question Analysis - {e}", False)
+            elif checked > 0:
+                check(f"Question Analysis difficulty categories match ({checked} sampled)", True)
+            else:
+                check("Question Analysis: difficulty categories sampled", True, "no difficulty col identified; skipped")
+        else:
+            check("Question Analysis: difficulty categories sampled", True, "columns not identifiable; skipped")
+
     # --- Sheet 3: Course Summary ---
     print("  Checking Course Summary...")
     a_rows = load_sheet_rows(agent_wb, "Course Summary")
@@ -263,6 +320,25 @@ def check_gcal():
                     check(f"Event '{e[0]}' is ~45 min", abs(duration - 45) <= 5,
                           f"Duration: {duration} min")
 
+            # NEW: No-overlap check for review events
+            sorted_evts = sorted([e for e in events if e[1] and e[2]], key=lambda x: x[1])
+            has_overlap = False
+            for i in range(1, len(sorted_evts)):
+                if sorted_evts[i][1] < sorted_evts[i-1][2]:
+                    has_overlap = True
+                    break
+            check("Review sessions do not overlap", not has_overlap,
+                  "Two or more sessions have overlapping time ranges")
+
+            # NEW: Each session starts between 09:00 and 16:15 local (latest to still end by 17:00 with 45-min duration)
+            business_hours_ok = 0
+            for e in sorted_evts:
+                hour = e[1].hour
+                if 9 <= hour <= 16:
+                    business_hours_ok += 1
+            check(f"All review sessions in business hours 09-17 ({business_hours_ok}/{len(sorted_evts)})",
+                  business_hours_ok == len(sorted_evts))
+
         cur.close()
         conn.close()
     except Exception as e:
@@ -278,17 +354,17 @@ def check_email():
             SELECT id, subject, to_addr, body_text
             FROM email.messages
             WHERE to_addr::text ILIKE '%%assessment_office@university.edu%%'
-               OR subject ILIKE '%%quiz%%item%%'
-               OR subject ILIKE '%%quiz%%analysis%%'
-               OR subject ILIKE '%%item analysis%%'
         """)
         emails = cur.fetchall()
         check("Email to assessment_office sent", len(emails) >= 1,
-              f"Found {len(emails)} matching emails")
+              f"Found {len(emails)} emails to assessment_office")
 
         if emails:
             email = emails[0]
+            subject = str(email[1]).lower() if email[1] else ""
             body = str(email[3]) if email[3] else ""
+            has_subj = any(kw in subject for kw in ["quiz", "item analysis", "quiz item", "quiz analysis"])
+            check("Email subject mentions quiz analysis", has_subj, f"Subject: {subject}")
             check("Email body has content", len(body) > 20,
                   f"Body length: {len(body)}")
 

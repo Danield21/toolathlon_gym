@@ -1,24 +1,23 @@
 """
 Evaluation script for notion-gform-gcal-onboarding task.
 
-Checks:
-1. PPT file exists with 4+ slides, title slide mentions "Welcome" and "2026"
-2. Calendar events on 2026-03-16 (Orientation Session + Team Lunch)
-3. Emails sent with "Welcome" and "Onboarding" in subject, at least 3 emails
-4. Notion page updated (blocks with "March 2026" text)
-
-Usage:
-    python -m evaluation.main \
-        --agent_workspace /path/to/workspace \
-        --groundtruth_workspace /path/to/groundtruth \
-        --launch_time "2026-03-06 10:00:00"
+Checks (strict):
+1. PPT file with title slide containing 'Welcome to the Team!' + March 16, 2026,
+   plus checklist slides (>=6) and a 'New Team Members' slide listing 3 hires
+   (names, departments, emails).
+2. Calendar Orientation Session (9-12) and Team Lunch (12-13) on 2026-03-16,
+   Orientation includes the three hires as attendees.
+3. 3 individual welcome emails to each new hire with exact subject and body
+   content (name, department, dates).
+4. Notion page updated with a 'March 2026 New Hires' section listing all
+   three new hires by exact full name.
 """
 
 import argparse
 import json
 import os
+import re
 import sys
-from datetime import timezone
 
 import psycopg2
 from pptx import Presentation
@@ -34,6 +33,12 @@ DB_CONFIG = {
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
+NEW_HIRES = [
+    {"name": "Sarah Park", "email": "sarah.park@company.com", "dept": "Engineering"},
+    {"name": "Mike Chen", "email": "mike.chen@company.com", "dept": "Sales"},
+    {"name": "Amy Rodriguez", "email": "amy.rodriguez@company.com", "dept": "Marketing"},
+]
+
 
 def record(name, passed, detail=""):
     global PASS_COUNT, FAIL_COUNT
@@ -42,12 +47,11 @@ def record(name, passed, detail=""):
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
-        msg = f": {detail[:300]}" if detail else ""
+        msg = f": {str(detail)[:300]}" if detail else ""
         print(f"  [FAIL] {name}{msg}")
 
 
 def str_contains(haystack, needle):
-    """Case-insensitive containment check."""
     if haystack is None or needle is None:
         return False
     return needle.lower() in str(haystack).lower()
@@ -58,73 +62,76 @@ def str_contains(haystack, needle):
 # ============================================================================
 
 def check_pptx(agent_workspace):
-    """Verify Onboarding_Presentation.pptx exists and has correct content."""
     print("\n=== Checking PowerPoint ===")
 
     pptx_path = os.path.join(agent_workspace, "Onboarding_Presentation.pptx")
-
     if not os.path.isfile(pptx_path):
         record("PPT file exists", False, f"Not found: {pptx_path}")
-        return False
+        return
     record("PPT file exists", True)
 
     try:
         prs = Presentation(pptx_path)
     except Exception as e:
         record("PPT file readable", False, str(e))
-        return False
+        return
     record("PPT file readable", True)
 
     slide_count = len(prs.slides)
-    record("PPT has at least 4 slides", slide_count >= 4,
+    # Title + 6 checklist + New Team Members = 8
+    record("PPT has at least 8 slides (title + 6 checklist + members)", slide_count >= 8,
            f"Found {slide_count} slides")
 
-    all_ok = True
-
-    # Check title slide (first slide)
+    # Title slide
     if slide_count > 0:
         first_slide = prs.slides[0]
         slide_text = ""
         for shape in first_slide.shapes:
             if shape.has_text_frame:
                 slide_text += " " + shape.text_frame.text
-
-        record("Title slide mentions 'Welcome'",
-               str_contains(slide_text, "Welcome"),
+        slide_lower = slide_text.lower()
+        record("Title slide contains 'Welcome to the Team!'",
+               "welcome to the team" in slide_lower,
+               f"Slide text: {slide_text[:200]}")
+        # Subtitle date - accept various forms but must contain March 16, 2026 (or 2026-03-16)
+        date_ok = (
+            ("march 16" in slide_lower and "2026" in slide_lower)
+            or "2026-03-16" in slide_lower
+            or "03/16/2026" in slide_lower
+        )
+        record("Title slide subtitle mentions March 16, 2026", date_ok,
                f"Slide text: {slide_text[:200]}")
 
-        record("Title slide mentions '2026'",
-               str_contains(slide_text, "2026"),
-               f"Slide text: {slide_text[:200]}")
-    else:
-        record("Title slide exists", False, "No slides in presentation")
-        all_ok = False
-
-    # Check that at least one slide mentions new team members or hires
     all_slide_text = ""
     for slide in prs.slides:
         for shape in slide.shapes:
             if shape.has_text_frame:
                 all_slide_text += " " + shape.text_frame.text
-
     all_slide_lower = all_slide_text.lower()
 
-    # Check for checklist-related content (at least 3 checklist items mentioned)
-    checklist_keywords = ["hr", "paperwork", "workstation", "accounts", "team",
-                          "orientation", "handbook", "compliance", "training",
-                          "office", "tour", "manager", "policies", "it accounts"]
-    checklist_found = sum(1 for kw in checklist_keywords if kw in all_slide_lower)
-    record("PPT contains checklist content (>=3 keywords)",
-           checklist_found >= 3,
-           f"Found {checklist_found} checklist keywords in slides")
+    # Checklist content check - require all 6 items
+    checklist_items = [
+        ("hr paperwork", "complete hr paperwork"),
+        ("workstation", "set up workstation"),
+        ("team members", "meet team members"),
+        ("orientation", "orientation"),
+        ("handbook", "company handbook"),
+        ("compliance", "compliance training"),
+    ]
+    found = sum(1 for kw, _ in checklist_items if kw in all_slide_lower)
+    record("PPT covers all 6 checklist items", found >= 6,
+           f"Found {found}/6 checklist keywords")
 
-    # Check for new team members info
-    record("PPT mentions new team members",
-           "team member" in all_slide_lower or "new hire" in all_slide_lower
-           or "new team" in all_slide_lower or "member" in all_slide_lower,
-           "No reference to team members found")
+    # New Team Members slide present
+    record("PPT has 'New Team Members' slide", "new team members" in all_slide_lower,
+           "Phrase 'New Team Members' missing")
 
-    return all_ok
+    # Each hire: name + email + department
+    for h in NEW_HIRES:
+        nm = h["name"].lower(); em = h["email"].lower(); dp = h["dept"].lower()
+        ok = (nm in all_slide_lower) and (em in all_slide_lower) and (dp in all_slide_lower)
+        record(f"PPT lists {h['name']} (name+email+department)", ok,
+               f"name={nm in all_slide_lower}, email={em in all_slide_lower}, dept={dp in all_slide_lower}")
 
 
 # ============================================================================
@@ -132,7 +139,6 @@ def check_pptx(agent_workspace):
 # ============================================================================
 
 def check_gcal():
-    """Verify Orientation Session and Team Lunch events on 2026-03-16."""
     print("\n=== Checking Google Calendar ===")
 
     conn = psycopg2.connect(**DB_CONFIG)
@@ -148,63 +154,53 @@ def check_gcal():
     conn.close()
 
     print(f"[check_gcal] Found {len(events)} calendar events.")
+    record("At least 2 calendar events created", len(events) >= 2, f"Found {len(events)}")
+
+    # Orientation Session
+    orientation = None
     for ev in events:
-        print(f"  Event: {ev[0]} | {ev[2]} - {ev[3]}")
-
-    record("At least 2 calendar events created", len(events) >= 2,
-           f"Found {len(events)}")
-
-    all_ok = True
-
-    # Check for Orientation Session
-    orientation_found = False
-    for summary, description, start_dt, end_dt, attendees in events:
-        summary_lower = (summary or "").lower()
-        if "orientation" in summary_lower:
-            orientation_found = True
-
-            # Check date is March 16, 2026
-            if start_dt is not None:
-                start_date_str = start_dt.strftime("%Y-%m-%d")
-                record("Orientation on 2026-03-16",
-                       start_date_str == "2026-03-16",
-                       f"Start date: {start_date_str}")
-
-                # Check time: 9:00 AM to 12:00 PM
-                start_hour = start_dt.hour
-                end_hour = end_dt.hour if end_dt else None
-                record("Orientation 9 AM - 12 PM",
-                       start_hour == 9 and end_hour == 12,
-                       f"Start hour: {start_hour}, End hour: {end_hour}")
+        s = (ev[0] or "").strip().lower()
+        if "orientation" in s:
+            orientation = ev
             break
+    record("'Orientation Session' event exists", orientation is not None,
+           f"Events: {[e[0] for e in events]}")
+    if orientation is not None:
+        summary, desc, start_dt, end_dt, attendees = orientation
+        # Date
+        start_date_str = start_dt.strftime("%Y-%m-%d") if start_dt else ""
+        record("Orientation on 2026-03-16", start_date_str == "2026-03-16",
+               f"Start date: {start_date_str}")
+        # Time
+        if start_dt and end_dt:
+            record("Orientation 9 AM - 12 PM",
+                   start_dt.hour == 9 and end_dt.hour == 12,
+                   f"start={start_dt}, end={end_dt}")
+        # Attendees include 3 emails
+        attendees_str = json.dumps(attendees).lower() if attendees is not None else ""
+        for h in NEW_HIRES:
+            record(f"Orientation attendee includes {h['email']}",
+                   h["email"].lower() in attendees_str,
+                   f"attendees={attendees_str[:200]}")
 
-    record("Orientation Session event exists", orientation_found,
-           "No event with 'Orientation' in summary")
-
-    # Check for Team Lunch
-    lunch_found = False
-    for summary, description, start_dt, end_dt, attendees in events:
-        summary_lower = (summary or "").lower()
-        if "lunch" in summary_lower:
-            lunch_found = True
-
-            if start_dt is not None:
-                start_date_str = start_dt.strftime("%Y-%m-%d")
-                record("Team Lunch on 2026-03-16",
-                       start_date_str == "2026-03-16",
-                       f"Start date: {start_date_str}")
-
-                start_hour = start_dt.hour
-                end_hour = end_dt.hour if end_dt else None
-                record("Team Lunch 12 PM - 1 PM",
-                       start_hour == 12 and end_hour == 13,
-                       f"Start hour: {start_hour}, End hour: {end_hour}")
+    # Team Lunch
+    lunch = None
+    for ev in events:
+        s = (ev[0] or "").strip().lower()
+        if "team lunch" in s or s == "team lunch":
+            lunch = ev
             break
-
-    record("Team Lunch event exists", lunch_found,
-           "No event with 'Lunch' in summary")
-
-    return all_ok
+    record("'Team Lunch' event exists", lunch is not None,
+           f"Events: {[e[0] for e in events]}")
+    if lunch is not None:
+        summary, desc, start_dt, end_dt, attendees = lunch
+        start_date_str = start_dt.strftime("%Y-%m-%d") if start_dt else ""
+        record("Team Lunch on 2026-03-16", start_date_str == "2026-03-16",
+               f"Start date: {start_date_str}")
+        if start_dt and end_dt:
+            record("Team Lunch 12 PM - 1 PM",
+                   start_dt.hour == 12 and end_dt.hour == 13,
+                   f"start={start_dt}, end={end_dt}")
 
 
 # ============================================================================
@@ -212,47 +208,61 @@ def check_gcal():
 # ============================================================================
 
 def check_emails():
-    """Verify 3 welcome emails sent to new hires."""
     print("\n=== Checking Emails ===")
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
+    # Try Sent folder first; fallback to all messages
     cur.execute("""
         SELECT subject, from_addr, to_addr, body_text
         FROM email.messages
         WHERE folder_id = (SELECT id FROM email.folders WHERE name = 'Sent' LIMIT 1)
     """)
     sent_emails = cur.fetchall()
+    if not sent_emails:
+        cur.execute("SELECT subject, from_addr, to_addr, body_text FROM email.messages")
+        sent_emails = cur.fetchall()
     cur.close()
     conn.close()
 
-    print(f"[check_emails] Found {len(sent_emails)} sent emails.")
+    print(f"[check_emails] Found {len(sent_emails)} emails.")
+    record("At least 3 emails sent", len(sent_emails) >= 3, f"Found {len(sent_emails)}")
 
-    record("At least 3 emails sent", len(sent_emails) >= 3,
-           f"Found {len(sent_emails)}")
-
-    all_ok = True
-
-    # Check that emails have correct subject
-    welcome_emails = []
-    for subject, from_addr, to_addr, body_text in sent_emails:
-        if str_contains(subject, "Welcome") and str_contains(subject, "Onboarding"):
-            welcome_emails.append((subject, from_addr, to_addr, body_text))
-
-    record("At least 3 welcome/onboarding emails",
-           len(welcome_emails) >= 3,
-           f"Found {len(welcome_emails)} emails with 'Welcome' and 'Onboarding' in subject")
-
-    # Check that emails mention March 16, 2026 or orientation
-    for i, (subject, from_addr, to_addr, body_text) in enumerate(welcome_emails[:3]):
-        body_lower = (body_text or "").lower()
-
-        record(f"Email {i+1}: body mentions start date or orientation",
-               "march" in body_lower or "2026" in body_lower or "orientation" in body_lower,
-               f"Body snippet: {(body_text or '')[:150]}")
-
-    return all_ok
+    expected_subject = "Welcome to Our Company - Onboarding Information"
+    for h in NEW_HIRES:
+        match = None
+        for subj, from_addr, to_addr, body in sent_emails:
+            to_str = json.dumps(to_addr).lower() if isinstance(to_addr, (list, dict)) else str(to_addr or "").lower()
+            if h["email"].lower() in to_str:
+                match = (subj, from_addr, to_addr, body)
+                break
+        record(f"Email to {h['email']} present", match is not None,
+               f"to_addrs: {[e[2] for e in sent_emails]}")
+        if match is None:
+            continue
+        subj, _, _, body = match
+        record(f"Email to {h['email']} has exact subject",
+               (subj or "").strip().lower() == expected_subject.lower(),
+               f"subject={subj}")
+        body_lower = (body or "").lower()
+        record(f"Email to {h['email']} body greets by name",
+               h["name"].lower() in body_lower,
+               f"body snippet: {body_lower[:150]}")
+        record(f"Email to {h['email']} body mentions department {h['dept']}",
+               h["dept"].lower() in body_lower,
+               f"body snippet: {body_lower[:150]}")
+        date_ok = (
+            ("march 16" in body_lower and "2026" in body_lower)
+            or "2026-03-16" in body_lower or "03/16/2026" in body_lower
+        )
+        record(f"Email to {h['email']} body mentions start date Mar 16, 2026",
+               date_ok, f"body snippet: {body_lower[:200]}")
+        # Check both 'orientation' and 'lunch' are mentioned
+        record(f"Email to {h['email']} body mentions orientation",
+               "orientation" in body_lower, "")
+        record(f"Email to {h['email']} body mentions team lunch",
+               "lunch" in body_lower, "")
 
 
 # ============================================================================
@@ -260,60 +270,63 @@ def check_emails():
 # ============================================================================
 
 def check_notion():
-    """Verify Notion page was updated with March 2026 New Hires section."""
     print("\n=== Checking Notion ===")
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
-    # Find the onboarding checklist page
-    cur.execute("""
-        SELECT id, properties
-        FROM notion.pages
-    """)
+    cur.execute("SELECT id, properties FROM notion.pages WHERE archived=false")
     pages = cur.fetchall()
-
     print(f"[check_notion] Found {len(pages)} Notion pages.")
 
-    # Look for the onboarding checklist page
+    def _extract_notion_title(props):
+        """Extract title plain_text from properties JSON."""
+        if not isinstance(props, dict):
+            return ""
+        for v in props.values():
+            if isinstance(v, dict) and (v.get("type") == "title" or "title" in v):
+                arr = v.get("title")
+                if isinstance(arr, list):
+                    out = ""
+                    for piece in arr:
+                        if isinstance(piece, dict):
+                            out += piece.get("plain_text", "")
+                            inner = piece.get("text") or {}
+                            if isinstance(inner, dict):
+                                out += inner.get("content", "")
+                    return out
+        return ""
+
     checklist_page_id = None
     for page_id, props in pages:
-        props_str = json.dumps(props).lower() if props else ""
-        if "onboarding" in props_str and "checklist" in props_str:
+        title_text = _extract_notion_title(props or {}).strip().lower()
+        if "new employee onboarding checklist" in title_text:
             checklist_page_id = page_id
             break
-
     record("Onboarding checklist page exists", checklist_page_id is not None,
-           f"No page with 'onboarding' and 'checklist' found among {len(pages)} pages")
-
+           f"Pages: {len(pages)}")
     if not checklist_page_id:
-        return False
+        cur.close()
+        conn.close()
+        return
 
-    # Check blocks for "March 2026" content
-    cur.execute("""
-        SELECT block_data::text FROM notion.blocks
-        WHERE parent_id = %s
-    """, (checklist_page_id,))
+    cur.execute("""SELECT block_data::text FROM notion.blocks WHERE parent_id=%s""", (checklist_page_id,))
     blocks = cur.fetchall()
+    all_block_text = " ".join(str(b[0]) for b in blocks)
+    all_block_lower = all_block_text.lower()
 
-    all_block_text = " ".join(str(b[0]).lower() for b in blocks)
+    record("Notion page contains 'March 2026 New Hires' section",
+           "march 2026 new hires" in all_block_lower,
+           f"Section heading missing in {len(blocks)} blocks")
 
-    record("Notion blocks contain 'march 2026'",
-           "march 2026" in all_block_text,
-           f"'march 2026' not found in {len(blocks)} blocks")
-
-    # Check for new hire names - look for any of the expected names
-    # We check for names from the form responses injected by preprocess
-    new_hire_names = ["sarah", "mike", "amy", "chen", "park", "rodriguez"]
-    names_found = sum(1 for name in new_hire_names if name in all_block_text)
-    record("Notion blocks mention new hire names (>=2)",
-           names_found >= 2,
-           f"Found {names_found} name references in blocks")
+    # Each hire's full name must be present (post-update)
+    for h in NEW_HIRES:
+        record(f"Notion section lists {h['name']}",
+               h["name"].lower() in all_block_lower,
+               f"Looking for '{h['name']}' in blocks")
 
     cur.close()
     conn.close()
-
-    return True
 
 
 # ============================================================================
@@ -328,12 +341,12 @@ def main():
     parser.add_argument("--res_log_file", required=False)
     args = parser.parse_args()
 
-    pptx_ok = check_pptx(args.agent_workspace)
-    gcal_ok = check_gcal()
-    email_ok = check_emails()
-    notion_ok = check_notion()
+    check_pptx(args.agent_workspace)
+    check_gcal()
+    check_emails()
+    check_notion()
 
-    all_passed = pptx_ok and gcal_ok and email_ok and notion_ok
+    all_passed = (FAIL_COUNT == 0)
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")
@@ -345,12 +358,6 @@ def main():
             "passed": PASS_COUNT,
             "failed": FAIL_COUNT,
             "success": all_passed,
-            "details": {
-                "pptx": pptx_ok,
-                "gcal": gcal_ok,
-                "email": email_ok,
-                "notion": notion_ok,
-            },
         }
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)

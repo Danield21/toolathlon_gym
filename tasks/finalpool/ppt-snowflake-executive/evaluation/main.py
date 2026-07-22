@@ -204,6 +204,18 @@ def check_pptx(workspace, regions, total_orders, total_revenue):
             return False, f"Region '{region}' not found in presentation text"
     print("  [PASS] All 5 regions present in presentation")
 
+    # Verify each region has a dedicated slide 2..6 with title matching that region
+    # slides 2..6 (indices 1..5) should each contain one region name in the title/first text
+    region_slides_ok = 0
+    for i in range(1, min(6, len(all_text))):
+        slide_text = all_text[i].lower()
+        matching_regions = [r for r in region_names if r.lower() in slide_text]
+        if len(matching_regions) == 1:
+            region_slides_ok += 1
+    if region_slides_ok < 4:
+        return False, f"Expected each of slides 2-6 to cover exactly one region; only {region_slides_ok}/5 matched"
+    print(f"  [PASS] {region_slides_ok}/5 region slides have unique region coverage")
+
     # Check total orders and revenue appear in the summary
     # Look in last few slides for totals
     found_total_orders = False

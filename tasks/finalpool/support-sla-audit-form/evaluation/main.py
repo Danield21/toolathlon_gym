@@ -277,13 +277,23 @@ def check_excel(agent_workspace, expected):
                 agent_data[str(row[0]).strip().lower().replace(" ", "_")] = row[1]
 
         exp_summary = expected["summary"]
+        # Whitelist of approved key aliases
+        KEY_ALIASES = {
+            "overall_compliance_rate": ["overall compliance", "compliance rate", "overallcompliancerate"],
+            "overall_avg_satisfaction": ["overall avg satisfaction", "avg satisfaction", "satisfaction score", "overallavgsatisfaction"],
+            "meets_compliance_target": ["meets compliance", "meetscompliancetarget"],
+            "meets_satisfaction_target": ["meets satisfaction", "meetssatisfactiontarget"],
+            "total_tickets_reviewed": ["total tickets", "total reviewed", "totalticketsreviewed"],
+            "total_breached_tickets": ["total breached", "breached tickets", "totalbreachedtickets"],
+        }
         for key, gt_val in exp_summary.items():
             key_lower = key.lower()
             agent_val = agent_data.get(key_lower)
             if agent_val is None:
-                # Try fuzzy key match
+                aliases = KEY_ALIASES.get(key_lower, [key_lower.replace("_", " ")])
                 for ak, av in agent_data.items():
-                    if key_lower.replace("_", "") in ak.replace("_", ""):
+                    ak_norm = ak.replace("_", " ").strip()
+                    if any(alias == ak_norm or alias == ak or alias == ak.replace("_", "") for alias in aliases):
                         agent_val = av
                         break
             if isinstance(gt_val, (int, float)):
@@ -321,9 +331,13 @@ def check_form():
 
     form_id = form_row[0]
     form_title = form_row[1]
+    form_desc = form_row[2] if len(form_row) > 2 else ""
     check("Form title is 'SLA Improvement Plan'",
           "sla improvement plan" in form_title.lower(),
           f"Actual title: '{form_title}'")
+    check("Form has non-empty description",
+          form_desc is not None and len(str(form_desc).strip()) > 10,
+          f"Description: '{form_desc}'")
 
     # Get questions
     cur.execute("""
@@ -392,7 +406,10 @@ def check_form():
                   f"Actual: {actual_required}")
 
             # Check options for choice questions
-            if exp_q["options"] is not None and actual_config:
+            if exp_q["options"] is not None:
+                # Do NOT skip when actual_config is empty/None — that would silently
+                # let empty configs bypass the option checks. Instead, always evaluate
+                # and report missing options as failures.
                 config = actual_config if isinstance(actual_config, dict) else {}
                 actual_options = []
                 if "options" in config:
@@ -416,6 +433,20 @@ def check_form():
     conn.close()
 
 
+def check_mock_server_health(port=30162):
+    """Verify mock server is serving the expected dashboard page."""
+    print("\n=== Checking Mock Server Health ===")
+    try:
+        import urllib.request
+        with urllib.request.urlopen(f"http://localhost:{port}/", timeout=3) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+            check(f"Mock server on port {port} is responsive",
+                  resp.status == 200 and len(body) > 0,
+                  f"status={resp.status}, bytes={len(body)}")
+    except Exception as e:
+        check(f"Mock server on port {port} is responsive", False, str(e))
+
+
 def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_file):
     """Run all evaluation checks."""
     # Compute expected values from database
@@ -433,12 +464,14 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         return False, f"Failed to compute expected values: {e}"
 
     # Run checks
+    check_mock_server_health()
     check_excel(agent_workspace, expected)
     check_form()
 
     total = PASS_COUNT + FAIL_COUNT
     pass_rate = PASS_COUNT / total if total > 0 else 0
-    success = pass_rate >= 0.8
+    # Tightened: require ALL checks to pass (previously >=80%).
+    success = FAIL_COUNT == 0
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

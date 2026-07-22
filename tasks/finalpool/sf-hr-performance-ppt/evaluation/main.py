@@ -172,11 +172,59 @@ def check_pptx(workspace, departments, summary):
             return False, f"Department '{dept}' not found in presentation"
     print("  [PASS] All departments present")
 
-    # Check summary values appear somewhere
-    total_str = str(summary[0])
-    if total_str not in "\n".join(all_text[-3:]):
-        return False, f"Total employees ({summary[0]}) not found in summary slides"
-    print("  [PASS] Summary values present")
+    # Check summary values appear somewhere (total_employees, top_performers, avg_salary, avg_rating)
+    summary_slides_text = "\n".join(all_text[-3:])
+    total_emp_str = str(summary[0])
+    top_str = str(summary[2])
+    avg_sal_int = str(int(summary[3]))
+    summary_matches = sum([
+        total_emp_str in summary_slides_text,
+        top_str in summary_slides_text,
+        avg_sal_int in summary_slides_text,
+    ])
+    if summary_matches < 2:
+        return False, f"Summary slides missing values: total={total_emp_str}, top={top_str}, avg_sal={avg_sal_int}"
+    print(f"  [PASS] Summary values present ({summary_matches}/3)")
+
+    # Each department slide must mention the dept AND at least the avg_rating AND avg_salary
+    # (matching task.md "total employees, average rating, top performers count, and average salary")
+    missing_per_dept = []
+    for dept, total, rating, top, avg_sal in departments:
+        dept_slide_texts = [s for s in all_text if dept.lower() in s.lower()]
+        if not dept_slide_texts:
+            missing_per_dept.append(f"{dept}: no slide mentions department")
+            continue
+        combined = " ".join(dept_slide_texts)
+        combined_lower = combined.lower()
+        # Check all four metrics appear on the slide containing this dept
+        rating_str = f"{rating:.2f}"
+        salary_int_str = str(int(avg_sal))
+        salary_2d_str = f"{avg_sal:.2f}"
+        has_total = str(total) in combined
+        has_rating = rating_str in combined or str(rating) in combined
+        has_top = str(top) in combined
+        has_salary = salary_int_str in combined or salary_2d_str in combined
+        missing = []
+        if not has_total: missing.append(f"total={total}")
+        if not has_rating: missing.append(f"avg_rating={rating_str}")
+        if not has_top: missing.append(f"top={top}")
+        if not has_salary: missing.append(f"avg_salary={salary_int_str}")
+        if missing:
+            missing_per_dept.append(f"{dept}: missing {missing}")
+    if missing_per_dept:
+        return False, "Dept slides incomplete: " + "; ".join(missing_per_dept[:3])
+    print(f"  [PASS] All {len(departments)} department slides include total/rating/top/salary")
+
+    # Verify summary slide title contains 'Overall Summary'
+    summary_slide_found = False
+    for s_text in all_text:
+        # title is typically at top; check any occurrence of 'overall summary' (case-insensitive)
+        if "overall summary" in s_text.lower():
+            summary_slide_found = True
+            break
+    if not summary_slide_found:
+        return False, "No slide contains 'Overall Summary' title"
+    print("  [PASS] 'Overall Summary' slide present")
 
     return True, "PPTX file checks passed"
 

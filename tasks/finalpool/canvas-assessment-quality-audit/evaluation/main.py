@@ -66,17 +66,29 @@ def get_expected_quiz_data():
 
     quiz_data = []
     for course, quiz, qcount, avg_score, pts in rows:
-        if pts and float(pts) > 0 and avg_score and qcount > 0:
-            difficulty = round(float(avg_score) / (float(pts) * qcount), 3)
-        else:
-            difficulty = 0
+        # Skip quizzes with no submissions (avg_score = None) - difficulty undefined
+        if avg_score is None or qcount == 0 or pts is None or float(pts) <= 0:
+            continue
+        difficulty = round(float(avg_score) / (float(pts) * qcount), 3)
         flagged = difficulty < 0.3 or difficulty > 0.8
         quiz_data.append({
             "course": course, "quiz": quiz, "qcount": qcount,
-            "avg_score": float(avg_score) if avg_score else 0,
+            "avg_score": float(avg_score),
             "difficulty": difficulty, "flagged": flagged,
         })
     return quiz_data
+
+
+def _find_col(header, target):
+    """Find column index in header (case-insensitive, underscore/space tolerant).
+    Uses exact-match only (after normalization) to avoid substring collisions
+    e.g. 'avg_score' vs 'org_score'."""
+    target_norm = str(target).lower().replace(" ", "_").replace("-", "_")
+    for i, h in enumerate(header):
+        h_norm = str(h or "").lower().replace(" ", "_").replace("-", "_")
+        if h_norm == target_norm:
+            return i
+    return -1
 
 
 def check_excel(agent_workspace):
@@ -98,6 +110,8 @@ def check_excel(agent_workspace):
     total_quizzes = len(expected)
     flagged_count = sum(1 for q in expected if q["flagged"])
     total_questions = sum(q["qcount"] for q in expected)
+    expected_by_key = {(q["course"], q["quiz"]): q for q in expected}
+    flag_rate_pct = round(100.0 * flagged_count / total_quizzes, 1) if total_quizzes else 0.0
 
     # Quiz Overview sheet
     qo_rows = load_sheet_rows(wb, "Quiz Overview")
@@ -105,10 +119,10 @@ def check_excel(agent_workspace):
         check("Sheet 'Quiz Overview' exists", False, f"Available: {wb.sheetnames}")
     else:
         check("Sheet 'Quiz Overview' exists", True)
-        data_rows = qo_rows[1:] if len(qo_rows) > 1 else []
-        check(f"Quiz Overview has {total_quizzes} rows",
-              abs(len(data_rows) - total_quizzes) <= 2,
-              f"Found {len(data_rows)}")
+        data_rows = [r for r in (qo_rows[1:] if len(qo_rows) > 1 else []) if r and r[0]]
+        check(f"Quiz Overview row count == {total_quizzes}",
+              len(data_rows) == total_quizzes,
+              f"Found {len(data_rows)}, expected {total_quizzes}")
 
         header = qo_rows[0] if qo_rows else []
         header_lower = [str(h).lower().replace(" ", "_") if h else "" for h in header]
@@ -116,23 +130,89 @@ def check_excel(agent_workspace):
             check(f"Column '{col}' present", any(col in h for h in header_lower),
                   f"Header: {header}")
 
+        # Per-row value validation
+        idx_course = _find_col(header, "course")
+        idx_quiz = _find_col(header, "quiz")
+        idx_qcount = _find_col(header, "question_count")
+        idx_avg = _find_col(header, "avg_score")
+        idx_diff = _find_col(header, "avg_difficulty")
+
+        if all(i >= 0 for i in [idx_course, idx_quiz, idx_qcount, idx_avg, idx_diff]):
+            row_match = 0
+            row_qcount_ok = 0
+            row_avg_ok = 0
+            row_diff_ok = 0
+            for r in data_rows:
+                key = (str(r[idx_course] or "").strip(), str(r[idx_quiz] or "").strip())
+                if key in expected_by_key:
+                    row_match += 1
+                    exp = expected_by_key[key]
+                    try:
+                        if int(r[idx_qcount]) == exp["qcount"]:
+                            row_qcount_ok += 1
+                    except (TypeError, ValueError):
+                        pass
+                    if num_close(r[idx_avg], exp["avg_score"], tol=0.5):
+                        row_avg_ok += 1
+                    if num_close(r[idx_diff], exp["difficulty"], tol=0.05):
+                        row_diff_ok += 1
+            check("Quiz Overview rows match expected (course, quiz)",
+                  row_match == total_quizzes,
+                  f"Matched {row_match}/{total_quizzes}")
+            check("Quiz Overview Question_Count values correct",
+                  row_qcount_ok == total_quizzes,
+                  f"{row_qcount_ok}/{total_quizzes} correct")
+            check("Quiz Overview Avg_Score values correct (all rows)",
+                  row_avg_ok == total_quizzes,
+                  f"{row_avg_ok}/{total_quizzes} within tol 0.5")
+            check("Quiz Overview Avg_Difficulty values correct (all rows)",
+                  row_diff_ok == total_quizzes,
+                  f"{row_diff_ok}/{total_quizzes} within tol 0.05")
+
+            # Sort order validation (course then quiz)
+            actual_keys = [(str(r[idx_course] or "").strip(), str(r[idx_quiz] or "").strip())
+                           for r in data_rows]
+            check("Quiz Overview sorted by course then quiz",
+                  actual_keys == sorted(actual_keys),
+                  f"First 3: {actual_keys[:3]}")
+
     # Flagged Items sheet
     fi_rows = load_sheet_rows(wb, "Flagged Items")
     if fi_rows is None:
         check("Sheet 'Flagged Items' exists", False, f"Available: {wb.sheetnames}")
     else:
         check("Sheet 'Flagged Items' exists", True)
-        data_rows = fi_rows[1:] if len(fi_rows) > 1 else []
-        check(f"Flagged Items has ~{flagged_count} rows",
-              abs(len(data_rows) - flagged_count) <= 5,
-              f"Found {len(data_rows)}, expected ~{flagged_count}")
+        data_rows = [r for r in (fi_rows[1:] if len(fi_rows) > 1 else []) if r and r[0]]
+        check(f"Flagged Items row count == {flagged_count}",
+              len(data_rows) == flagged_count,
+              f"Found {len(data_rows)}, expected {flagged_count}")
 
-        # Check Issue column has values
-        if data_rows:
-            issues = [str(r[4]).strip().lower() if len(r) > 4 and r[4] else "" for r in data_rows[:5]]
-            has_issue_types = any("easy" in i or "hard" in i for i in issues)
-            check("Flagged items have 'Too Easy' or 'Too Hard' issues",
-                  has_issue_types, f"Issues: {issues}")
+        # Validate the flagged set matches and Issue values are correct
+        header = fi_rows[0] if fi_rows else []
+        idx_course = _find_col(header, "course")
+        idx_quiz = _find_col(header, "quiz")
+        idx_issue = _find_col(header, "issue")
+
+        if data_rows and all(i >= 0 for i in [idx_course, idx_quiz, idx_issue]):
+            expected_flagged = {(q["course"], q["quiz"]): q for q in expected if q["flagged"]}
+            match_count = 0
+            issue_correct = 0
+            for r in data_rows:
+                key = (str(r[idx_course] or "").strip(), str(r[idx_quiz] or "").strip())
+                if key in expected_flagged:
+                    match_count += 1
+                    exp = expected_flagged[key]
+                    issue_text = str(r[idx_issue] or "").strip().lower()
+                    if exp["difficulty"] > 0.8 and "easy" in issue_text:
+                        issue_correct += 1
+                    elif exp["difficulty"] < 0.3 and "hard" in issue_text:
+                        issue_correct += 1
+            check("Flagged items set matches expected",
+                  match_count == flagged_count,
+                  f"{match_count}/{flagged_count} match")
+            check("Flagged items have correct Issue label (all rows)",
+                  issue_correct == flagged_count,
+                  f"{issue_correct}/{flagged_count} correct labels")
 
     # Summary sheet
     sum_rows = load_sheet_rows(wb, "Summary")
@@ -147,14 +227,29 @@ def check_excel(agent_workspace):
                 lookup[str(row[0]).strip().lower().replace(" ", "_")] = row[1] if len(row) > 1 else None
 
         check(f"Total_Quizzes = {total_quizzes}",
-              num_close(lookup.get("total_quizzes"), total_quizzes),
+              num_close(lookup.get("total_quizzes"), total_quizzes, tol=0),
               f"Got {lookup.get('total_quizzes')}")
-        check(f"Total_Questions = {total_questions}",
-              num_close(lookup.get("total_questions"), total_questions, 10),
+        check(f"Total_Questions = {total_questions} (exact)",
+              num_close(lookup.get("total_questions"), total_questions, tol=0),
               f"Got {lookup.get('total_questions')}")
-        check(f"Flagged_Quizzes close to {flagged_count}",
-              num_close(lookup.get("flagged_quizzes"), flagged_count, 5),
+        check(f"Flagged_Quizzes = {flagged_count} (exact)",
+              num_close(lookup.get("flagged_quizzes"), flagged_count, tol=0),
               f"Got {lookup.get('flagged_quizzes')}")
+        # Validate Flag_Rate (parse percentage)
+        fr_raw = lookup.get("flag_rate")
+        fr_val = None
+        if fr_raw is not None:
+            try:
+                fr_str = str(fr_raw).replace("%", "").strip()
+                fr_val = float(fr_str)
+                # Could be expressed 0-1 or 0-100
+                if fr_val <= 1.0:
+                    fr_val *= 100.0
+            except (ValueError, TypeError):
+                pass
+        check(f"Flag_Rate ~= {flag_rate_pct}% (tol 0.5pp)",
+              fr_val is not None and abs(fr_val - flag_rate_pct) <= 0.5,
+              f"Got {fr_raw}")
 
 
 def check_word(agent_workspace):

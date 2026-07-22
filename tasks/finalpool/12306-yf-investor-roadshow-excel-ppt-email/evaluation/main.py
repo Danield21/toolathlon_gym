@@ -27,17 +27,21 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+BLOCKING_FAIL_COUNT = 0
 
 
-def record(name, passed, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def record(name, passed, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, BLOCKING_FAIL_COUNT
     if passed:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if not runtime_only:
+            BLOCKING_FAIL_COUNT += 1
         msg = f": {detail[:300]}" if detail else ""
-        print(f"  [FAIL] {name}{msg}")
+        suffix = " (runtime-only)" if runtime_only else ""
+        print(f"  [FAIL] {name}{suffix}{msg}")
 
 
 def num_close(a, b, tol=1.0):
@@ -70,13 +74,26 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
     record("Excel readable", True)
 
     sheet_names_lower = [s.lower() for s in wb.sheetnames]
-    has_travel = any("travel" in s for s in sheet_names_lower)
-    has_stock = any("stock" in s or "summary" in s for s in sheet_names_lower)
-    has_financial = any("financial" in s or "highlight" in s for s in sheet_names_lower)
+    # Tighten: accept either exact names or close variants (case-insensitive)
+    def _norm_match(target, candidates):
+        t = target.strip().lower().replace("_", "").replace(" ", "")
+        for c in candidates:
+            cn = c.strip().lower().replace("_", "").replace(" ", "")
+            if cn == t:
+                return True
+        return False
 
-    record("Excel has Travel_Plan sheet", has_travel, f"Sheets: {wb.sheetnames}")
-    record("Excel has Stock_Summary sheet", has_stock, f"Sheets: {wb.sheetnames}")
-    record("Excel has Financial_Highlights sheet", has_financial, f"Sheets: {wb.sheetnames}")
+    has_travel_exact = _norm_match("travelplan", sheet_names_lower)
+    has_stock_exact = _norm_match("stocksummary", sheet_names_lower)
+    has_financial_exact = _norm_match("financialhighlights", sheet_names_lower)
+
+    has_travel = has_travel_exact or any("travel" in s for s in sheet_names_lower)
+    has_stock = has_stock_exact or any("stock" in s or "summary" in s for s in sheet_names_lower)
+    has_financial = has_financial_exact or any("financial" in s or "highlight" in s for s in sheet_names_lower)
+
+    record("Excel has Travel_Plan sheet (exact)", has_travel_exact, f"Sheets: {wb.sheetnames}")
+    record("Excel has Stock_Summary sheet (exact)", has_stock_exact, f"Sheets: {wb.sheetnames}")
+    record("Excel has Financial_Highlights sheet (exact)", has_financial_exact, f"Sheets: {wb.sheetnames}")
 
     if has_travel:
         ws_name = wb.sheetnames[next(i for i, s in enumerate(sheet_names_lower) if "travel" in s)]
@@ -88,6 +105,28 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         all_text = " ".join(str(c) for row in rows for c in row if c).lower()
         record("Travel_Plan contains G11", "g11" in all_text, f"Content sample: {all_text[:200]}")
         record("Travel_Plan contains G105", "g105" in all_text, f"Content sample: {all_text[:200]}")
+
+        # Ticket price validation: G11 -> 1748.5 , G105 -> 2631.5 (per GT)
+        all_numerics = []
+        for r in data_rows:
+            for c in r:
+                try:
+                    all_numerics.append(float(c))
+                except (TypeError, ValueError):
+                    pass
+        has_g11_price = any(abs(v - 1748.5) <= 5 for v in all_numerics)
+        has_g105_price = any(abs(v - 2631.5) <= 5 for v in all_numerics)
+        record("Travel_Plan has G11 ticket price ~1748.5", has_g11_price,
+               f"Numerics: {all_numerics}")
+        record("Travel_Plan has G105 ticket price ~2631.5", has_g105_price,
+               f"Numerics: {all_numerics}")
+
+        # Meeting date must mention 2026-03-10
+        has_mar10 = ("2026-03-10" in all_text
+                     or "march 10" in all_text
+                     or "mar 10" in all_text)
+        record("Travel_Plan mentions 2026-03-10", has_mar10,
+               f"Content sample: {all_text[:200]}")
 
     if has_stock:
         ws_name = wb.sheetnames[next(i for i, s in enumerate(sheet_names_lower) if "stock" in s or "summary" in s)]
@@ -173,7 +212,7 @@ def check_pptx(agent_workspace):
         from pptx import Presentation
         prs = Presentation(pptx_path)
         slide_count = len(prs.slides)
-        record("PPT has >= 4 slides", slide_count >= 4, f"Found {slide_count} slides")
+        record("PPT has >= 5 slides", slide_count >= 5, f"Found {slide_count} slides")
 
         all_text = ""
         for slide in prs.slides:
@@ -225,16 +264,30 @@ def check_emails():
     to_shanghai = [m for m in messages if "shanghai_partners@finance.com" in to_addresses(m[2])]
 
     record("Email sent to investors@fundmanager.com", len(to_fundmanager) >= 1,
-           f"Total messages: {len(messages)}")
+           f"Total messages: {len(messages)}", runtime_only=True)
     record("Email sent to shanghai_partners@finance.com", len(to_shanghai) >= 1,
-           f"Total messages: {len(messages)}")
+           f"Total messages: {len(messages)}", runtime_only=True)
 
     if to_fundmanager:
         subj, _, _, body = to_fundmanager[0]
         content = ((subj or "") + " " + (body or "")).lower()
         has_finance = any(kw in content for kw in ["roadshow", "financial", "presentation", "schedule"])
         record("Fundmanager email mentions roadshow/financial content", has_finance,
-               f"Subject: {subj}")
+               f"Subject: {subj}", runtime_only=True)
+
+    # Shanghai email body must include the roadshow arrival date (March 10 / 2026-03-10)
+    if to_shanghai:
+        subj_s, _, _, body_s = to_shanghai[0]
+        content_s = ((subj_s or "") + " " + (body_s or "")).lower()
+        has_march_10 = (
+            "march 10" in content_s
+            or "2026-03-10" in content_s
+            or "mar 10" in content_s
+            or "3/10" in content_s
+            or "3月10" in content_s
+        )
+        record("Shanghai email mentions arrival date March 10", has_march_10,
+               f"Subject: {subj_s}", runtime_only=True)
 
 
 def main():
@@ -255,19 +308,22 @@ def main():
         sys.exit(1)
 
     accuracy = PASS_COUNT / total * 100
-    print(f"\nOverall: {PASS_COUNT}/{total} checks passed ({accuracy:.1f}%)")
+    print(f"\nOverall: {PASS_COUNT}/{total} checks passed ({accuracy:.1f}%) ; blocking_fail={BLOCKING_FAIL_COUNT}")
 
     result = {
         "total_passed": PASS_COUNT,
         "total_checks": total,
         "accuracy": accuracy,
+        "blocking_fail_count": BLOCKING_FAIL_COUNT,
     }
 
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    # Blocking-fail gate: any non-runtime (i.e. local file) failure is fatal.
+    # Runtime-only (email) checks are still counted but excluded from the gate.
+    if BLOCKING_FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

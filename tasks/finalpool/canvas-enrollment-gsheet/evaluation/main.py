@@ -71,22 +71,56 @@ def check_gsheet():
     if sheets:
         ss_id = sheets[0][0]
         cur.execute("""
-            SELECT c.value FROM gsheet.cells c
-            JOIN gsheet.sheets s ON c.spreadsheet_id = s.spreadsheet_id AND c.sheet_id = s.id
+            SELECT c.row_index, c.col_index, c.value
+            FROM gsheet.cells c
             WHERE c.spreadsheet_id = %s
+            ORDER BY c.row_index, c.col_index
         """, (ss_id,))
         cells = cur.fetchall()
-        all_values = " ".join(str(c[0]) for c in cells if c[0])
+        grid = {}
+        for r, col, v in cells:
+            grid.setdefault(r, {})[col] = str(v) if v is not None else ''
 
-        for course in expected:
-            # Check course code appears
-            check(f"GSheet contains course code '{course['code']}'",
-                  course["code"] in all_values,
-                  f"Not found in cells")
-            # Check enrollment count appears
-            check(f"GSheet contains enrollment count {course['count']} for {course['code']}",
-                  str(course["count"]) in all_values,
-                  f"Value not found")
+        # Header detection
+        header_row = None
+        for r, row in sorted(grid.items()):
+            joined = ' '.join(row.values()).lower()
+            if 'course' in joined and ('code' in joined or 'name' in joined) and ('enroll' in joined or 'count' in joined):
+                header_row = r
+                break
+        check('GSheet header row has Course Name/Code/Enrollment Count', header_row is not None, f'Headers not found')
+
+        if header_row is not None:
+            header_cells = grid[header_row]
+            name_col = code_col = count_col = None
+            for col, val in header_cells.items():
+                vl = val.lower()
+                if 'name' in vl:
+                    name_col = col
+                elif 'code' in vl:
+                    code_col = col
+                elif 'enroll' in vl or 'count' in vl:
+                    count_col = col
+            data_rows = [grid[r] for r in sorted(grid.keys()) if r > header_row]
+            prev_count = None
+            order_ok = True
+            found_codes = []
+            for row in data_rows:
+                code = row.get(code_col, '').strip() if code_col is not None else ''
+                try:
+                    cnt = int(float(row.get(count_col, 0)))
+                except (ValueError, TypeError):
+                    continue
+                if prev_count is not None and cnt > prev_count:
+                    order_ok = False
+                prev_count = cnt
+                found_codes.append((code, cnt))
+            check('GSheet rows are sorted by enrollment count descending', order_ok, 'Rows not in descending order')
+
+            for course in expected:
+                match = any(code.lower() == course['code'].lower() and abs(cnt - course['count']) <= 0 for code, cnt in found_codes)
+                check(f"GSheet has correct row for '{course['code']}' with count {course['count']}",
+                      match, f'Not found in structured rows')
 
     cur.close()
     conn.close()

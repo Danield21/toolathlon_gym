@@ -1,6 +1,6 @@
 You are an operations analyst handling a product recall situation for an online store. A supplier has notified your team about potential defects in certain product lines, and you need to assess the full impact on orders, customers, and revenue.
 
-Start by reading the recall_notice.pdf in your workspace. This document from the supplier lists the affected product names and details about the defects discovered. Also read the customer_communication_template.txt file, which contains a template for notifying affected customers, and the recall_procedure.md file, which outlines your standard operating procedure for handling recalls.
+Start by reading the recall_notice.pdf in your workspace. This document from the supplier lists three affected product names (Canon M50, JBL Flip speaker, and ZETONES headphones) along with details about the defects discovered. Also read the customer_communication_template.txt file, which contains a template for notifying affected customers, and the recall_procedure.md file, which outlines your standard operating procedure for handling recalls.
 
 Search the e-commerce platform for the products mentioned in the recall notice. You need to find those products by name and retrieve their details including product name, SKU, price, and stock quantity. Then look up all orders that contain any of those recalled products. For each matching order, gather the order ID, billing email, order date, order total, and the quantity and line total for the recalled product in that order.
 

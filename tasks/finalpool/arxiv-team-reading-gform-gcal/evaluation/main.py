@@ -80,22 +80,38 @@ def check_excel(agent_workspace):
            f"Headers: {rows[0]}")
 
     data_rows = [r for r in rows[1:] if any(c for c in r)]
-    record("Has at least 5 data rows (papers)", len(data_rows) >= 5,
+    record("Has exactly 7 data rows (papers)", len(data_rows) == 7,
            f"Found {len(data_rows)} data rows")
 
-    # Check all text for paper keywords
+    # Check all text for paper keywords - all 5 reasoning papers expected
     all_text = " ".join(str(c) for r in rows for c in r if c).lower()
-    has_cot = "chain-of-thought" in all_text or "chain of thought" in all_text
-    has_react = "react" in all_text or "synergizing" in all_text
-    has_self = "self-consistency" in all_text or "self consistency" in all_text
-    papers_found = sum([has_cot, has_react, has_self])
-    record("Contains key LLM reasoning paper keywords", papers_found >= 2,
-           f"CoT:{has_cot}, ReAct:{has_react}, SelfConsistency:{has_self}")
+    paper_titles = [
+        ("Chain-of-Thought", "chain-of-thought" in all_text or "chain of thought" in all_text),
+        ("Self-Consistency", "self-consistency" in all_text or "self consistency" in all_text),
+        ("Tree of Thoughts", "tree of thoughts" in all_text),
+        ("Least-to-Most", "least-to-most" in all_text or "least to most" in all_text),
+        ("ReAct", "react" in all_text or "synergizing" in all_text),
+    ]
+    for label, present in paper_titles:
+        record(f"Excel contains '{label}' paper", present,
+               "Not found in sheet")
 
-    # Check Topic column
-    has_llm_reasoning = "llm_reasoning" in all_text or "llm reasoning" in all_text
-    record("Contains LLM_Reasoning topic classification", has_llm_reasoning,
-           "No 'LLM_Reasoning' topic found in sheet")
+    # Check Topic column - count LLM_Reasoning entries (case-insensitive)
+    llm_reasoning_count = 0
+    other_count = 0
+    for r in data_rows:
+        for cell in r:
+            cs = str(cell or "").strip().lower()
+            if cs in ("llm_reasoning", "llm reasoning"):
+                llm_reasoning_count += 1
+                break
+            if cs == "other":
+                other_count += 1
+                break
+    record("Topic LLM_Reasoning appears in 5 rows", llm_reasoning_count == 5,
+           f"Found {llm_reasoning_count} LLM_Reasoning rows")
+    record("Topic Other appears in 2 rows", other_count == 2,
+           f"Found {other_count} Other rows")
 
 
 def check_gform():
@@ -153,21 +169,32 @@ def check_gcal():
         if "reading group" in (e[0] or "").lower() or "reading session" in (e[0] or "").lower()
     ]
 
-    record("At least 4 reading group events in April 2026", len(reading_events) >= 4,
+    record("Exactly 4 reading group events in April 2026", len(reading_events) == 4,
            f"Found {len(reading_events)} reading events in April 2026")
 
-    if reading_events:
-        # Check duration (should be ~1.5 hours)
-        summary, start_dt, end_dt = reading_events[0]
+    # Verify exact dates: 2026-04-07, -04-14, -04-21, -04-28
+    expected_dates = {(2026, 4, 7), (2026, 4, 14), (2026, 4, 21), (2026, 4, 28)}
+    actual_dates = {(e[1].year, e[1].month, e[1].day) for e in reading_events if e[1]}
+    record("Reading group events on the 4 expected April Tuesdays",
+           expected_dates.issubset(actual_dates),
+           f"Got: {sorted(actual_dates)}, expected superset of {sorted(expected_dates)}")
+
+    # Verify duration is exactly 1.5 hours and start time is 14:00
+    correct_duration_count = 0
+    correct_time_count = 0
+    for summary, start_dt, end_dt in reading_events:
         if start_dt and end_dt:
             duration_hours = (end_dt - start_dt).total_seconds() / 3600
-            record("Reading sessions are ~1.5 hours", 1.0 <= duration_hours <= 2.5,
-                   f"Duration: {duration_hours:.1f} hours")
-
-        # Check they are on different days
-        dates = set(e[1].date() for e in reading_events if e[1])
-        record("Sessions on different days (at least 3 distinct dates)", len(dates) >= 3,
-               f"Dates: {sorted(dates)}")
+            if abs(duration_hours - 1.5) < 0.01:
+                correct_duration_count += 1
+            if start_dt.hour == 14 and start_dt.minute == 0:
+                correct_time_count += 1
+    record("All reading sessions are 1.5 hours long",
+           correct_duration_count == len(reading_events) and len(reading_events) > 0,
+           f"{correct_duration_count}/{len(reading_events)} have 1.5h duration")
+    record("All reading sessions start at 14:00",
+           correct_time_count == len(reading_events) and len(reading_events) > 0,
+           f"{correct_time_count}/{len(reading_events)} start at 14:00")
 
 
 def main():
@@ -200,11 +227,11 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:
-        print("FAIL")
+        print(f"FAIL ({FAIL_COUNT} checks failed)")
         sys.exit(1)
 
 

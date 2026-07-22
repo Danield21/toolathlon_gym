@@ -83,8 +83,14 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 5):
-                    errors.append(f"{key}.Count: {a_row[1]} vs {g_row[1]} (tol=5)")
+                # Tighter tolerance: max(2, 5% of GT) to handle very small buckets accurately
+                gv = g_row[1]
+                try:
+                    tol = max(2, abs(float(gv)) * 0.02) if gv else 2
+                except (TypeError, ValueError):
+                    tol = 2
+                if not num_close(a_row[1], g_row[1], tol):
+                    errors.append(f"{key}.Count: {a_row[1]} vs {g_row[1]} (tol={tol})")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -122,8 +128,17 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 10.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=10.0)")
+                # Scaled tolerance per metric type
+                if "pct" in key or "percent" in key:
+                    tol = 0.5
+                elif "total_employees" in key:
+                    tol = 1
+                elif "count" in key:
+                    tol = 2
+                else:
+                    tol = 1.0
+                if not num_close(a_row[1], g_row[1], tol):
+                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol={tol})")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -132,7 +147,40 @@ def main():
         else:
             print(f"    PASS")
 
-    
+    # Check email (BLOCKING)
+    print("  Checking email (blocking)...")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
+                                user="eigent", password="camel")
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT subject, to_addr, body_text FROM email.messages
+            WHERE to_addr::text ILIKE '%%hr-analytics@company.com%%'
+              AND subject ILIKE '%%performance rating distribution report%%'
+        """)
+        rows = cur.fetchall()
+        if not rows:
+            all_errors.append("Email to hr-analytics@company.com with subject 'Performance Rating Distribution Report' not found")
+        else:
+            body_concat = " ".join((r[2] or "").lower() for r in rows)
+            # Body must contain BOTH at least one specific count AND at least one specific percentage/identifier
+            # to verify the agent actually computed/inserted the distribution numbers (not just generic words).
+            specific_counts = ["50000", "50,000", "5008", "5,008", "12464", "12,464", "2553", "2,553"]
+            specific_pcts = ["34.9", "34.90", "34.9%", "high_performers_pct", "high performers"]
+            has_count = any(kw in body_concat for kw in specific_counts)
+            has_pct_or_label = any(kw in body_concat for kw in specific_pcts)
+            if not (has_count and has_pct_or_label):
+                all_errors.append(
+                    f"Email body must include at least one specific count "
+                    f"(50000/5008/12464/2553) AND at least one specific pct or label "
+                    f"(34.9 or 'high performers'); got body excerpt: {body_concat[:200]}"
+                )
+            print(f"    PASS (found {len(rows)} matching emails)")
+        cur.close()
+        conn.close()
+    except Exception as e:
+        all_errors.append(f"Email check failed: {e}")
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

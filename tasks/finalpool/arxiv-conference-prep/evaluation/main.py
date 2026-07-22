@@ -41,15 +41,18 @@ TARGET_PAPER_KEYWORDS = [
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+RUNTIME_ONLY_FAIL = 0
 
 
-def record(name, passed, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def record(name, passed, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, RUNTIME_ONLY_FAIL
     if passed:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if runtime_only:
+            RUNTIME_ONLY_FAIL += 1
         msg = f": {detail[:300]}" if detail else ""
         print(f"  [FAIL] {name}{msg}")
 
@@ -108,16 +111,16 @@ def check_pptx(agent_workspace):
         has_summary = any(kw in last_text for kw in ["summary", "conclusion", "themes", "synthesis"])
         record("Last slide has summary/conclusion", has_summary, f"Last slide: {last_text[:100]}")
 
-    # Check paper keywords appear across all slides
+    # Check paper keywords appear across all slides (require 4+, tighter than prior 3+)
     all_text = " ".join(slide_text(s) for s in slides).lower()
     papers_found = sum(1 for kw in TARGET_PAPER_KEYWORDS if kw.lower() in all_text)
     record(
-        "At least 3 RLHF paper keywords in slides",
-        papers_found >= 3,
+        "At least 4 RLHF paper keywords in slides",
+        papers_found >= 4,
         f"Found {papers_found}/{len(TARGET_PAPER_KEYWORDS)} keywords",
     )
 
-    # Check for specific paper titles
+    # Check for specific paper titles - require all 5 (per task: 5 specific papers)
     has_instructgpt = "instruct" in all_text and "human feedback" in all_text
     has_summarize = "summarize" in all_text and "human feedback" in all_text
     has_constitutional = "constitutional" in all_text
@@ -126,10 +129,18 @@ def check_pptx(agent_workspace):
 
     papers_present = sum([has_instructgpt, has_summarize, has_constitutional, has_dpo, has_ppo])
     record(
-        "At least 4 of 5 target papers discussed",
-        papers_present >= 4,
+        "All 5 of 5 target papers discussed",
+        papers_present == 5,
         f"Found {papers_present}/5 papers",
     )
+
+    # Anti-check: reject papers about self-play / AlphaZero / board games (task says exclude)
+    has_alphazero = "alphazero" in all_text or "alpha zero" in all_text
+    has_selfplay = "self-play" in all_text or "self play" in all_text
+    has_board = "board game" in all_text or "chess" in all_text or "go game" in all_text
+    record("No AlphaZero / self-play / board game slides",
+           not (has_alphazero or has_selfplay or has_board),
+           f"alphazero={has_alphazero}, selfplay={has_selfplay}, board={has_board}")
 
 
 def check_calendar():
@@ -147,19 +158,31 @@ def check_calendar():
     cur.close()
     conn.close()
 
-    # Look for RLHF event
-    rlhf_event = None
+    # Look for RLHF event, prefer one matching 2026-04-10
+    rlhf_candidates = []
     for summary, description, start_dt, end_dt, *rest in events:
         summary_lower = (summary or "").lower()
         desc_lower = (description or "").lower() if description else ""
         if "rlhf" in summary_lower or "reinforcement learning" in summary_lower or "rlhf" in desc_lower:
             location = rest[0] if rest else None
-            rlhf_event = (summary, description, start_dt, end_dt, location)
+            rlhf_candidates.append((summary, description, start_dt, end_dt, location))
+
+    # Prefer a candidate that is on the target date; fall back to the first
+    rlhf_event = None
+    for cand in rlhf_candidates:
+        _, _, sdt, _, _ = cand
+        if sdt is not None and sdt.strftime("%Y-%m-%d") == "2026-04-10":
+            rlhf_event = cand
             break
+    if rlhf_event is None and rlhf_candidates:
+        rlhf_event = rlhf_candidates[0]
 
     record("Calendar event with RLHF exists", rlhf_event is not None,
-           "No event found with RLHF in summary/description")
+           "No event found with RLHF in summary/description",
+           runtime_only=True)
 
+    # If a candidate event exists, become blocking (wrong-date/wrong-location shouldn't pass).
+    # Full absence is still runtime_only (GT self-test).
     if rlhf_event:
         summary, description, start_dt, end_dt, location = rlhf_event
         if start_dt is not None:
@@ -167,13 +190,24 @@ def check_calendar():
             record("Calendar event on 2026-04-10", start_date_str == "2026-04-10",
                    f"Event date is {start_date_str}")
 
-            # Check duration is roughly a full day event (8 hours)
+            # Duration 8 hours (9-17)
             if end_dt:
                 duration_hours = (end_dt - start_dt).total_seconds() / 3600
-                record("Event duration roughly 8 hours", 6.0 <= duration_hours <= 10.0,
+                record("Event duration exactly 8 hours", abs(duration_hours - 8.0) <= 0.25,
                        f"Got {duration_hours} hours")
+
+            # Check start time is 9:00 (task says 9am-5pm)
+            start_hour = start_dt.hour
+            record("Event starts at 9:00", start_hour == 9,
+                   f"Got hour {start_hour}")
         else:
             record("Calendar event on 2026-04-10", False, "start_datetime is NULL")
+
+        # Check location
+        loc_lower = (location or "").lower()
+        record("Event location is 'San Francisco Convention Center'",
+               "san francisco convention center" in loc_lower,
+               f"Got location: {location}")
 
 
 def check_email():
@@ -199,8 +233,10 @@ def check_email():
             break
 
     record("Email with RLHF in subject exists", matching_email is not None,
-           "No email found with RLHF in subject")
+           "No email found with RLHF in subject",
+           runtime_only=True)
 
+    # When email exists, content checks become blocking (not runtime_only).
     if matching_email:
         subject, from_addr, to_addr, body_text = matching_email
         # Check recipient
@@ -221,11 +257,32 @@ def check_email():
                "collaborators@rlhf-lab.org" in to_str,
                f"Recipient: {to_addr}")
 
+        # Stricter: primary (first) recipient must be the collaborators address
+        primary_recipient = ""
+        if isinstance(to_addr, list) and to_addr:
+            primary_recipient = str(to_addr[0]).lower()
+        elif isinstance(to_addr, str):
+            try:
+                parsed = json.loads(to_addr)
+                if isinstance(parsed, list) and parsed:
+                    primary_recipient = str(parsed[0]).lower()
+                else:
+                    primary_recipient = str(to_addr).lower()
+            except (json.JSONDecodeError, TypeError):
+                primary_recipient = str(to_addr).lower()
+        record("Primary recipient is collaborators@rlhf-lab.org",
+               "collaborators@rlhf-lab.org" in primary_recipient,
+               f"Primary: {primary_recipient}")
+
         # Check body mentions conference date
         body_lower = (body_text or "").lower()
         has_date = "april 10" in body_lower or "2026-04-10" in body_lower or "april 10, 2026" in body_lower
         record("Email body mentions conference date", has_date,
                "Date not found in email body")
+        # Check body mentions location (per task)
+        has_loc = "san francisco" in body_lower or "convention center" in body_lower
+        record("Email body mentions location", has_loc,
+               "Expected mention of San Francisco / Convention Center")
 
 
 def main():
@@ -258,11 +315,13 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 80:
-        print("PASS")
+    # Gate on non-runtime-only FAIL_COUNT == 0 (was 80% accuracy)
+    non_runtime_fail = FAIL_COUNT - RUNTIME_ONLY_FAIL
+    if non_runtime_fail == 0:
+        print(f"PASS (runtime-only fails: {RUNTIME_ONLY_FAIL})")
         sys.exit(0)
     else:
-        print("FAIL")
+        print(f"FAIL (non-runtime fails: {non_runtime_fail}, runtime-only fails: {RUNTIME_ONLY_FAIL})")
         sys.exit(1)
 
 

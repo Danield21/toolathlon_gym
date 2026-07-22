@@ -85,7 +85,8 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         record("Prep_Videos has Title and View_Count columns", has_title and has_viewcount,
                f"Headers: {rows[0] if rows else []}")
         data_rows = [r for r in rows[1:] if any(c for c in r)]
-        record("Prep_Videos has >= 4 data rows", len(data_rows) >= 4,
+        # Task says exactly 5 videos
+        record("Prep_Videos has exactly 5 data rows", len(data_rows) == 5,
                f"Found {len(data_rows)} data rows")
 
     # Check Travel_Details sheet
@@ -106,8 +107,42 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         data_rows = [r for r in rows[1:] if any(c for c in r)]
         record("Travel_Details has >= 2 data rows", len(data_rows) >= 2,
                f"Found {len(data_rows)} rows")
-        record("Travel_Details contains G235", "G235" in all_text, "G235 not found in Travel_Details")
-        record("Travel_Details contains G236", "G236" in all_text, "G236 not found in Travel_Details")
+        # Dynamic check: query the actual train DB for valid Beijing<->Qufu trains
+        # on the task dates rather than hard-coding train codes.
+        try:
+            tconn = psycopg2.connect(**DB_CONFIG)
+            tcur = tconn.cursor()
+            tcur.execute("""
+                SELECT station_train_code FROM train.trains
+                WHERE from_station_telecode='VNP' AND to_station_telecode='QFB'
+                  AND depart_date='2026-03-12'
+            """)
+            outbound_codes = {r[0] for r in tcur.fetchall()}
+            tcur.execute("""
+                SELECT station_train_code FROM train.trains
+                WHERE from_station_telecode='QFB' AND to_station_telecode='VNP'
+                  AND depart_date='2026-03-15'
+            """)
+            return_codes = {r[0] for r in tcur.fetchall()}
+            tcur.close()
+            tconn.close()
+        except Exception as e:
+            outbound_codes, return_codes = set(), set()
+            print(f"  [WARN] Train DB lookup failed: {e}")
+        if outbound_codes:
+            ok_out = any(code in all_text for code in outbound_codes)
+            record(
+                f"Travel_Details outbound train code present",
+                ok_out,
+                f"Expected one of {sorted(outbound_codes)} in Travel_Details text",
+            )
+        if return_codes:
+            ok_ret = any(code in all_text for code in return_codes)
+            record(
+                f"Travel_Details return train code present",
+                ok_ret,
+                f"Expected one of {sorted(return_codes)} in Travel_Details text",
+            )
 
     # Check Conference_Schedule sheet
     sched_sheet = None
@@ -121,7 +156,8 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         record("Conference_Schedule sheet exists", True)
         rows = list(sched_sheet.iter_rows(values_only=True))
         data_rows = [r for r in rows[1:] if any(c for c in r)]
-        record("Conference_Schedule has >= 5 data rows", len(data_rows) >= 5,
+        # Task says at least six rows
+        record("Conference_Schedule has >= 6 data rows", len(data_rows) >= 6,
                f"Found {len(data_rows)} rows")
 
     # --- Groundtruth XLSX value comparison (order-insensitive, skips free-form cols) ---
@@ -137,18 +173,49 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
             if a_ws is None:
                 record(f"GT sheet '{gt_sname}' exists in agent xlsx", False, f"Available: {wb.sheetnames}")
                 continue
-            # Identify free-form columns to skip
+            # Identify free-form columns to skip — Topic / Key_Technologies /
+            # Activity / Location are agent-discretionary; Notes / descriptions
+            # are unstructured; Duration_Min and Price_CNY may be rounded by the
+            # agent in slightly different ways. Compare only on the structurally
+            # pinned cells (titles, train codes, dates, etc.).
             gt_headers = [str(c.value).strip().lower() if c.value else "" for c in next(gt_ws.iter_rows(max_row=1))]
             skip_cols = {i for i, h in enumerate(gt_headers)
-                         if any(k in h for k in ["note", "reach", "remark", "comment", "description"])}
+                         if any(k in h for k in [
+                             "note", "reach", "remark", "comment", "description",
+                             "topic", "key_tech", "key tech", "technologies",
+                             "activity", "location",
+                             "duration_min", "duration min", "price_cny", "price cny",
+                         ])}
             gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
             a_rows = [r for r in a_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-            record(f"GT '{gt_sname}' row count", len(a_rows) == len(gt_rows),
-                   f"Expected {len(gt_rows)}, got {len(a_rows)}")
-            # Order-insensitive: each GT row's key cols must exist somewhere in agent rows
+            # Conference_Schedule may have legitimately more rows than GT (task asks
+            # for "at least six"); use >= for that sheet, exact otherwise.
+            if "schedule" in gt_sname.lower() or "conference" in gt_sname.lower():
+                record(
+                    f"GT '{gt_sname}' row count",
+                    len(a_rows) >= len(gt_rows),
+                    f"Expected >= {len(gt_rows)}, got {len(a_rows)}",
+                )
+            else:
+                record(f"GT '{gt_sname}' row count", len(a_rows) == len(gt_rows),
+                       f"Expected {len(gt_rows)}, got {len(a_rows)}")
+            # Order-insensitive: each GT row's key cols must exist somewhere in agent rows.
+            # Normalize numeric vs string discrepancies and trim/lowercase strings.
+            def _norm_cell(v):
+                if v is None:
+                    return None
+                if isinstance(v, (int, float)):
+                    return float(v)
+                s = str(v).strip()
+                # Try numeric coercion first
+                try:
+                    return float(s.replace(",", ""))
+                except Exception:
+                    return s.lower()
+
             def row_key(row):
                 return tuple(
-                    str(v).strip().lower() if isinstance(v, str) else v
+                    _norm_cell(v)
                     for i, v in enumerate(row)
                     if v is not None and i not in skip_cols
                 )
@@ -170,36 +237,36 @@ def check_notion():
     cur.close()
     conn.close()
 
-    found = False
+    # Task title: "Tech Conference Preparation - Qufu March 2026"
+    found_exact = False
     for page_id, props in pages:
         try:
-            title_items = props.get("title", {}).get("title", {}).get("title", [])
-            if not title_items:
-                # Try alternate structure
-                for key, val in props.items():
-                    if isinstance(val, dict) and val.get("type") == "title":
-                        title_items = val.get("title", [])
-                        break
-            title_text = " ".join(
-                item.get("text", {}).get("content", "") for item in title_items
-                if isinstance(item, dict)
-            ).lower()
-            if "conference" in title_text or "tech" in title_text or "qufu" in title_text:
-                found = True
+            # Look for "Tech Conference Preparation" + "Qufu" + "March 2026"
+            props_str = json.dumps(props).lower()
+            if (
+                "tech conference preparation" in props_str
+                and "qufu" in props_str
+                and "march 2026" in props_str
+            ):
+                found_exact = True
                 break
         except Exception:
             continue
 
-    record("Notion page exists with conference/tech content in title", found,
-           f"Pages found: {len(pages)}")
+    record(
+        "Notion page titled 'Tech Conference Preparation - Qufu March 2026' exists",
+        found_exact,
+        f"Pages found: {len(pages)}",
+    )
 
 
 def check_gcal():
     print("\n=== Check 3: GCal Conference Events ===")
+    import datetime as _dt
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     cur.execute("""
-        SELECT summary, start_datetime FROM gcal.events
+        SELECT summary, start_datetime, end_datetime FROM gcal.events
         WHERE start_datetime >= '2026-03-12' AND start_datetime < '2026-03-16'
         ORDER BY start_datetime
     """)
@@ -207,18 +274,71 @@ def check_gcal():
     cur.close()
     conn.close()
 
-    # Exclude the 2 preloaded events
-    conf_events = [e for e in events
-                   if "remote team" not in (e[0] or "").lower()
-                   and "project deadline" not in (e[0] or "").lower()]
+    def _to_naive(d):
+        if d is None:
+            return None
+        if hasattr(d, "tzinfo") and d.tzinfo is not None:
+            return d.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+        return d
 
-    record("GCal has >= 3 new conference events (Mar 12-15)", len(conf_events) >= 3,
-           f"Found {len(conf_events)} non-preloaded events: {[e[0] for e in conf_events]}")
+    # Required 4 events with exact titles + times
+    expected = [
+        (
+            "Conference Travel: Beijing to Qufu",
+            _dt.datetime(2026, 3, 12, 17, 0),
+            _dt.datetime(2026, 3, 12, 20, 0),
+        ),
+        (
+            "Tech Conference Day 1",
+            _dt.datetime(2026, 3, 13, 9, 0),
+            _dt.datetime(2026, 3, 13, 18, 0),
+        ),
+        (
+            "Tech Conference Day 2",
+            _dt.datetime(2026, 3, 14, 9, 0),
+            _dt.datetime(2026, 3, 14, 18, 0),
+        ),
+        (
+            "Return: Qufu to Beijing",
+            _dt.datetime(2026, 3, 15, 14, 30),
+            _dt.datetime(2026, 3, 15, 17, 30),
+        ),
+    ]
 
-    summaries = " ".join(e[0] or "" for e in events).lower()
-    has_travel = "travel" in summaries or "beijing" in summaries or "qufu" in summaries
-    record("GCal contains travel or conference related events", has_travel,
-           f"Event summaries: {[e[0] for e in events]}")
+    for exp_title, exp_start, exp_end in expected:
+        match = None
+        for summary, sdt, edt in events:
+            if summary and summary.strip().lower() == exp_title.lower():
+                match = (summary, _to_naive(sdt), _to_naive(edt))
+                break
+        record(
+            f"GCal event '{exp_title}' exists with correct title",
+            match is not None,
+            f"All summaries: {[e[0] for e in events]}",
+        )
+        if match is not None:
+            _, sdt, edt = match
+            # Allow timezone interpretations: try ±8hr (China) tolerance only when comparing
+            ok_start = sdt is not None and (
+                abs((sdt - exp_start).total_seconds()) <= 60
+                or abs((sdt - (exp_start - _dt.timedelta(hours=8))).total_seconds()) <= 60
+                or abs((sdt - (exp_start + _dt.timedelta(hours=8))).total_seconds()) <= 60
+            )
+            ok_end = edt is not None and (
+                abs((edt - exp_end).total_seconds()) <= 60
+                or abs((edt - (exp_end - _dt.timedelta(hours=8))).total_seconds()) <= 60
+                or abs((edt - (exp_end + _dt.timedelta(hours=8))).total_seconds()) <= 60
+            )
+            record(
+                f"GCal event '{exp_title}' start={exp_start.strftime('%H:%M')}",
+                ok_start,
+                f"got {sdt}",
+            )
+            record(
+                f"GCal event '{exp_title}' end={exp_end.strftime('%H:%M')}",
+                ok_end,
+                f"got {edt}",
+            )
 
 
 def main():
@@ -251,7 +371,7 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

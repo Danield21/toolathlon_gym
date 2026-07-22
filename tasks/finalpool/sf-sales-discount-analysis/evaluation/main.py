@@ -3,6 +3,14 @@ import argparse
 import os
 import sys
 import openpyxl
+import psycopg2
+
+DB = {
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5432")),
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": "eigent", "password": "camel",
+}
 
 
 def num_close(a, b, tol=1.0):
@@ -14,6 +22,32 @@ def num_close(a, b, tol=1.0):
         return abs(float(a) - float(b)) <= tol
     except (TypeError, ValueError):
         return str(a).strip().lower() == str(b).strip().lower()
+
+
+def check_email(errors):
+    """Verify email to finance@company.com with subject 'Discount Impact Analysis'."""
+    try:
+        conn = psycopg2.connect(**DB); cur = conn.cursor()
+        cur.execute("SELECT subject, to_addr, COALESCE(body_text, body_html, '') FROM email.messages")
+        rows = cur.fetchall(); cur.close(); conn.close()
+    except Exception as e:
+        errors.append(f"Email check error: {e}")
+        return
+    target_subj = "discount impact analysis"
+    target_to = "finance@company.com"
+    matched = None
+    for subj, to_addr, body in rows:
+        if target_subj in (subj or "").lower() and target_to in str(to_addr or "").lower():
+            matched = (subj, to_addr, body)
+            break
+    if not matched:
+        errors.append(f"Email '{target_subj}' to {target_to} not found (checked {len(rows)})")
+        return
+    body_l = (matched[2] or "").lower()
+    must = ["discount", "revenue"]
+    missing = [m for m in must if m not in body_l]
+    if missing:
+        errors.append(f"Email body missing: {missing}")
 
 
 def str_match(a, b):
@@ -83,16 +117,16 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 10):
-                    errors.append(f"{key}.Orders: {a_row[1]} vs {g_row[1]} (tol=10)")
+                if not num_close(a_row[1], g_row[1], 0):  # exact order count
+                    errors.append(f"{key}.Orders: {a_row[1]} vs {g_row[1]} (exact)")
 
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 100.0):
-                    errors.append(f"{key}.Revenue: {a_row[2]} vs {g_row[2]} (tol=100.0)")
+                if not num_close(a_row[2], g_row[2], 1.0):  # 2-decimal rounding
+                    errors.append(f"{key}.Revenue: {a_row[2]} vs {g_row[2]} (tol=1.0)")
 
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 2.0):
-                    errors.append(f"{key}.Avg_Order_Value: {a_row[3]} vs {g_row[3]} (tol=2.0)")
+                if not num_close(a_row[3], g_row[3], 0.05):
+                    errors.append(f"{key}.Avg_Order_Value: {a_row[3]} vs {g_row[3]} (tol=0.05)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -130,8 +164,10 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 200.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=200.0)")
+                # Total_Orders count exact; revenue values ±1.0
+                tol = 0 if "order" in key and "value" not in key else 1.0
+                if not num_close(a_row[1], g_row[1], tol):
+                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol={tol})")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -141,6 +177,17 @@ def main():
             print(f"    PASS")
 
     
+
+    # Email check
+    print(f"  Checking email...")
+    email_errors = []
+    check_email(email_errors)
+    all_errors.extend(email_errors)
+    if email_errors:
+        for e in email_errors:
+            print(f"    {e}")
+    else:
+        print("    PASS")
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

@@ -26,9 +26,10 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+CRITICAL_FAILURES = []
 
 
-def record(name, passed, detail=""):
+def record(name, passed, detail="", critical=False):
     global PASS_COUNT, FAIL_COUNT
     if passed:
         PASS_COUNT += 1
@@ -37,6 +38,8 @@ def record(name, passed, detail=""):
         FAIL_COUNT += 1
         msg = f": {detail[:300]}" if detail else ""
         print(f"  [FAIL] {name}{msg}")
+        if critical:
+            CRITICAL_FAILURES.append(name)
 
 
 def num_close(a, b, tol=1.0):
@@ -88,8 +91,9 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
                f"Headers: {rows[0] if rows else 'empty'}")
 
         data_rows = [r for r in rows[1:] if any(c for c in r)]
-        record("Video_Topics has at least 8 rows (top videos)", len(data_rows) >= 8,
-               f"Found {len(data_rows)} data rows")
+        record("Video_Topics has 10 rows (top videos)", len(data_rows) == 10,
+               f"Found {len(data_rows)} data rows (expected exactly 10)",
+               critical=True)
 
         all_text = " ".join(str(c) for r in rows for c in r if c).lower()
         has_ai_topic = "ai" in all_text
@@ -112,6 +116,10 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         record("Product_Matches has required columns (Product_Name, Match_Keyword)",
                has_product and has_match_kw,
                f"Headers: {pm_rows[0] if pm_rows else 'empty'}")
+        pm_data_rows = [r for r in pm_rows[1:] if any(c for c in r)]
+        record("Product_Matches has at least 3 rows", len(pm_data_rows) >= 3,
+               f"Found {len(pm_data_rows)} data rows",
+               critical=True)
 
     # Check Summary sheet
     sum_idx = next((i for i, s in enumerate(sheet_names_lower) if "summary" in s), None)
@@ -192,14 +200,15 @@ def check_email():
                f"Subject: {subject}")
 
         body_lower = (body or "").lower()
-        # Body should mention product-video matches
+        # Body should mention BOTH product AND video keywords
         has_product = any(kw in body_lower for kw in
                           ["laptop", "tv", "headphone", "monitor", "adapter", "usb", "hub"])
         has_video = any(kw in body_lower for kw in
                         ["deepseek", "linux", "microsoft", "windows", "vibe"])
         record("Email body describes video-product matches",
-               has_product or has_video,
-               f"Body excerpt: {body_lower[:300]}")
+               has_product and has_video,
+               f"Body excerpt: {body_lower[:300]} (product={has_product}, video={has_video})",
+               critical=True)
 
 
 def main():
@@ -231,6 +240,12 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
+    if CRITICAL_FAILURES:
+        print(f"\nCritical failures ({len(CRITICAL_FAILURES)}):")
+        for cf in CRITICAL_FAILURES:
+            print(f"  - {cf}")
+        print("FAIL (critical assertion failed)")
+        sys.exit(1)
     if accuracy >= 70:
         print("PASS")
         sys.exit(0)

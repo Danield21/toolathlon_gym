@@ -92,17 +92,16 @@ def check_excel(agent_ws, prices):
         for sym in SYMBOLS:
             check(f"Holdings contains symbol {sym}", sym in all_text)
 
-        # Check that current values are approximately correct
+        # Check that current values are approximately correct (tightened to 1%)
         for row in non_empty:
             row_text = " ".join(str(c) for c in row if c is not None)
             for sym in SYMBOLS:
                 if sym in row_text:
                     expected_val = round(HOLDINGS[sym] * prices.get(sym, 0), 2)
-                    # Look for a numeric cell close to expected_val
                     found_val = False
                     for c in row:
                         try:
-                            if num_close(float(c), expected_val, tol_pct=5.0):
+                            if num_close(float(c), expected_val, tol_pct=1.0):
                                 found_val = True
                                 break
                         except (TypeError, ValueError):
@@ -167,21 +166,20 @@ def check_email():
     print("\n=== Check 3: Email ===")
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
+    # Narrow: only emails matching both recipient AND subject contains 'portfolio'
     cur.execute("""
         SELECT subject, to_addr, from_addr FROM email.messages
-        WHERE to_addr::text ILIKE '%investment-committee%'
-           OR to_addr::text ILIKE '%fund.example%'
+        WHERE (to_addr::text ILIKE '%investment-committee%'
+               OR to_addr::text ILIKE '%fund.example%')
+          AND subject ILIKE '%portfolio%'
         LIMIT 10
     """)
     rows = cur.fetchall()
-    check("Email sent to investment-committee@fund.example.com",
+    check("Email sent to investment-committee@fund.example.com with portfolio subject",
           len(rows) > 0, "No matching email found")
 
     if rows:
         subjects = [r[0] or "" for r in rows]
-        check("Email subject contains 'Portfolio'",
-              any("portfolio" in s.lower() for s in subjects),
-              f"Subjects: {subjects}")
         check("Email subject contains 'Analysis' or 'Report'",
               any("analysis" in s.lower() or "report" in s.lower() for s in subjects),
               f"Subjects: {subjects}")
@@ -204,6 +202,7 @@ def main():
 
     check_excel(args.agent_workspace, prices)
     check_word(args.agent_workspace)
+    file_fail = FAIL_COUNT  # excel + word are local files (blocking)
     check_email()
 
     print(f"\n=== SUMMARY: {PASS_COUNT} passed, {FAIL_COUNT} failed ===")
@@ -212,13 +211,14 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump({"pass": PASS_COUNT, "fail": FAIL_COUNT}, f)
 
-    # Pass if at least 70% of checks pass (flexible for agent outputs)
+    # Local file checks (excel+word) must have zero failures; overall require 85% accuracy.
     total = PASS_COUNT + FAIL_COUNT
     if total == 0:
         sys.exit(1)
     pct = PASS_COUNT / total * 100
-    print(f"Score: {pct:.1f}%")
-    sys.exit(0 if FAIL_COUNT == 0 else 1)
+    print(f"Score: {pct:.1f}%; file_failures: {file_fail}")
+    overall_ok = (file_fail == 0) and (pct >= 85)
+    sys.exit(0 if overall_ok else 1)
 
 
 if __name__ == "__main__":

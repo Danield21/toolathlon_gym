@@ -206,7 +206,7 @@ def check_excel(agent_workspace, refund_rows, product_refund_map):
         if total_key:
             expected_total = round(sum(r["amount"] for r in refund_rows), 2)
             check(f"Total_Refund_Amount ~ {expected_total}",
-                  num_close(summary[total_key], expected_total, 5.0),
+                  num_close(summary[total_key], expected_total, 0.05),
                   f"Got {summary[total_key]}")
 
 
@@ -226,30 +226,37 @@ def check_word(agent_workspace, investigation_products):
 
     full_text = "\n".join([p.text for p in doc.paragraphs]).lower()
 
-    # Check required sections
+    # Check required sections (anchor to specific phrases per task)
     required_sections = [
         "executive summary",
-        "refund trend",
-        "product",
-        "root cause",
-        "recommendation",
+        "refund trend analysis",
+        "product-level findings",
+        "root cause classification",
+        "recommendations",
         "action plan",
     ]
     for section in required_sections:
+        # tolerate hyphen vs space and capitalization
+        sec_norm = section.replace("-", " ")
+        text_norm = full_text.replace("-", " ")
         check(f"Word doc contains '{section}' section",
-              section in full_text,
+              sec_norm in text_norm,
               f"Not found in document text")
 
-    # Check that investigation products are mentioned
-    for pn in investigation_products[:2]:
-        # Check first 40 chars of product name (names are very long)
-        short_name = pn[:40].lower()
-        check(f"Word doc mentions investigation product",
-              short_name in full_text,
-              f"Product '{short_name}...' not found")
+    # All investigation products must be mentioned (not just first 2)
+    # Use full product name when reasonable to avoid prefix-collision FP.
+    for pn in investigation_products:
+        full_name = pn.lower().strip()
+        # If product name is long, accept first 40 chars; otherwise full name
+        match_token = full_name if len(full_name) <= 60 else full_name[:40]
+        if not match_token:
+            continue
+        check(f"Word doc mentions investigation product '{pn[:50]}'",
+              match_token in full_text,
+              f"Product not found in Word document")
 
 
-def check_emails(investigation_products):
+def check_emails(investigation_products, refund_rows):
     print("\n=== Checking Emails ===")
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
@@ -271,6 +278,11 @@ def check_emails(investigation_products):
             return to_addr.lower()
         return str(to_addr).lower() if to_addr else ""
 
+    # Compute expected key numbers for body checks
+    total_refunds = len(refund_rows)
+    total_amount = round(sum(r["amount"] for r in refund_rows), 2)
+    total_amount_int_str = str(int(round(total_amount)))
+
     # Check email to quality_team@company.com
     quality_email = None
     for subject, to_addr, body_text in all_emails:
@@ -282,12 +294,22 @@ def check_emails(investigation_products):
     check("Email sent to quality_team@company.com", quality_email is not None, db=True)
     if quality_email:
         subj = (quality_email[0] or "").lower()
-        check("Quality email subject contains 'refund' or 'analysis'",
-              "refund" in subj or "analysis" in subj,
+        # Task: "subject containing 'Refund' and 'Analysis'" — both required
+        check("Quality email subject contains 'refund' AND 'analysis'",
+              "refund" in subj and "analysis" in subj,
               f"Subject: {quality_email[0]}", db=True)
-        body = str(quality_email[1]) if quality_email[1] else ""
-        check("Quality email body has content (>20 chars)",
-              len(body) > 20, f"Body length: {len(body)}", db=True)
+        body = str(quality_email[1] or "").lower()
+        # Body must summarize: total refunds, total amount, severity breakdown
+        # Be tolerant: allow either int or 2-decimal form for amount.
+        body_has_total_count = str(total_refunds) in body
+        body_has_amount = (total_amount_int_str in body) or (f"{total_amount:.2f}" in body) or (f"{total_amount:.0f}" in body)
+        body_has_severity = any(s in body for s in ["critical", "major", "minor"])
+        check("Quality email body mentions total refund count",
+              body_has_total_count, f"Body excerpt: {body[:200]}", db=True)
+        check("Quality email body mentions total refund amount",
+              body_has_amount, f"Body excerpt: {body[:200]}", db=True)
+        check("Quality email body mentions severity breakdown (critical/major/minor)",
+              body_has_severity, f"Body excerpt: {body[:200]}", db=True)
 
     # Check email to supplier_relations@company.com
     supplier_email = None
@@ -300,12 +322,28 @@ def check_emails(investigation_products):
     check("Email sent to supplier_relations@company.com", supplier_email is not None, db=True)
     if supplier_email:
         subj = (supplier_email[0] or "").lower()
-        check("Supplier email subject contains 'supplier' or 'investigation'",
-              "supplier" in subj or "investigation" in subj,
+        check("Supplier email subject contains 'supplier' AND 'investigation'",
+              "supplier" in subj and "investigation" in subj,
               f"Subject: {supplier_email[0]}", db=True)
-        body = str(supplier_email[1]) if supplier_email[1] else ""
-        check("Supplier email body has content (>20 chars)",
-              len(body) > 20, f"Body length: {len(body)}", db=True)
+        body = str(supplier_email[1] or "").lower()
+        # Body must list ALL specific investigation products (not just half)
+        if investigation_products:
+            mentioned = 0
+            missing = []
+            for pn in investigation_products:
+                full_name = pn.lower().strip()
+                match_token = full_name if len(full_name) <= 60 else full_name[:40]
+                if match_token and match_token in body:
+                    mentioned += 1
+                else:
+                    missing.append(pn)
+            check(f"Supplier email body mentions ALL {len(investigation_products)} investigation products",
+                  mentioned == len(investigation_products),
+                  f"mentioned {mentioned}/{len(investigation_products)}; missing: {missing[:3]}",
+                  db=True)
+        else:
+            check("Supplier email body has content",
+                  len(body) > 20, f"Body length: {len(body)}", db=True)
 
 
 def main():
@@ -322,25 +360,23 @@ def main():
 
     check_excel(args.agent_workspace, refund_rows, product_refund_map)
     check_word(args.agent_workspace, investigation_products)
-    check_emails(investigation_products)
+    check_emails(investigation_products, refund_rows)
 
     total_pass = FILE_PASS + DB_PASS
     total_fail = FILE_FAIL + DB_FAIL
-    file_ok = FILE_FAIL == 0
+    overall_ok = (FILE_FAIL == 0) and (DB_FAIL == 0)
 
     print(f"\n=== SUMMARY ===")
     print(f"  File checks - Passed: {FILE_PASS}, Failed: {FILE_FAIL}")
     print(f"  DB checks   - Passed: {DB_PASS}, Failed: {DB_FAIL}")
-    if DB_FAIL > 0:
-        print(f"  WARNING: {DB_FAIL} DB checks failed (not blocking)")
-    print(f"  Overall: {'PASS' if file_ok else 'FAIL'}")
+    print(f"  Overall: {'PASS' if overall_ok else 'FAIL'}")
 
     if args.res_log_file:
-        result = {"passed": total_pass, "failed": total_fail, "success": file_ok}
+        result = {"passed": total_pass, "failed": total_fail, "success": overall_ok}
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    sys.exit(0 if file_ok else 1)
+    sys.exit(0 if overall_ok else 1)
 
 
 if __name__ == "__main__":

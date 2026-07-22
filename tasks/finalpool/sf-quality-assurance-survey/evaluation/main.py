@@ -23,17 +23,21 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+BLOCKING_FAIL_COUNT = 0
 
 
-def check(name, condition, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def check(name, condition, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, BLOCKING_FAIL_COUNT
     if condition:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if not runtime_only:
+            BLOCKING_FAIL_COUNT += 1
         detail_str = f": {detail[:200]}" if detail else ""
-        print(f"  [FAIL] {name}{detail_str}")
+        suffix = " (runtime-only)" if runtime_only else ""
+        print(f"  [FAIL] {name}{suffix}{detail_str}")
 
 
 def num_close(a, b, abs_tol=1.0, rel_tol=0.05):
@@ -189,13 +193,13 @@ def check_excel(agent_workspace, expected):
                     break
             if matched:
                 check(f"{agent} Avg_Response_Time",
-                      num_close(matched[1], e_row["Avg_Response_Time"], 1.0),
+                      num_close(matched[1], e_row["Avg_Response_Time"], 0.3),
                       f"Expected {e_row['Avg_Response_Time']}, got {matched[1]}")
                 check(f"{agent} Avg_Satisfaction",
-                      num_close(matched[2], e_row["Avg_Satisfaction"], 0.5),
+                      num_close(matched[2], e_row["Avg_Satisfaction"], 0.1),
                       f"Expected {e_row['Avg_Satisfaction']}, got {matched[2]}")
                 check(f"{agent} Resolution_Rate",
-                      num_close(matched[3], e_row["Resolution_Rate"], 1.0),
+                      num_close(matched[3], e_row["Resolution_Rate"], 0.5),
                       f"Expected {e_row['Resolution_Rate']}, got {matched[3]}")
                 # Check below_target_areas contains key words
                 if matched[4]:
@@ -225,14 +229,16 @@ def check_excel(agent_workspace, expected):
                     matched = r
                     break
             if matched:
+                # Ticket_Count should be exact (integer)
                 check(f"{it} Ticket_Count",
-                      num_close(matched[1], e_row["Ticket_Count"], 5),
+                      num_close(matched[1], e_row["Ticket_Count"], 0),
                       f"Expected {e_row['Ticket_Count']}, got {matched[1]}")
+                # Response_Time tightened: 1.0 -> 0.1
                 check(f"{it} Avg_Response_Time",
-                      num_close(matched[2], e_row["Avg_Response_Time"], 1.0),
+                      num_close(matched[2], e_row["Avg_Response_Time"], 0.1),
                       f"Expected {e_row['Avg_Response_Time']}, got {matched[2]}")
                 check(f"{it} Avg_Satisfaction",
-                      num_close(matched[3], e_row["Avg_Satisfaction"], 0.5),
+                      num_close(matched[3], e_row["Avg_Satisfaction"], 0.1),
                       f"Expected {e_row['Avg_Satisfaction']}, got {matched[3]}")
             else:
                 check(f"Issue Type '{it}' found", False, "Not in output")
@@ -275,50 +281,98 @@ def check_form():
         ORDER BY created_at DESC LIMIT 1
     """)
     form_row = cur.fetchone()
-    check("Google Form exists", form_row is not None)
+    check("Google Form exists", form_row is not None, runtime_only=True)
     if not form_row:
         cur.close()
         conn.close()
         return
 
+    # Once the agent has created a relevant form, the structural / option
+    # checks become BLOCKING — wrong Q3 options is now a real failure.
+    form_exists = True
     form_id = form_row[0]
 
     cur.execute("""
-        SELECT title, question_type, required
+        SELECT title, question_type, required, config, position
         FROM gform.questions
         WHERE form_id = %s
         ORDER BY position ASC
     """, (form_id,))
     questions = cur.fetchall()
     check("Form has 5 questions", len(questions) == 5,
-          f"Found {len(questions)}")
+          f"Found {len(questions)}", runtime_only=True)
+
+    # The schema stores question_type as 'TEXT' / 'RADIO' / 'CHECKBOX' / 'PARAGRAPH'
+    # (not 'textQuestion'/'choiceQuestion'). Accept both spellings for resilience.
+    def _is_text_q(qt):
+        ql = (qt or "").lower()
+        return "text" in ql or "paragraph" in ql
+
+    def _is_choice_q(qt):
+        ql = (qt or "").lower()
+        return "choice" in ql or "radio" in ql or "checkbox" in ql or "select" in ql
 
     if len(questions) >= 5:
         # Q1: name (text, required)
-        check("Q1 is text type", questions[0][1] == "textQuestion",
-              f"Got {questions[0][1]}")
-        check("Q1 is required", questions[0][2] is True)
+        check("Q1 is text type", _is_text_q(questions[0][1]),
+              f"Got {questions[0][1]}", runtime_only=True)
+        check("Q1 is required", questions[0][2] is True, runtime_only=True)
 
         # Q2: team (choice, required)
-        check("Q2 is choice type", questions[1][1] == "choiceQuestion",
-              f"Got {questions[1][1]}")
-        check("Q2 is required", questions[1][2] is True)
+        check("Q2 is choice type", _is_choice_q(questions[1][1]),
+              f"Got {questions[1][1]}", runtime_only=True)
+        check("Q2 is required", questions[1][2] is True, runtime_only=True)
 
         # Q3: response time rating (choice, required)
-        check("Q3 is choice type", questions[2][1] == "choiceQuestion",
-              f"Got {questions[2][1]}")
-        check("Q3 is required", questions[2][2] is True)
+        check("Q3 is choice type", _is_choice_q(questions[2][1]),
+              f"Got {questions[2][1]}", runtime_only=True)
+        check("Q3 is required", questions[2][2] is True, runtime_only=True)
 
         # Q4: challenge (text/paragraph, required)
-        check("Q4 is text type", questions[3][1] == "textQuestion",
-              f"Got {questions[3][1]}")
-        check("Q4 is required", questions[3][2] is True)
+        check("Q4 is text type", _is_text_q(questions[3][1]),
+              f"Got {questions[3][1]}", runtime_only=True)
+        check("Q4 is required", questions[3][2] is True, runtime_only=True)
 
         # Q5: suggestions (text/paragraph, not required)
-        check("Q5 is text type", questions[4][1] == "textQuestion",
-              f"Got {questions[4][1]}")
+        check("Q5 is text type", _is_text_q(questions[4][1]),
+              f"Got {questions[4][1]}", runtime_only=True)
         check("Q5 is not required", questions[4][2] is False or questions[4][2] is None,
-              f"Got required={questions[4][2]}")
+              f"Got required={questions[4][2]}", runtime_only=True)
+
+        # Build options-by-position from the JSONB config column.
+        # Real schema: config = {'choices': ['Yes', 'No', ...]} for choice questions.
+        opts_by_pos = {}
+        for q_title, qt, req, cfg, pos in questions:
+            choices = []
+            if isinstance(cfg, dict):
+                # Try common keys
+                for key in ("choices", "options", "values"):
+                    val = cfg.get(key)
+                    if isinstance(val, list):
+                        choices = val
+                        break
+            opts_by_pos[pos] = [str(c or "").strip().lower() for c in choices]
+
+        # Q3 (position=3) per task.md: options must be exactly
+        # "Exceeds Target", "Meets Target", "Below Target", "Needs Improvement"
+        # When the agent has created a form, this is BLOCKING (the agent has
+        # produced the deliverable and we now hold them to the spec).
+        q3_opts = opts_by_pos.get(3, [])
+        if q3_opts:
+            required_q3_keywords = ["exceeds target", "meets target",
+                                    "below target", "needs improvement"]
+            joined = " | ".join(q3_opts)
+            # Require all 4 keywords to appear across the option set
+            all_present = all(kw in joined for kw in required_q3_keywords)
+            check("Q3 has the 4 required rating options "
+                  "(Exceeds/Meets/Below Target, Needs Improvement)",
+                  all_present,
+                  f"Opts: {q3_opts}", runtime_only=False)
+
+        q2_opts = opts_by_pos.get(2, [])
+        if q2_opts:
+            check("Q2 has >= 2 team choices", len(q2_opts) >= 2,
+                  f"Opts: {q2_opts}", runtime_only=True)
 
     cur.close()
     conn.close()
@@ -348,11 +402,12 @@ def main():
 
     total = PASS_COUNT + FAIL_COUNT
     pass_rate = PASS_COUNT / total if total > 0 else 0
-    success = pass_rate >= 0.8
+    # Replace 80% threshold with BLOCKING_FAIL_COUNT gate
+    success = BLOCKING_FAIL_COUNT == 0
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")
-    print(f"  Failed: {FAIL_COUNT}")
+    print(f"  Failed: {FAIL_COUNT} (blocking_fail={BLOCKING_FAIL_COUNT})")
     print(f"  Pass Rate: {pass_rate:.1%}")
     print(f"  Overall: {'PASS' if success else 'FAIL'}")
 

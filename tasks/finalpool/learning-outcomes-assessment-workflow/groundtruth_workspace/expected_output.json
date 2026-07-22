@@ -1,4 +1,7 @@
 {
   "status": "completed",
-  "records_processed": 0
+  "deliverables": [
+    "Learning_Outcomes_Report.xlsx",
+    "Learning_Improvement_Recommendations.docx"
+  ]
 }

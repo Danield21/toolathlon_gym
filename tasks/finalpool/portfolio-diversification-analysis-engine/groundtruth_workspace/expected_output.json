@@ -1,4 +1,8 @@
 {
   "status": "completed",
-  "records_processed": 0
+  "deliverables": [
+    "Strategy_Recommendations.docx",
+    "Client_Briefing.pptx",
+    "portfolio_metrics.csv"
+  ]
 }

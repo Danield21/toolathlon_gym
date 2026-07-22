@@ -3,7 +3,7 @@ Evaluation for yf-dividend-analysis-pdf-email task.
 
 Checks:
 1. PDF file Dividend_Analysis.pdf exists with correct data
-2. Email sent (non-blocking)
+2. Email sent (BLOCKING — required by task)
 """
 
 import argparse
@@ -117,12 +117,25 @@ def check_pdf(agent_workspace):
            "xom" in text_lower and ("highest" in text_lower or "1." in text),
            "Expected XOM as highest yield")
 
+    # Check at least 2 expected yield numerical values appear.
+    # YF dividendYield values in this DB are decimals (0.0275, 0.0212, 0.020, 0.0028).
+    # Per task.md "multiplied by 100" — so PDF should show 2.75, 2.12, 2.00, 0.28.
+    # However the GT PDF in this dataset uses raw YF value*100 again (275.00, 212.00).
+    # Accept either convention.
+    yield_strings_v1 = ["2.75", "2.12", "2.00", "0.28"]
+    yield_strings_v2 = ["275.00", "212.00", "200.00", "28.00"]
+    hits_v1 = sum(1 for y in yield_strings_v1 if y in text)
+    hits_v2 = sum(1 for y in yield_strings_v2 if y in text)
+    record("PDF cites >= 2 expected yield values",
+           hits_v1 >= 2 or hits_v2 >= 2,
+           f"v1 hits {hits_v1}/{yield_strings_v1}; v2 hits {hits_v2}/{yield_strings_v2}")
+
     return True
 
 
 def check_email():
-    """Check email sent - NON-BLOCKING."""
-    print("\n=== Checking Email (non-blocking) ===")
+    """Check email sent — BLOCKING (task explicitly requires the email)."""
+    print("\n=== Checking Email ===")
 
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -136,39 +149,51 @@ def check_email():
         cur.close()
         conn.close()
 
-        if len(emails) == 0:
-            print("  [WARN] No emails found (non-blocking)")
-            return
+        record("Email exists in DB", len(emails) >= 1, f"Found {len(emails)} emails")
 
-        found = False
+        matched = None
         for subject, from_addr, to_addr, body_text in emails:
             subject_lower = (subject or "").lower()
-            if "dividend" in subject_lower:
-                found = True
-                print(f"  [INFO] Found dividend email: {subject}")
-
-                from_str = str(from_addr or "").lower()
-                if "analyst@investteam.com" in from_str:
-                    print("  [INFO] Correct from address")
-                else:
-                    print(f"  [WARN] From address: {from_addr}")
-
-                to_str = str(to_addr or "").lower()
-                if "team@investteam.com" in to_str:
-                    print("  [INFO] Correct to address")
-                else:
-                    print(f"  [WARN] To address: {to_addr}")
-
-                body = body_text or ""
-                symbols_in_body = sum(1 for s in EXPECTED_SYMBOLS if s in body)
-                print(f"  [INFO] Symbols in email body: {symbols_in_body}/4")
+            if "dividend analysis summary" in subject_lower:
+                matched = (subject, from_addr, to_addr, body_text)
                 break
 
-        if not found:
-            print("  [WARN] No dividend-related email found (non-blocking)")
+        record("Email subject 'Dividend Analysis Summary - March 2026' present",
+               matched is not None,
+               "subject must contain 'Dividend Analysis Summary'")
+
+        if matched:
+            subject, from_addr, to_addr, body_text = matched
+            from_str = str(from_addr or "").lower()
+            record("Email from analyst@investteam.com",
+                   "analyst@investteam.com" in from_str,
+                   f"From: {from_addr}")
+            to_str = str(to_addr or "").lower()
+            record("Email to team@investteam.com",
+                   "team@investteam.com" in to_str,
+                   f"To: {to_addr}")
+
+            sl = (subject or "").lower()
+            record("Email subject mentions 'March 2026'",
+                   "march 2026" in sl,
+                   f"Subject: {subject}")
+
+            body = body_text or ""
+            symbols_in_body = sum(1 for s in EXPECTED_SYMBOLS if s in body)
+            record("Email body lists all 4 symbols",
+                   symbols_in_body == 4,
+                   f"Found {symbols_in_body}/4 symbols in body")
+
+            body_l = body.lower()
+            record("Email body mentions 'yield'",
+                   "yield" in body_l,
+                   f"body sample: {body_l[:200]}")
+            record("Email body mentions 'average'",
+                   "average" in body_l or "avg" in body_l,
+                   f"body sample: {body_l[:200]}")
 
     except Exception as e:
-        print(f"  [WARN] Email check error (non-blocking): {e}")
+        record("Email check ran", False, str(e))
 
 
 def main():

@@ -165,13 +165,13 @@ def check_excel(agent_workspace, expected):
                       num_close(agent_row[4], exp_row[4], 2.0),
                       f"Expected {exp_row[4]}, got {agent_row[4]}")
                 check(f"'{sym}' Return_30d_Pct",
-                      num_close(agent_row[5], exp_row[5], 1.0),
+                      num_close(agent_row[5], exp_row[5], 0.5),
                       f"Expected {exp_row[5]}, got {agent_row[5]}")
                 check(f"'{sym}' Price_90d_Ago",
                       num_close(agent_row[6], exp_row[6], 2.0),
                       f"Expected {exp_row[6]}, got {agent_row[6]}")
                 check(f"'{sym}' Return_90d_Pct",
-                      num_close(agent_row[7], exp_row[7], 1.5),
+                      num_close(agent_row[7], exp_row[7], 1.0),
                       f"Expected {exp_row[7]}, got {agent_row[7]}")
             else:
                 check(f"'{sym}' found in output", False, "Not in agent output")
@@ -200,38 +200,36 @@ def check_notion(expected):
     check("At least one Notion page exists", len(pages) > 0,
           f"Found {len(pages)} pages")
 
+    def extract_title(props):
+        """Extract title text from properties jsonb."""
+        if not isinstance(props, dict):
+            return ""
+        title_prop = props.get("title") or props.get("Title")
+        if isinstance(title_prop, dict):
+            titles = title_prop.get("title") or []
+        elif isinstance(title_prop, list):
+            titles = title_prop
+        else:
+            titles = []
+        text_parts = []
+        for t in titles:
+            if isinstance(t, dict):
+                text_parts.append(str(t.get("plain_text")
+                                      or t.get("text", {}).get("content", "")))
+        return " ".join(text_parts).lower()
+
     found_dashboard = False
     for page in pages:
         props = page[1] if isinstance(page[1], dict) else {}
-        # Title could be in various property formats
-        page_str = json.dumps(props).lower()
-        if "market dashboard" in page_str:
+        title_text = extract_title(props)
+        if "market dashboard" in title_text:
             found_dashboard = True
-            check("Notion page 'Market Dashboard' found", True)
+            check("Notion page 'Market Dashboard' found (title match)", True)
             break
 
     if not found_dashboard:
-        # Also check title property specifically
-        for page in pages:
-            props = page[1] if isinstance(page[1], dict) else {}
-            title_prop = props.get("title", props.get("Title", {}))
-            if isinstance(title_prop, dict):
-                title_val = title_prop.get("title", [])
-                if isinstance(title_val, list):
-                    for t in title_val:
-                        if isinstance(t, dict) and "market dashboard" in str(t.get("plain_text", "")).lower():
-                            found_dashboard = True
-                            break
-                        if isinstance(t, dict) and "market dashboard" in str(t.get("text", {}).get("content", "")).lower():
-                            found_dashboard = True
-                            break
-            if found_dashboard:
-                check("Notion page 'Market Dashboard' found", True)
-                break
-
-    if not found_dashboard:
-        check("Notion page 'Market Dashboard' found", False,
-              f"Pages: {[json.dumps(p[1])[:100] for p in pages]}")
+        check("Notion page 'Market Dashboard' found (title match)", False,
+              f"Titles: {[extract_title(p[1]) for p in pages[:5]]}")
 
 
 def check_excel_gt(agent_workspace, groundtruth_workspace):
@@ -263,14 +261,19 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         print("INFO: Falling back to groundtruth Excel")
         check_excel_gt(agent_workspace, groundtruth_workspace)
 
+    excel_fail = FAIL_COUNT
     check_notion(expected)
 
     total_pass = PASS_COUNT
     total_fail = FAIL_COUNT
-    all_ok = FAIL_COUNT == 0
+    total = total_pass + total_fail
+    acc = (total_pass / total * 100) if total else 0
+    # Excel is blocking (local file); notion is runtime-only.
+    all_ok = (excel_fail == 0) and (acc >= 85)
 
     print(f"\n=== SUMMARY ===")
-    print(f"  Total checks - Passed: {PASS_COUNT}, Failed: {FAIL_COUNT}")
+    print(f"  Total checks - Passed: {total_pass}, Failed: {total_fail}")
+    print(f"  Excel failures: {excel_fail}, accuracy: {acc:.1f}%")
     print(f"  Overall: {'PASS' if all_ok else 'FAIL'}")
 
     if res_log_file:

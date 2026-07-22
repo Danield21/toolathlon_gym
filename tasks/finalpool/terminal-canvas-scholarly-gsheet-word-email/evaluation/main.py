@@ -183,16 +183,32 @@ def main():
     # 2. Check alignment_scores.json exists and has correct faculty entries
     as_path = os.path.join(ws, "alignment_scores.json")
     check("alignment_scores.json exists", os.path.exists(as_path), "File not found")
+    alignment_score_values = []
     if os.path.exists(as_path):
         with open(as_path) as f:
             as_data = json.load(f)
+
+        def _extract_score(item):
+            if isinstance(item, (int, float)):
+                return float(item)
+            if isinstance(item, dict):
+                for key in ("alignment_score", "score", "alignment_score_percent", "alignmentScore", "percentage", "percent"):
+                    if key in item:
+                        try:
+                            return float(item[key])
+                        except (TypeError, ValueError):
+                            return None
+            return None
+
         # Could be list or dict
         if isinstance(as_data, list):
             check(f"alignment_scores has {FACULTY_COUNT} entries", len(as_data) == FACULTY_COUNT, f"Got {len(as_data)}")
-            names_in_scores = [e.get("faculty_name", e.get("name", "")) for e in as_data]
+            names_in_scores = [e.get("faculty_name", e.get("name", "")) for e in as_data if isinstance(e, dict)]
+            alignment_score_values = [_extract_score(e) for e in as_data]
         elif isinstance(as_data, dict):
             check(f"alignment_scores has {FACULTY_COUNT} entries", len(as_data) == FACULTY_COUNT, f"Got {len(as_data)}")
             names_in_scores = list(as_data.keys())
+            alignment_score_values = [_extract_score(v) for v in as_data.values()]
         else:
             names_in_scores = []
             check(f"alignment_scores has {FACULTY_COUNT} entries", False, "Unexpected format")
@@ -201,6 +217,16 @@ def main():
         for fac in FACULTY:
             found = any(fac.lower() in n.lower() for n in names_in_scores)
             check(f"alignment_scores contains {fac}", found, f"Names: {names_in_scores}")
+
+        # Validate score values are numeric percentages in [0, 100]
+        non_numeric = [v for v in alignment_score_values if v is None]
+        check("alignment_scores values are numeric",
+              len(non_numeric) == 0 and len(alignment_score_values) == FACULTY_COUNT,
+              f"Non-numeric or missing: {non_numeric}, got {len(alignment_score_values)} values")
+        out_of_range = [v for v in alignment_score_values if v is not None and not (0.0 <= v <= 100.0)]
+        check("alignment_scores values within [0, 100] percentage range",
+              len(out_of_range) == 0,
+              f"Out of range: {out_of_range}")
     else:
         as_data = {}
 
@@ -210,12 +236,24 @@ def main():
     if os.path.exists(ss_path):
         with open(ss_path) as f:
             ss_data = json.load(f)
-        for key in ["total_faculty", "average_alignment_score", "max_score", "min_score"]:
-            alt_keys = [key, key.replace("_", " "), key.replace("alignment_", "")]
-            found = any(k in str(ss_data).lower() for k in [key.lower(), key.replace("_", "").lower()])
-            # More flexible: check key exists in some form
-            found = any(key.replace("_", "") in k.replace("_", "").lower() for k in ss_data.keys()) or key in ss_data
+        # Required keys per task.md: total faculty, average alignment score, max, min, count below 30%
+        for key in ["total_faculty", "average_alignment_score", "max_score", "min_score", "below_30"]:
+            found = any(key.replace("_", "") in k.replace("_", "").replace(" ", "").lower() for k in ss_data.keys()) or key in ss_data
+            if key == "below_30":
+                # accept variations like "below_30_percent", "count_below_30",
+                # "faculty_below_30", "below_threshold_30" but require an
+                # explicit '30' (or 0.3) marker so it doesn't fuzzy-match
+                # unrelated keys.
+                found = found or any(
+                    "30" in k or "0.3" in k for k in ss_data.keys()
+                )
             check(f"summary_stats has {key}", found, f"Keys: {list(ss_data.keys())}")
+        # Validate total_faculty value matches actual count
+        for k, v in ss_data.items():
+            if "total" in k.lower() and "facult" in k.lower():
+                check(f"summary_stats total_faculty == {FACULTY_COUNT}",
+                      v == FACULTY_COUNT, f"Got {v}")
+                break
 
     # 4. Check Word document exists
     doc_path = os.path.join(ws, "Research_Teaching_Report.docx")
@@ -276,6 +314,25 @@ def main():
             all_values = " ".join([r[0] for r in cur.fetchall() if r[0]]).lower()
             for fac in FACULTY:
                 check(f"GSheet contains {fac}", fac.lower() in all_values, "Not found")
+            # Validate Status column has only Aligned/Review Needed values
+            cur.execute("""
+                SELECT row_index, col_index, value FROM gsheet.cells
+                WHERE spreadsheet_id = %s AND sheet_id = %s
+                ORDER BY row_index, col_index
+            """, (ss_id, sheet_id))
+            all_cells = cur.fetchall()
+            # Find Status column index from header row
+            status_col = None
+            for r, c, v in all_cells:
+                if r == 0 and v and "status" in str(v).lower():
+                    status_col = c
+                    break
+            if status_col is not None:
+                status_values = [str(v).strip().lower() for r, c, v in all_cells if r > 0 and c == status_col and v]
+                valid_set = {"aligned", "review needed", "review_needed"}
+                invalid = [s for s in status_values if s not in valid_set]
+                check("GSheet Status values are 'Aligned' or 'Review Needed'",
+                      len(invalid) == 0, f"Invalid: {invalid}")
 
     # 6. Check emails sent
     # Dean email
@@ -308,7 +365,9 @@ def main():
     conn.close()
 
     check_reverse_validation()
-    check_xlsx_content(ws)
+    # Note: Alignment_Summary.xlsx is NOT required by task.md (which only asks
+    # for GSheet + Word doc + emails). The xlsx in groundtruth_workspace is a
+    # reference artifact and should not be enforced on the agent.
 
     total = PASS_COUNT + FAIL_COUNT
     accuracy = PASS_COUNT / total * 100 if total > 0 else 0
@@ -318,7 +377,7 @@ def main():
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
-    sys.exit(0 if accuracy >= 70 else 1)
+    sys.exit(0 if FAIL_COUNT == 0 else 1)
 
 
 if __name__ == "__main__":

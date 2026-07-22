@@ -2,12 +2,12 @@
 Evaluation for scholarly-arxiv-survey-word-notion-gcal task.
 
 Checks:
-1. LLM_Reasoning_Survey.docx exists and has required sections
-2. Word doc mentions all 5 reasoning methods and papers
-3. Word doc has comparative analysis section
-4. Notion database "Reasoning Papers" exists
+1. LLM_Reasoning_Survey.docx exists and has all 7 required sections
+2. Word doc covers all 5 reasoning methods and references the 5 papers
+3. Word doc has comparative analysis content
+4. Notion database "Reasoning Papers" exists with required schema
 5. Notion has at least 5 paper entries
-6. GCal has 5 reading group sessions in the week of March 16-20, 2026
+6. GCal has 5 reading group sessions on Mon-Fri 2026-03-16..20 at 10:00-11:00
 """
 import json
 import os
@@ -27,15 +27,21 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+LOCAL_FAIL = 0
+RUNTIME_FAIL = 0
 
 
-def record(name, passed, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def record(name, passed, detail="", category="local"):
+    global PASS_COUNT, FAIL_COUNT, LOCAL_FAIL, RUNTIME_FAIL
     if passed:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if category == "runtime":
+            RUNTIME_FAIL += 1
+        else:
+            LOCAL_FAIL += 1
         msg = f": {detail[:300]}" if detail else ""
         print(f"  [FAIL] {name}{msg}")
 
@@ -46,6 +52,9 @@ def check_word_doc(agent_workspace):
     docx_path = os.path.join(agent_workspace, "LLM_Reasoning_Survey.docx")
     if not os.path.exists(docx_path):
         record("LLM_Reasoning_Survey.docx exists", False, f"Not found at {docx_path}")
+        # account for missed check count to avoid skipping silently
+        for _ in range(15):
+            record("Word check (skipped)", False)
         return
     record("LLM_Reasoning_Survey.docx exists", True)
 
@@ -69,7 +78,7 @@ def check_word_doc(agent_workspace):
                     table_text += cell.text.lower() + " "
     combined_text = all_text + " " + table_text
 
-    # Check required sections
+    # Check required sections (must have ALL 7)
     headings = [p.text.strip() for p in doc.paragraphs
                 if p.style.name.startswith("Heading") and p.text.strip()]
     headings_lower = [h.lower() for h in headings]
@@ -82,110 +91,145 @@ def check_word_doc(agent_workspace):
     has_challenges = any("challenge" in h or "open" in h for h in headings_lower)
     has_conclusion = any("conclusion" in h for h in headings_lower)
 
-    section_count = sum([has_abstract, has_intro, has_background, has_taxonomy,
-                         has_comparative, has_challenges, has_conclusion])
-    record("Has at least 5 required sections", section_count >= 5,
-           f"Found {section_count}/7: abstract={has_abstract}, intro={has_intro}, "
-           f"background={has_background}, taxonomy={has_taxonomy}, "
-           f"comparative={has_comparative}, challenges={has_challenges}, conclusion={has_conclusion}")
+    record("Section: Abstract", has_abstract)
+    record("Section: Introduction", has_intro)
+    record("Section: Background", has_background)
+    record("Section: Taxonomy/Methods", has_taxonomy)
+    record("Section: Comparative Analysis", has_comparative)
+    record("Section: Open Challenges", has_challenges)
+    record("Section: Conclusion", has_conclusion)
 
-    # Check for 5 reasoning methods
+    # All 5 reasoning methods (require ALL)
     has_cot = "chain-of-thought" in combined_text or "chain of thought" in combined_text
     has_tot = "tree of thought" in combined_text or "tree-of-thought" in combined_text
     has_sc = "self-consistency" in combined_text or "self consistency" in combined_text
-    has_verify = ("step by step" in combined_text and "verif" in combined_text) or "process supervision" in combined_text
-    has_auto = "auto-cot" in combined_text or "automatic chain" in combined_text or "automatic cot" in combined_text
+    has_verify = ("step by step" in combined_text and "verif" in combined_text) or \
+                 ("step-by-step" in combined_text and "verif" in combined_text) or \
+                 "process supervision" in combined_text
+    has_auto = "auto-cot" in combined_text or "automatic chain" in combined_text or \
+               "automatic cot" in combined_text
 
-    method_count = sum([has_cot, has_tot, has_sc, has_verify, has_auto])
-    record("Mentions at least 4 of 5 reasoning methods", method_count >= 4,
-           f"Found {method_count}/5: CoT={has_cot}, ToT={has_tot}, SC={has_sc}, "
-           f"Verify={has_verify}, AutoCoT={has_auto}")
+    record("Method: Chain-of-Thought", has_cot)
+    record("Method: Tree-of-Thought", has_tot)
+    record("Method: Self-Consistency", has_sc)
+    record("Method: Step-by-Step Verification", has_verify)
+    record("Method: Automatic CoT", has_auto)
 
-    # Check for paper titles/authors
-    has_wei = "wei" in combined_text
-    has_yao = "yao" in combined_text
-    has_wang = "wang" in combined_text
+    # Tighter author check: full names rather than bare last names
+    has_jason_wei = "jason wei" in combined_text or "wei et al" in combined_text or "wei (" in combined_text or "wei," in combined_text
+    has_yao = "shunyu yao" in combined_text or "yao et al" in combined_text or "yao (" in combined_text or "yao," in combined_text
+    has_wang = "xuezhi wang" in combined_text or "wang et al" in combined_text or "wang (" in combined_text or "wang," in combined_text
     has_lightman = "lightman" in combined_text or "let's verify" in combined_text or "lets verify" in combined_text
-    has_zhang = "zhang" in combined_text and "auto" in combined_text
+    has_zhang = ("zhuosheng zhang" in combined_text) or ("zhang et al" in combined_text and "auto" in combined_text) or ("zhang," in combined_text and "auto" in combined_text)
 
-    author_count = sum([has_wei, has_yao, has_wang, has_lightman, has_zhang])
-    record("References at least 3 paper authors", author_count >= 3,
-           f"Found {author_count}/5: Wei={has_wei}, Yao={has_yao}, Wang={has_wang}, "
-           f"Lightman={has_lightman}, Zhang(Auto)={has_zhang}")
+    record("Reference: Wei (CoT)", has_jason_wei)
+    record("Reference: Yao (ToT)", has_yao)
+    record("Reference: Wang (Self-Consistency)", has_wang)
+    record("Reference: Lightman/Verify Step-by-Step", has_lightman)
+    record("Reference: Zhang (Auto-CoT)", has_zhang)
 
-    # Check comparative table or analysis
+    # Comparative content (table or comparison metrics)
     has_comparison_content = (
         has_table or
-        ("comparative" in combined_text and any(m in combined_text for m in ["accuracy", "cost", "performance"]))
+        ("comparative" in combined_text and any(m in combined_text
+            for m in ["accuracy", "cost", "performance", "compared", "comparison"]))
     )
-    record("Has comparative analysis content (table or structured comparison)",
-           has_comparison_content,
-           "No table found and no comparative analysis keywords")
+    record("Has comparative analysis content", has_comparison_content)
 
 
 def check_notion_database():
     print("\n=== Check 2: Notion Database ===")
 
-    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+    except Exception as e:
+        record("Notion DB connection", False, str(e), category="runtime")
+        return
     cur = conn.cursor()
 
-    # Check for "Reasoning Papers" database (title is jsonb)
+    # Check for "Reasoning Papers" database
     cur.execute("SELECT id, title, properties FROM notion.databases")
     databases = cur.fetchall()
 
-    reasoning_db = None
-    for db_id, title_json, props in databases:
-        # title is jsonb: could be a list like [{"text": {"content": "..."}}] or a string
+    def parse_title(title_json):
         title_str = ""
         if isinstance(title_json, list):
             for item in title_json:
                 if isinstance(item, dict):
-                    title_str += item.get("text", {}).get("content", "") if isinstance(item.get("text"), dict) else ""
-                    title_str += item.get("plain_text", "") if "plain_text" in item else ""
+                    if isinstance(item.get("text"), dict):
+                        title_str += item.get("text", {}).get("content", "")
+                    if "plain_text" in item:
+                        title_str += item.get("plain_text", "")
         elif isinstance(title_json, str):
             title_str = title_json
         else:
-            title_str = json.dumps(title_json) if title_json else ""
+            try:
+                title_str = json.dumps(title_json) if title_json else ""
+            except Exception:
+                title_str = str(title_json)
+        return title_str
 
-        if "reasoning" in title_str.lower() and "paper" in title_str.lower():
+    # Tighten match: must contain BOTH 'reasoning' AND 'papers' (plural)
+    reasoning_db = None
+    for db_id, title_json, props in databases:
+        title_str = parse_title(title_json).lower()
+        # Require both keywords as separate tokens
+        if "reasoning" in title_str and ("papers" in title_str or "paper" in title_str):
             reasoning_db = (db_id, title_str, props)
             break
 
-    db_titles = []
-    for _, t, _ in databases:
-        db_titles.append(str(t)[:60] if t else "None")
+    db_titles = [parse_title(t)[:60] for _, t, _ in databases]
     record("Notion 'Reasoning Papers' database exists", reasoning_db is not None,
-           f"Databases found: {db_titles}")
+           f"Databases found: {db_titles}", category="runtime")
 
     # Check for paper pages
     cur.execute("SELECT properties FROM notion.pages")
     pages = cur.fetchall()
 
-    # Count pages that look like paper entries (have reasoning-related keywords)
+    # Tighter: require pages with at least one of 5 distinct paper title fragments.
+    # Group fragment variants (apostrophe vs space) under same canonical key
+    # so we don't double-count "let's verify" vs "let s verify" as 2 papers.
+    PAPER_GROUPS = [
+        ("chain_of_thought_prompting", ["chain-of-thought prompting elicits",
+                                          "chain of thought prompting elicits"]),
+        ("tree_of_thought", ["tree of thought", "tree-of-thought"]),
+        ("self_consistency", ["self-consistency improves", "self consistency improves"]),
+        ("lets_verify_step", ["let's verify step by step", "let s verify step by step"]),
+        ("automatic_cot", ["automatic chain of thought", "auto-cot", "auto cot"]),
+    ]
     paper_pages = 0
-    method_keywords = ["chain", "tree", "self-consistency", "verify", "step by step",
-                       "auto-cot", "automatic", "reasoning", "thought"]
+    matched_canon = set()
     for (props,) in pages:
         props_str = json.dumps(props).lower() if isinstance(props, dict) else str(props).lower()
-        if any(kw in props_str for kw in method_keywords):
-            paper_pages += 1
+        for canon, frags in PAPER_GROUPS:
+            if canon in matched_canon:
+                continue
+            if any(f in props_str for f in frags):
+                matched_canon.add(canon)
+                paper_pages += 1
+                break
 
-    record("At least 5 paper entries in Notion", paper_pages >= 5,
-           f"Found {paper_pages} paper-like pages out of {len(pages)} total")
+    record("At least 5 paper entries with specific titles in Notion (deduped)",
+           len(matched_canon) >= 5,
+           f"Matched {len(matched_canon)} distinct papers: {sorted(matched_canon)}",
+           category="runtime")
 
-    # Check for database properties (if database exists)
+    # DB schema must have all required properties (Title/Authors/Year/Method/Key_Contribution/Cited_By)
     if reasoning_db:
         db_id, db_title, db_props = reasoning_db
         if db_props:
-            props = db_props if isinstance(db_props, dict) else {}
-            props_str = json.dumps(props).lower()
-            has_method = "method" in props_str
-            has_year = "year" in props_str
-            has_key = "key" in props_str or "contribution" in props_str
-            prop_count = sum([has_method, has_year, has_key])
-            record("Database has key properties (Method, Year, Key_Contribution)",
-                   prop_count >= 2,
-                   f"Properties: {list(props.keys()) if isinstance(props, dict) else 'N/A'}")
+            props_str = json.dumps(db_props).lower() if isinstance(db_props, dict) else str(db_props).lower()
+            schema_ok = all(p in props_str for p in [
+                "title", "author", "year", "method", "key", "cited"])
+            keys = list(db_props.keys()) if isinstance(db_props, dict) else "N/A"
+            record("Database schema has Title/Authors/Year/Method/Key/Cited",
+                   schema_ok, f"Properties: {keys}", category="runtime")
+        else:
+            record("Database schema has required properties", False, "no props",
+                   category="runtime")
+    else:
+        record("Database schema has required properties", False, "no DB found",
+               category="runtime")
 
     cur.close()
     conn.close()
@@ -194,10 +238,13 @@ def check_notion_database():
 def check_gcal():
     print("\n=== Check 3: Google Calendar Reading Group Sessions ===")
 
-    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+    except Exception as e:
+        record("GCal DB connection", False, str(e), category="runtime")
+        return
     cur = conn.cursor()
 
-    # Check for reading group events in the week of March 16-20, 2026
     cur.execute("""
         SELECT summary, start_datetime, end_datetime
         FROM gcal.events
@@ -211,28 +258,61 @@ def check_gcal():
         if "reading group" in (e[0] or "").lower()
     ]
 
-    record("At least 5 reading group events in March 16-20", len(reading_events) >= 5,
-           f"Found {len(reading_events)} reading group events in target week")
+    record("Exactly 5 reading group events in March 16-20 week",
+           len(reading_events) == 5,
+           f"Found {len(reading_events)}: {[e[0] for e in reading_events]}",
+           category="runtime")
 
     if reading_events:
-        # Check duration (should be ~1 hour)
-        summary, start_dt, end_dt = reading_events[0]
-        if start_dt and end_dt:
-            duration_hours = (end_dt - start_dt).total_seconds() / 3600
-            record("Reading sessions are ~1 hour", 0.5 <= duration_hours <= 1.5,
-                   f"Duration: {duration_hours:.1f} hours")
+        # All durations should be exactly 1 hour
+        all_one_hour = True
+        for s, sd, ed in reading_events:
+            if sd and ed:
+                hrs = (ed - sd).total_seconds() / 3600
+                if abs(hrs - 1.0) > 0.05:
+                    all_one_hour = False
+                    break
+            else:
+                all_one_hour = False
+                break
+        record("All sessions exactly 1 hour", all_one_hour, category="runtime")
 
-        # Check they are on different days
-        dates = set(e[1].date() for e in reading_events if e[1])
-        record("Sessions on different days (at least 4 distinct dates)", len(dates) >= 4,
-               f"Found {len(dates)} distinct dates: {sorted(dates)}")
+        # All sessions must be at 10:00 start
+        all_at_10 = all(e[1] is not None and e[1].hour == 10 and e[1].minute == 0
+                        for e in reading_events)
+        record("All sessions start at 10:00", all_at_10, category="runtime")
 
-        # Check summaries contain topic descriptors
-        summaries_text = " ".join(e[0].lower() for e in reading_events)
+        # 5 distinct dates Mon-Fri (2026-03-16..20)
+        expected_dates = {
+            __import__("datetime").date(2026, 3, 16),
+            __import__("datetime").date(2026, 3, 17),
+            __import__("datetime").date(2026, 3, 18),
+            __import__("datetime").date(2026, 3, 19),
+            __import__("datetime").date(2026, 3, 20),
+        }
+        actual_dates = {e[1].date() for e in reading_events if e[1]}
+        record("Sessions cover all 5 weekdays Mar 16-20",
+               actual_dates == expected_dates,
+               f"got {sorted(actual_dates)}",
+               category="runtime")
+
+        # Each summary should match "Reading Group: <topic>" format
+        title_format_ok = all(":" in (e[0] or "") and "reading group" in (e[0] or "").lower()
+                              for e in reading_events)
+        record("All summaries match 'Reading Group: ...' format",
+               title_format_ok, category="runtime")
+
+        # Topics should cover paper themes
+        summaries_text = " ".join((e[0] or "").lower() for e in reading_events)
         topic_keywords = ["chain", "tree", "self", "verif", "step", "auto", "thought", "consistency"]
         topic_matches = sum(1 for kw in topic_keywords if kw in summaries_text)
-        record("Session titles contain paper topic descriptors", topic_matches >= 3,
-               f"Matched {topic_matches} topic keywords in summaries: {[e[0] for e in reading_events]}")
+        record("Session titles contain >=4 topic descriptors",
+               topic_matches >= 4,
+               f"Matched {topic_matches}: {[e[0] for e in reading_events]}",
+               category="runtime")
+    else:
+        for _ in range(5):
+            record("Reading event detail (skipped, none found)", False, category="runtime")
 
     cur.close()
     conn.close()
@@ -251,24 +331,22 @@ def main():
     check_gcal()
 
     total = PASS_COUNT + FAIL_COUNT
-    if total == 0:
-        print("\nFAIL: No checks were performed.")
-        sys.exit(1)
-
-    accuracy = PASS_COUNT / total * 100
-    print(f"\nOverall: {PASS_COUNT}/{total} checks passed ({accuracy:.1f}%)")
+    print(f"\nOverall: {PASS_COUNT}/{total} checks passed "
+          f"(local fails: {LOCAL_FAIL}, runtime fails: {RUNTIME_FAIL})")
 
     result = {
         "total_passed": PASS_COUNT,
         "total_checks": total,
-        "accuracy": accuracy,
+        "local_fails": LOCAL_FAIL,
+        "runtime_fails": RUNTIME_FAIL,
     }
 
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    # Strict: zero failures required (both local and runtime)
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

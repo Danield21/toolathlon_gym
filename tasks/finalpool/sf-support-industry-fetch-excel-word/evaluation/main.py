@@ -62,18 +62,32 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                     for h in gt_headers:
                         if h:
                             check(f"{sheet_name} has {h} column", h in headers, f"headers: {headers[:10]}")
-                    # Check row count
+                    # Check row count - exact match for fixed sheets; ">=GT" for Action_Plan (task says "at least 3")
                     gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
+                    # Filter empty trailing rows in GT
+                    gt_rows = [r for r in gt_rows if r and any(c is not None and str(c).strip() != "" for c in r)]
                     data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-                    min_rows = max(1, len(gt_rows) - 2)
-                    check(f"{sheet_name} has >= {min_rows} data rows", len(data_rows) >= min_rows, f"got {len(data_rows)}")
+                    data_rows = [r for r in data_rows if r and any(c is not None and str(c).strip() != "" for c in r)]
+                    if sheet_name.lower() == "action_plan":
+                        check(f"{sheet_name} has at least {len(gt_rows)} data rows", len(data_rows) >= len(gt_rows), f"got {len(data_rows)}")
+                    else:
+                        check(f"{sheet_name} has {len(gt_rows)} data rows", len(data_rows) == len(gt_rows), f"got {len(data_rows)}")
 
-                    # Cell value comparison against groundtruth
+                    # Cell value comparison against groundtruth - iterate ALL rows, key by first column
                     header_map = {h: i for i, h in enumerate(headers)}
-                    gt_header_map = {h: i for i, h in enumerate(gt_headers)}
-                    for ri in range(min(3, len(gt_rows), len(data_rows))):
-                        gt_row = gt_rows[ri]
-                        agent_row = data_rows[ri]
+                    # Build lookup by first-column key
+                    a_lookup = {}
+                    for r in data_rows:
+                        if r and r[0] is not None:
+                            a_lookup[str(r[0]).strip().lower()] = r
+                    for ri, gt_row in enumerate(gt_rows):
+                        if not gt_row or gt_row[0] is None:
+                            continue
+                        key = str(gt_row[0]).strip().lower()
+                        agent_row = a_lookup.get(key)
+                        if agent_row is None:
+                            check(f"{sheet_name} row '{key}' present", False, "row missing")
+                            continue
                         for ci, gt_h in enumerate(gt_headers):
                             if not gt_h or ci >= len(gt_row):
                                 continue
@@ -85,15 +99,17 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                             gf = safe_float(gv)
                             af = safe_float(av)
                             if gf is not None and af is not None:
-                                tol = max(0.5, abs(gf) * 0.15)
-                                check(f"{sheet_name} R{ri+2} {gt_h} ~{gf:.1f}",
+                                # Tighter tolerance: max(1.0, 5% rel) - drops 15% rel
+                                tol = max(1.0, abs(gf) * 0.05)
+                                check(f"{sheet_name} {key} {gt_h} ~{gf:.1f}",
                                       abs(gf - af) <= tol, f"got {af}")
                             elif gv is not None and av is not None:
                                 gs = str(gv).strip().lower()
                                 avs = str(av).strip().lower()
                                 if gs:
-                                    check(f"{sheet_name} R{ri+2} {gt_h} text",
-                                          gs == avs or gs in avs or avs in gs,
+                                    # Exact match required (not bidirectional substring)
+                                    check(f"{sheet_name} {key} {gt_h} text",
+                                          gs == avs,
                                           f"expected {gs[:50]}, got {avs[:50]}")
 
     # Check Benchmark_Analysis.docx
@@ -104,22 +120,67 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         doc = Document(docx_path)
         text = " ".join([p.text for p in doc.paragraphs])
         check("Benchmark_Analysis.docx has content", len(text) > 50, f"text length: {len(text)}")
-        # Check headings match groundtruth
-        headings = [p.text.strip().lower() for p in doc.paragraphs if p.style.name.startswith("Heading")]
+        # Check headings match groundtruth - accept Heading 1-6 OR Title style
+        def _is_heading_style(s):
+            return s.startswith("Heading") or s == "Title"
+        headings = [p.text.strip().lower() for p in doc.paragraphs if _is_heading_style(p.style.name)]
         gt_doc_path = os.path.join(groundtruth_workspace, "Benchmark_Analysis.docx")
         if os.path.exists(gt_doc_path):
             gt_doc = Document(gt_doc_path)
-            gt_headings = [p.text.strip().lower() for p in gt_doc.paragraphs if p.style.name.startswith("Heading")]
+            gt_headings = [p.text.strip().lower() for p in gt_doc.paragraphs if _is_heading_style(p.style.name)]
             for gh in gt_headings:
                 if gh:
-                    found = any(gh in h or h in gh for h in headings)
+                    # Require exact match (preferred) OR agent's heading equals GT
+                    # without trailing decoration. Reject "GT-substring-of-agent" style
+                    # like 'Performance Overview Section' matching 'Performance Overview'
+                    # since that would also match 'Performance Overview Survey Section'.
+                    def _norm(s):
+                        return s.strip().lower().rstrip(":.")
+                    gh_n = _norm(gh)
+                    found = any(_norm(h) == gh_n for h in headings)
                     check(f"Benchmark_Analysis.docx has heading \"{gh[:40]}\"", found, f"agent headings: {headings[:5]}")
         else:
             check("Benchmark_Analysis.docx has headings", len(headings) >= 2, f"found {len(headings)} headings")
 
-    # Check Python script exists (terminal usage)
+    # Check Python script exists with substantive comparison logic
     py_files = [f for f in os.listdir(agent_workspace) if f.endswith(".py")]
-    check("Python analysis script exists", len(py_files) >= 1, f"found: {py_files}")
+    check("benchmark_analyzer.py exists", "benchmark_analyzer.py" in py_files, f"found: {py_files}")
+    analyzer_path = os.path.join(agent_workspace, "benchmark_analyzer.py")
+    if os.path.exists(analyzer_path):
+        try:
+            with open(analyzer_path, "r", encoding="utf-8", errors="ignore") as f:
+                analyzer_src = f.read().lower()
+        except Exception:
+            analyzer_src = ""
+        # Must reference both inputs and exercise comparison logic
+        has_inputs = (
+            "support_metrics" in analyzer_src
+            and "industry_benchmarks" in analyzer_src
+        )
+        has_compare = any(
+            kw in analyzer_src
+            for kw in ("compare", "benchmark", "variance", "diff")
+        )
+        has_output = (
+            "benchmark_comparison" in analyzer_src
+            or "json.dump" in analyzer_src
+            or "open(" in analyzer_src
+        )
+        check(
+            "benchmark_analyzer.py reads support_metrics + industry_benchmarks",
+            has_inputs,
+            f"src has support_metrics={('support_metrics' in analyzer_src)} industry_benchmarks={('industry_benchmarks' in analyzer_src)}",
+        )
+        check(
+            "benchmark_analyzer.py performs comparison/benchmark logic",
+            has_compare,
+            "no compare/benchmark/variance/diff keyword found",
+        )
+        check(
+            "benchmark_analyzer.py writes output (benchmark_comparison.json or JSON dump)",
+            has_output,
+            "no benchmark_comparison reference / json.dump / open()",
+        )
 
     return FAIL_COUNT == 0, f"Passed {PASS_COUNT}/{PASS_COUNT + FAIL_COUNT} checks"
 

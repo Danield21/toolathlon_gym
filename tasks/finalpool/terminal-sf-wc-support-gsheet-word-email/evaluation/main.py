@@ -53,7 +53,7 @@ def get_dynamic_ticket_data():
         cur.execute("""
             SELECT "PRIORITY", COUNT(*) as cnt,
                    ROUND(AVG("RESPONSE_TIME_HOURS")::numeric, 2) as avg_resp,
-                   ROUND(AVG("SATISFACTION_SCORE")::numeric, 2) as avg_sat
+                   ROUND(AVG("CUSTOMER_SATISFACTION")::numeric, 2) as avg_sat
             FROM sf_data."SUPPORT_CENTER__PUBLIC__TICKETS"
             GROUP BY "PRIORITY" ORDER BY "PRIORITY"
         """)
@@ -73,20 +73,34 @@ def get_dynamic_ticket_data():
 
 
 def get_dynamic_order_data():
-    """Dynamically query WC order data from the DB."""
+    """Dynamically query WC order data from the DB.
+
+    The wc schema stores order line items as JSONB on wc.orders.line_items,
+    and product categories as JSONB on wc.products.categories. Matches the
+    semantics used to build the GT (count-by-line-item, not by distinct
+    order-category pair).
+    """
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM wc.orders")
         total_orders = cur.fetchone()[0]
         cur.execute("""
-            SELECT c.name as category, COUNT(*) as total,
-                   SUM(CASE WHEN o.status IN ('refunded','cancelled','failed') THEN 1 ELSE 0 END) as problems
-            FROM wc.orders o
-            JOIN wc.order_items oi ON o.id = oi.order_id
-            JOIN wc.products p ON oi.product_id = p.id
-            JOIN wc.categories c ON p.category_id = c.id
-            GROUP BY c.name ORDER BY c.name
+            WITH order_categories AS (
+                SELECT o.id as order_id, o.status,
+                       cat->>'name' as category
+                FROM wc.orders o,
+                     jsonb_array_elements(o.line_items) li,
+                     wc.products p,
+                     jsonb_array_elements(p.categories) cat
+                WHERE (li->>'product_id')::int = p.id
+            )
+            SELECT category, COUNT(*) as total,
+                   SUM(CASE WHEN status IN ('refunded','cancelled','failed')
+                            THEN 1 ELSE 0 END) as problems
+            FROM order_categories
+            GROUP BY category
+            ORDER BY category
         """)
         cat_rows = cur.fetchall()
         cur.close()
@@ -142,11 +156,11 @@ def check_excel(agent_workspace, groundtruth_workspace):
                     continue
                 if len(a_row) > 1:
                     check(f"'{priority}' Ticket_Count",
-                          num_close(a_row[1], vals["count"], 50),
+                          num_close(a_row[1], vals["count"], 1),
                           f"Expected {vals['count']}, got {a_row[1]}")
                 if len(a_row) > 2:
                     check(f"'{priority}' Avg_Response_Hours",
-                          num_close(a_row[2], vals["avg_resp"], 1.0),
+                          num_close(a_row[2], vals["avg_resp"], 0.15),
                           f"Expected {vals['avg_resp']}, got {a_row[2]}")
                 if len(a_row) > 3:
                     check(f"'{priority}' Avg_Satisfaction",
@@ -167,7 +181,7 @@ def check_excel(agent_workspace, groundtruth_workspace):
                         continue
                     if len(a_row) > 1 and len(g_row) > 1:
                         check(f"'{key}' Ticket_Count",
-                              num_close(a_row[1], g_row[1], 50),
+                              num_close(a_row[1], g_row[1], 1),
                               f"Expected {g_row[1]}, got {a_row[1]}")
 
     # Sheet 2: Product_Problem_Rates
@@ -199,8 +213,17 @@ def check_excel(agent_workspace, groundtruth_workspace):
                     continue
                 if len(a_row) > 1:
                     check(f"'{cat_name}' Total_Orders",
-                          num_close(a_row[1], vals["total"], 10),
+                          num_close(a_row[1], vals["total"], 1),
                           f"Expected {vals['total']}, got {a_row[1]}")
+                if len(a_row) > 2:
+                    check(f"'{cat_name}' Problem_Orders",
+                          num_close(a_row[2], vals["problems"], 1),
+                          f"Expected {vals['problems']}, got {a_row[2]}")
+                if len(a_row) > 3 and vals["total"] > 0:
+                    expected_rate = round(vals["problems"] / vals["total"] * 100, 1)
+                    check(f"'{cat_name}' Problem_Rate_Pct",
+                          num_close(a_row[3], expected_rate, 2.0),
+                          f"Expected {expected_rate}, got {a_row[3]}")
         else:
             check("Product_Problem_Rates has 8 rows", len(a_rows) == 8, f"Got {len(a_rows)}")
 
@@ -217,10 +240,10 @@ def check_excel(agent_workspace, groundtruth_workspace):
 
         if total_tickets is not None and total_orders is not None:
             check("Total_Tickets",
-                  num_close(a_data.get("total_tickets"), total_tickets, 100),
+                  num_close(a_data.get("total_tickets"), total_tickets, 1),
                   f"Expected {total_tickets}, got {a_data.get('total_tickets')}")
             check("Total_WC_Orders",
-                  num_close(a_data.get("total_wc_orders"), total_orders, 5),
+                  num_close(a_data.get("total_wc_orders"), total_orders, 1),
                   f"Expected {total_orders}, got {a_data.get('total_wc_orders')}")
             if total_orders > 0 and cat_data:
                 total_problems = sum(v["problems"] for v in cat_data.values())
@@ -233,6 +256,21 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 check("High_Priority_Pct",
                       num_close(a_data.get("high_priority_pct"), expected_hp, 2.0),
                       f"Expected {expected_hp}, got {a_data.get('high_priority_pct')}")
+            # Validate Highest_Problem_Category (string match)
+            if cat_data:
+                try:
+                    worst_cat = max(
+                        cat_data.items(),
+                        key=lambda kv: (kv[1]["problems"] / max(kv[1]["total"], 1))
+                    )[0]
+                except Exception:
+                    worst_cat = None
+                if worst_cat is not None:
+                    actual_cat = a_data.get("highest_problem_category")
+                    actual_str = str(actual_cat).strip().lower() if actual_cat is not None else ""
+                    check("Highest_Problem_Category matches",
+                          actual_str == worst_cat.strip().lower(),
+                          f"Expected '{worst_cat}', got '{actual_cat}'")
         elif gt_wb:
             g_sheet = get_sheet(gt_wb, "Audit_Summary")
             if g_sheet:
@@ -258,15 +296,39 @@ def check_word(agent_workspace):
         from docx import Document
         doc = Document(docx_path)
         text = " ".join(p.text for p in doc.paragraphs).lower()
-        check("Document has substantial content", len(text) > 200, f"Length: {len(text)}")
+        # Require substantive content matching task spec sections
+        check("Document has substantial content", len(text) >= 400, f"Length: {len(text)}")
+        check("Contains executive summary",
+              "executive" in text and "summary" in text,
+              "Missing executive summary section")
         check("Contains support/ticket reference",
               "support" in text and "ticket" in text)
         check("Contains problem/complaint reference",
               "problem" in text or "complaint" in text or "refund" in text)
         check("Contains recommendation",
               "recommend" in text or "suggestion" in text or "action" in text)
-        check("Contains camera reference",
-              "camera" in text, "Missing highest-problem category discussion")
+
+        # Dynamically derive the highest-problem-rate category from DB
+        _, cat_data = get_dynamic_order_data()
+        if cat_data:
+            # category with highest problem rate (problems/total)
+            try:
+                worst_cat = max(
+                    cat_data.items(),
+                    key=lambda kv: (kv[1]["problems"] / max(kv[1]["total"], 1))
+                )[0]
+                # Accept singular or plural variants (e.g. 'camera'/'cameras')
+                worst_lc = worst_cat.lower()
+                singular = worst_lc.rstrip("s")
+                check(f"Contains highest-problem category '{worst_cat}'",
+                      worst_lc in text or singular in text,
+                      f"Missing highest-problem category '{worst_cat}'")
+            except Exception as e:
+                check("Contains highest-problem category", False, str(e))
+        else:
+            # DB unavailable - skip rather than guess
+            check("DB-derived highest-problem category check",
+                  False, "DB unavailable; cannot validate highest-problem category")
     except ImportError:
         check("python-docx available", False, "Cannot verify Word content")
     except Exception as e:
@@ -289,9 +351,10 @@ def check_gsheet():
         if rows:
             ss_id = rows[0][0]
             cur.execute("""
-                SELECT title FROM gsheet.sheets WHERE spreadsheet_id = %s
+                SELECT id, title FROM gsheet.sheets WHERE spreadsheet_id = %s
             """, (ss_id,))
-            sheet_names = [r[0].lower() for r in cur.fetchall()]
+            sheets_meta = cur.fetchall()
+            sheet_names = [s[1].lower() for s in sheets_meta]
             check("GSheet has Ticket_Priority_Summary",
                   any("ticket" in s and "priority" in s for s in sheet_names),
                   f"Sheets: {sheet_names}")
@@ -301,6 +364,72 @@ def check_gsheet():
             check("GSheet has Audit_Summary",
                   any("audit" in s and "summary" in s for s in sheet_names),
                   f"Sheets: {sheet_names}")
+            # Validate cells: each named sheet must contain at least 2 data rows
+            for sheet_id, sheet_title in sheets_meta:
+                cur.execute(
+                    "SELECT COUNT(DISTINCT row_index) FROM gsheet.cells "
+                    "WHERE spreadsheet_id = %s AND sheet_id = %s "
+                    "AND row_index > 0 AND value IS NOT NULL AND value != ''",
+                    (ss_id, sheet_id),
+                )
+                row_count = cur.fetchone()[0] or 0
+                check(f"GSheet '{sheet_title}' has data rows (>=2)",
+                      row_count >= 2, f"got {row_count}")
+            # Validate Audit_Summary content: at least Total_Tickets and
+            # Total_WC_Orders metric names + matching numeric values, so
+            # GSheet content is not just empty placeholder rows.
+            ticket_data, total_tickets, _ = get_dynamic_ticket_data()
+            total_orders, _ = get_dynamic_order_data()
+            audit_sheet_id = None
+            for sid, stitle in sheets_meta:
+                if "audit" in stitle.lower() and "summary" in stitle.lower():
+                    audit_sheet_id = sid
+                    break
+            if audit_sheet_id is not None:
+                cur.execute(
+                    "SELECT row_index, col_index, value FROM gsheet.cells "
+                    "WHERE spreadsheet_id = %s AND sheet_id = %s "
+                    "AND value IS NOT NULL AND value != ''",
+                    (ss_id, audit_sheet_id),
+                )
+                cells = cur.fetchall()
+                # Build {row: {col: value}}
+                grid = {}
+                for ri, ci, val in cells:
+                    grid.setdefault(ri, {})[ci] = val
+                # Find rows with metric labels
+                gs_metrics = {}
+                for ri, cols in grid.items():
+                    label = str(cols.get(0, "") or "").strip().lower()
+                    val_str = str(cols.get(1, "") or "").strip()
+                    if label and val_str:
+                        gs_metrics[label] = val_str
+                check("GSheet Audit_Summary has Total_Tickets metric",
+                      "total_tickets" in gs_metrics,
+                      f"keys: {list(gs_metrics.keys())[:8]}")
+                check("GSheet Audit_Summary has Total_WC_Orders metric",
+                      "total_wc_orders" in gs_metrics or "total_orders" in gs_metrics,
+                      f"keys: {list(gs_metrics.keys())[:8]}")
+                if total_tickets is not None and "total_tickets" in gs_metrics:
+                    try:
+                        v = float(gs_metrics["total_tickets"])
+                        check("GSheet Audit_Summary Total_Tickets matches DB",
+                              num_close(v, total_tickets, 1),
+                              f"GSheet={v}, DB={total_tickets}")
+                    except ValueError:
+                        check("GSheet Audit_Summary Total_Tickets numeric",
+                              False, gs_metrics.get("total_tickets"))
+                if total_orders is not None:
+                    key = "total_wc_orders" if "total_wc_orders" in gs_metrics else "total_orders"
+                    if key in gs_metrics:
+                        try:
+                            v = float(gs_metrics[key])
+                            check("GSheet Audit_Summary Total_WC_Orders matches DB",
+                                  num_close(v, total_orders, 1),
+                                  f"GSheet={v}, DB={total_orders}")
+                        except ValueError:
+                            check("GSheet Audit_Summary Total_WC_Orders numeric",
+                                  False, gs_metrics.get(key))
 
         cur.close()
         conn.close()
@@ -337,6 +466,25 @@ def check_email():
             check("Email to cs_leadership",
                   "cs_leadership" in to_str,
                   f"To: {to_addr}")
+            # Body content checks
+            body_lower = (body or "").lower()
+            check("Email body has substantive content (>=100 chars)",
+                  len(body_lower) >= 100,
+                  f"Body length: {len(body_lower)}")
+            check("Email body mentions ticket or support",
+                  "ticket" in body_lower or "support" in body_lower,
+                  "Expected ticket/support reference")
+            check("Email body mentions priority or category",
+                  "priorit" in body_lower or "categor" in body_lower or "product" in body_lower,
+                  "Expected priority/category reference")
+            # Email body should reference at least one quantitative finding
+            # (e.g. a percentage, ticket count, problem rate). This catches
+            # fluff bodies that lack any factual content.
+            import re as _re
+            has_number = _re.search(r"\d+", body_lower) is not None
+            check("Email body contains at least one numeric finding",
+                  has_number,
+                  "Body lacks any digits (no count/percentage)")
         cur.close()
         conn.close()
     except Exception as e:

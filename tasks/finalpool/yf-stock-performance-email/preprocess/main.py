@@ -3,7 +3,7 @@ import os
 import argparse
 import psycopg2
 
-DB = {"host": os.environ.get("PGHOST", "localhost"), "port": 5432, "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
+DB = {"host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")), "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
 
 
 def main():
@@ -15,8 +15,9 @@ def main():
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
 
-    # Clear email tables
-    for table in ["attachments", "sent_log", "drafts", "messages", "folders", "account_config"]:
+    # Clear email message-level tables only. Keep folders and account_config
+    # so SMTP credentials and INBOX/Sent folders remain available for the agent.
+    for table in ["attachments", "sent_log", "drafts", "messages"]:
         cur.execute(f'DELETE FROM email."{table}"')
 
     conn.commit()

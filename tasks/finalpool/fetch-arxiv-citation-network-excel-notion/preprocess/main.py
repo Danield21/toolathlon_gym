@@ -90,9 +90,24 @@ def setup_mock_server(port=30322):
         with tarfile.open(tar_path, "r:gz") as tar:
             tar.extractall(path=tmp_dir)
 
-    # Start HTTP server
+    # Overwrite mock JSON to expose all 4 areas matching GT (LLMs / CV / RL / FL)
     mock_dir = os.path.join(tmp_dir, "mock_pages")
     if os.path.exists(mock_dir):
+        api_dir = os.path.join(mock_dir, "api")
+        os.makedirs(api_dir, exist_ok=True)
+        data_json_path = os.path.join(api_dir, "data.json")
+        mock_data = {
+            "trending_topics": [
+                {"area": "LLMs", "growth_pct": 45, "citations": 450, "relevance_score": 95},
+                {"area": "CV", "growth_pct": 12, "citations": 320, "relevance_score": 82},
+                {"area": "RL", "growth_pct": 8, "citations": 180, "relevance_score": 71},
+                {"area": "FL", "growth_pct": 15, "citations": 250, "relevance_score": 68},
+            ],
+            "source": "Academic Trends API"
+        }
+        with open(data_json_path, "w") as f:
+            json.dump(mock_data, f, indent=2)
+
         log_path = os.path.join(mock_dir, "server.log")
         subprocess.Popen(
             f"nohup python3 -m http.server 30322 --directory {mock_dir} > {log_path} 2>&1 &",

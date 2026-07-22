@@ -36,18 +36,19 @@ def num_close(a, b, tol=2.0):
 
 
 def load_groundtruth():
-    """Compute expected values dynamically from Canvas and WC databases."""
-    try:
-        return _compute_groundtruth_from_db()
-    except Exception:
-        # Fallback to static JSON if DB query fails
-        gt_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "groundtruth_workspace",
-            "groundtruth_data.json",
-        )
-        with open(gt_path) as f:
-            return json.load(f)
+    """Load expected values - prefer static groundtruth_data.json, fallback to DB."""
+    gt_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "groundtruth_workspace",
+        "groundtruth_data.json",
+    )
+    if os.path.exists(gt_path):
+        try:
+            with open(gt_path) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return _compute_groundtruth_from_db()
 
 
 def _compute_groundtruth_from_db():
@@ -368,12 +369,15 @@ def check_excel(workspace, gt):
             list(metrics.keys()),
         )
         if "Recommendation" in metrics:
+            import re
             rec = str(metrics["Recommendation"]).lower()
             expected_keyword = "discount" if gt["correlation"] < 0 else "expand"
+            # Strict word-boundary match (avoid accidental substring hits like "expanded")
+            matched = re.search(rf"\b{re.escape(expected_keyword)}\b", rec) is not None
             check(
-                "Recommendation matches correlation direction",
-                expected_keyword in rec,
-                f"got '{metrics['Recommendation'][:80]}', expected keyword '{expected_keyword}'",
+                f"Recommendation matches correlation direction (word-boundary: '{expected_keyword}')",
+                matched,
+                f"got '{metrics['Recommendation'][:80]}', expected '{expected_keyword}' with word boundary",
             )
 
     # Recommendations sheet
@@ -521,21 +525,44 @@ def check_reverse_validation(workspace):
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     try:
-        # Check no emails sent to noise recipients
+        # Check no emails sent to noise recipients (exact match, not substring)
         noise_recipients = [
             "newsletter@university.edu",
             "all-staff@university.edu",
             "alumni@university.edu",
             "admissions@university.edu",
+            "events@university.edu",
+            "marketing@university.edu",
+            "inventory@university.edu",
         ]
+        # Only check Sent folder
+        cur.execute(
+            "SELECT to_addr FROM email.messages WHERE folder_id = (SELECT id FROM email.folders WHERE name='Sent' LIMIT 1)"
+        )
+        sent_recips = set()
+        for (to,) in cur.fetchall():
+            if to is None:
+                continue
+            to_list = to if isinstance(to, list) else json.loads(to) if isinstance(to, str) else []
+            for r in to_list:
+                sent_recips.add(str(r).strip().lower())
         for addr in noise_recipients:
-            cur.execute(
-                "SELECT COUNT(*) FROM email.messages WHERE to_addr::text ILIKE %s",
-                (f"%{addr}%",),
-            )
-            cnt = cur.fetchone()[0]
-            check(f"No email sent to noise recipient {addr}", cnt == 0,
-                  f"Found {cnt} emails to {addr}")
+            check(f"No email sent to noise recipient {addr}",
+                  addr not in sent_recips,
+                  f"Sent recipients include {addr}")
+
+        # Verify preprocess-injected noise emails are preserved (not deleted by agent)
+        noise_subjects = [
+            "Weekly Bookstore Inventory Update",
+            "Campus Event: Tech Fair Next Month",
+            "Student Discount Program Proposal",
+        ]
+        cur.execute("SELECT subject FROM email.messages WHERE folder_id IN (SELECT id FROM email.folders WHERE name IN ('INBOX','Sent'))")
+        existing_subjects = {r[0] for r in cur.fetchall()}
+        preserved = sum(1 for s in noise_subjects if s in existing_subjects)
+        check("Reverse: noise emails preserved (not deleted)",
+              preserved >= 2,
+              f"Only {preserved}/3 noise emails remain")
 
         # Check Excel does not include non-Electronics categories in Purchase_Summary
         xlsx_path = os.path.join(workspace, "Student_Purchase_Analysis.xlsx")
@@ -583,7 +610,8 @@ def main():
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
-    sys.exit(0 if accuracy >= 70 else 1)
+    # Tightened: require all checks to pass (previously >=70%).
+    sys.exit(0 if FAIL_COUNT == 0 else 1)
 
 
 if __name__ == "__main__":

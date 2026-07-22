@@ -8,6 +8,8 @@ The second sheet should be called "Incidents" and list every continuous period w
 
 Next, create a page in the knowledge base titled "Service Monitoring Dashboard - March 2026" that summarizes the findings. The page should describe the overall availability of each service, highlight any services with downtime or degraded performance, and note the specific incident windows.
 
-For each service that experienced any downtime during the monitoring period, create a calendar event on March 7, 2026 from 10:00 to 10:30. Title the event "Incident Review: [Service_Name]" where you replace [Service_Name] with the actual service name. In the event description, include a brief summary of the downtime incidents for that service.
+For each service that experienced any downtime during the monitoring period, create a calendar event on the shared team calendar on March 7, 2026 from 10:00 to 10:30. Title the event "Incident Review: [Service_Name]" where you replace [Service_Name] with the actual service name. In the event description, include a brief summary of the downtime incidents for that service.
 
 Finally, send an email from monitoring@company.com to devops-team@company.com with the subject "Service Availability Report - Week of Feb 27" that lists each service whose uptime was below 99 percent, along with their actual uptime percentage and a note about the incidents observed.
+
+Note on existing workspace content: the knowledge base and shared calendar may contain pre-existing unrelated content such as onboarding checklists, company handbook entries, weekly all-hands, department training sessions, or Q1 budget review events. Leave those items in place. Do not delete, rename, or merge them into your incident review artifacts. Only create new pages, events, and emails for the monitoring report work described above.

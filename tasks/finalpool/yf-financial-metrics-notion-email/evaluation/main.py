@@ -49,6 +49,45 @@ def num_close(a, b, tol=1.0):
         return str(a).strip().lower() == str(b).strip().lower()
 
 
+def compute_expected_summary():
+    """Query yf.financial_statements for the latest annual income statement of
+    GOOGL/AMZN/JNJ and compute expected Highest_Revenue_Company,
+    Most_Profitable_Company, Avg_Profit_Margin. Returns None if unavailable."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT DISTINCT ON (symbol) symbol, data
+            FROM yf.financial_statements
+            WHERE symbol IN ('GOOGL','AMZN','JNJ')
+              AND stmt_type='income_stmt' AND freq='annual'
+            ORDER BY symbol, period_end DESC
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        out = []
+        for sym, data in rows:
+            if not data:
+                continue
+            rev = data.get("Total Revenue")
+            ni = data.get("Net Income")
+            if rev and rev > 0 and ni is not None:
+                out.append((sym, float(rev), float(ni), float(ni) / float(rev) * 100))
+        if len(out) < 3:
+            return None
+        out_by_rev = sorted(out, key=lambda x: x[1], reverse=True)
+        out_by_margin = sorted(out, key=lambda x: x[3], reverse=True)
+        avg_margin = round(sum(r[3] for r in out) / len(out), 2)
+        return {
+            "highest_revenue": out_by_rev[0][0],
+            "most_profitable": out_by_margin[0][0],
+            "avg_margin": avg_margin,
+        }
+    except Exception:
+        return None
+
+
 def load_sheet_by_name(wb, name):
     for sname in wb.sheetnames:
         if sname.strip().lower() == name.strip().lower():
@@ -144,6 +183,16 @@ def check_excel(agent_workspace, groundtruth_workspace):
             if row and row[0] is not None:
                 a_lookup[str(row[0]).strip().lower()] = row
 
+        # Dynamically compute expected Highest/Most_Profitable/Avg_Margin from DB
+        dyn_expected = compute_expected_summary()
+
+        # Map company name tokens to a set of acceptable substrings (ticker + long name)
+        token_map = {
+            "AMZN": ("amzn", "amazon"),
+            "GOOGL": ("googl", "alphabet", "google"),
+            "JNJ": ("jnj", "johnson"),
+        }
+
         for g_row in g_data:
             if not g_row or g_row[0] is None:
                 continue
@@ -151,21 +200,33 @@ def check_excel(agent_workspace, groundtruth_workspace):
             a_row = a_lookup.get(key)
             if a_row is None:
                 record(f"Summary row: {g_row[0]}", False, "Not found")
+                all_ok = False
                 continue
             record(f"Summary row: {g_row[0]}", True)
 
             if key == "highest_revenue_company":
-                record("Highest_Revenue_Company is AMZN",
-                       a_row[1] is not None and "amzn" in str(a_row[1]).lower(),
-                       f"got {a_row[1]}")
+                exp_sym = (dyn_expected or {}).get("highest_revenue", "AMZN")
+                tokens = token_map.get(exp_sym, (exp_sym.lower(),))
+                val_lower = str(a_row[1] or "").lower()
+                ok = any(t in val_lower for t in tokens)
+                record(f"Highest_Revenue_Company is {exp_sym}", ok, f"got {a_row[1]}")
+                if not ok:
+                    all_ok = False
             elif key == "most_profitable_company":
-                record("Most_Profitable_Company is GOOGL",
-                       a_row[1] is not None and "googl" in str(a_row[1]).lower(),
-                       f"got {a_row[1]}")
+                exp_sym = (dyn_expected or {}).get("most_profitable", "GOOGL")
+                tokens = token_map.get(exp_sym, (exp_sym.lower(),))
+                val_lower = str(a_row[1] or "").lower()
+                ok = any(t in val_lower for t in tokens)
+                record(f"Most_Profitable_Company is {exp_sym}", ok, f"got {a_row[1]}")
+                if not ok:
+                    all_ok = False
             elif key == "avg_profit_margin":
-                record("Avg_Profit_Margin correct",
-                       num_close(a_row[1], g_row[1], 3.0),
-                       f"got {a_row[1]}, expected ~{g_row[1]}")
+                exp_val = (dyn_expected or {}).get("avg_margin", g_row[1])
+                ok = num_close(a_row[1], exp_val, 1.0)
+                record("Avg_Profit_Margin correct", ok,
+                       f"got {a_row[1]}, expected ~{exp_val}")
+                if not ok:
+                    all_ok = False
 
     return all_ok
 
@@ -186,14 +247,23 @@ def check_notion():
     record("At least 1 Notion page created", len(pages) >= 1)
 
     found_page = False
+    found_exact_title = False
     for page_id, props in pages:
         if props:
             props_str = str(props).lower()
-            if ("investment" in props_str or "financial" in props_str or
-                    "portfolio" in props_str):
+            if ("investment" in props_str and "financial" in props_str and "portfolio" in props_str):
+                found_page = True
+                record("Notion page with financial/investment content found", True)
+                # Stronger check: exact title substring
+                if "investment portfolio financial analysis 2026" in props_str:
+                    found_exact_title = True
+                break
+            elif ("investment" in props_str or "financial" in props_str or "portfolio" in props_str):
                 found_page = True
                 record("Notion page with financial/investment content found", True)
                 break
+    record("Notion page title is 'Investment Portfolio Financial Analysis 2026'",
+           found_exact_title, "Exact title substring not found in any page properties")
 
     # Also check blocks for content
     if not found_page:
@@ -242,6 +312,11 @@ def check_word(agent_workspace):
         record("Word doc mentions financial health or Q1",
                any(term in all_text for term in ["financial", "health", "q1", "2026", "revenue"]),
                "Missing financial content")
+        # Stronger: exact title substring
+        record("Word doc contains title 'Financial Health Report Q1 2026'",
+               "financial health report q1 2026" in all_text or
+               ("financial health" in all_text and "q1 2026" in all_text),
+               "Exact title not found")
         record("Word doc mentions companies",
                any(term in all_text for term in ["googl", "amzn", "jnj", "alphabet", "amazon", "johnson"]),
                "Missing company names")
@@ -288,6 +363,11 @@ def check_emails():
             record("Email subject mentions financial assessment",
                    any(term in subject_lower for term in ["financial", "q1", "health", "assessment"]),
                    f"Subject: {subject}")
+            # Stronger: exact phrase substring
+            record("Email subject matches 'Q1 2026 Financial Health Assessment'",
+                   "q1 2026" in subject_lower and "financial" in subject_lower and
+                   ("health" in subject_lower or "assessment" in subject_lower),
+                   f"Subject: {subject}")
 
             body_lower = (body_text or "").lower()
             record("Email body mentions companies and metrics",
@@ -322,7 +402,7 @@ def main():
     word_ok = check_word(args.agent_workspace)
     email_ok = check_emails()
 
-    all_passed = excel_ok and notion_ok and word_ok and email_ok
+    all_passed = excel_ok and notion_ok and word_ok and email_ok and FAIL_COUNT == 0
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

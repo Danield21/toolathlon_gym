@@ -151,14 +151,18 @@ def check_notion():
           f"Found {len(pages)}")
 
     if pages:
-        # Check page title
-        found_earnings = False
+        # Check page title — stronger exact substring match
+        found_exact_title = False
+        found_loose = False
         for page_id, props in pages:
             props_str = json.dumps(props).lower() if isinstance(props, dict) else str(props).lower()
-            if "earnings" in props_str or "insights" in props_str:
-                found_earnings = True
+            if "earnings analysis key insights" in props_str or ("earnings" in props_str and "insights" in props_str and "analysis" in props_str):
+                found_exact_title = True
                 break
-        check("Notion page mentions earnings or insights", found_earnings)
+            if "earnings" in props_str or "insights" in props_str:
+                found_loose = True
+        check("Notion page has title 'Earnings Analysis Key Insights'", found_exact_title,
+              "Exact-title substring not found; only loose match present" if found_loose else "No matching page")
 
     check("At least 1 Notion block created", len(blocks) >= 1,
           f"Found {len(blocks)}")
@@ -167,6 +171,14 @@ def check_notion():
         block_text = " ".join(str(b[2] or "") for b in blocks).lower()
         has_revenue = "revenue" in block_text or "googl" in block_text or "amzn" in block_text
         check("Notion blocks mention revenue or companies", has_revenue)
+        # Three key insights: highest revenue, highest net income, trend analysis
+        has_highest_rev = "highest" in block_text and "revenue" in block_text
+        has_highest_ni = "highest" in block_text and ("net income" in block_text or "profit" in block_text)
+        has_trend = "trend" in block_text or "growth" in block_text or "increase" in block_text or "decrease" in block_text
+        insights_count = sum(1 for ok in (has_highest_rev, has_highest_ni, has_trend) if ok)
+        check("Notion blocks contain >=2 of 3 key insights (highest revenue / highest net income / trend)",
+              insights_count >= 2,
+              f"Found {insights_count}/3 insights")
 
 
 def main():

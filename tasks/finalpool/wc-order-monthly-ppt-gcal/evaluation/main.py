@@ -58,7 +58,7 @@ def check_ppt(agent_workspace):
         from pptx import Presentation
         prs = Presentation(pptx_path)
         slide_count = len(prs.slides)
-        check("PPT has at least 4 slides", slide_count >= 4, f"Found {slide_count} slides")
+        check("PPT has exactly 5 slides", slide_count == 5, f"Found {slide_count} slides (expected 5)")
 
         # Extract all text from all slides
         all_text = ""
@@ -72,10 +72,10 @@ def check_ppt(agent_workspace):
               "monthly sales" in all_text,
               f"Sample: {all_text[:300]}")
 
-        # Check for month names
+        # Check for month names - task requires all 12 months in slide 2
         months_found = [m for m in MONTH_NAMES if m in all_text]
-        check("PPT contains at least 6 month names",
-              len(months_found) >= 6,
+        check("PPT contains all 12 month names",
+              len(months_found) == 12,
               f"Found months: {months_found}")
 
         # Check for revenue figures (at least peak month's revenue)
@@ -129,16 +129,15 @@ def check_email():
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
+        # Require both correct recipient AND matching subject (previous OR bug allowed mismatch)
         cur.execute("""
             SELECT id, subject, to_addr, body_text
             FROM email.messages
             WHERE to_addr::text ILIKE '%ecommerce_manager@store.com%'
-               OR subject ILIKE '%monthly sales%'
-               OR subject ILIKE '%sales performance%'
         """)
         emails = cur.fetchall()
         check("Email sent to ecommerce_manager@store.com", len(emails) >= 1,
-              "No matching email found")
+              "No email found with matching recipient")
         if emails:
             email = emails[0]
             subject = str(email[1]).lower() if email[1] else ""

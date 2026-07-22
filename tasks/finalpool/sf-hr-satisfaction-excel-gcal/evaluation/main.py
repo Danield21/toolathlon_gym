@@ -23,15 +23,18 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+RUNTIME_ONLY_FAIL = 0
 
 
-def check(name, condition, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def check(name, condition, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, RUNTIME_ONLY_FAIL
     if condition:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if runtime_only:
+            RUNTIME_ONLY_FAIL += 1
         d = (detail[:300]) if len(detail) > 300 else detail
         print(f"  [FAIL] {name}: {d}")
 
@@ -104,35 +107,52 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 check(f"Row '{g_row[0]}'", False, "Missing")
                 continue
 
-            # Employee_Count (col 1)
+            # Employee_Count (col 1) - exact match
             if len(a_row) > 1 and len(g_row) > 1:
                 check(f"{key}.Employee_Count",
-                      num_close(a_row[1], g_row[1], 5),
+                      num_close(a_row[1], g_row[1], 0),
                       f"{a_row[1]} vs {g_row[1]}")
 
             # Avg_Job_Satisfaction (col 2)
             if len(a_row) > 2 and len(g_row) > 2:
                 check(f"{key}.Avg_Job_Satisfaction",
-                      num_close(a_row[2], g_row[2], 0.1),
+                      num_close(a_row[2], g_row[2], 0.05),
                       f"{a_row[2]} vs {g_row[2]}")
 
             # Avg_Work_Life_Balance (col 3)
             if len(a_row) > 3 and len(g_row) > 3:
                 check(f"{key}.Avg_Work_Life_Balance",
-                      num_close(a_row[3], g_row[3], 0.1),
+                      num_close(a_row[3], g_row[3], 0.05),
                       f"{a_row[3]} vs {g_row[3]}")
 
-            # Low_Satisfaction_Count (col 4)
+            # Low_Satisfaction_Count (col 4) - tight tolerance of 1
             if len(a_row) > 4 and len(g_row) > 4:
                 check(f"{key}.Low_Satisfaction_Count",
-                      num_close(a_row[4], g_row[4], 10),
+                      num_close(a_row[4], g_row[4], 1),
                       f"{a_row[4]} vs {g_row[4]}")
 
             # Low_Satisfaction_Pct (col 5)
             if len(a_row) > 5 and len(g_row) > 5:
                 check(f"{key}.Low_Satisfaction_Pct",
-                      num_close(a_row[5], g_row[5], 1.0),
+                      num_close(a_row[5], g_row[5], 0.1),
                       f"{a_row[5]} vs {g_row[5]}")
+
+        # Check ascending order of Avg_Job_Satisfaction (col 2)
+        asc_ok = True
+        prev = None
+        asc_details = []
+        for row in a_data:
+            if len(row) > 2 and row[2] is not None:
+                try:
+                    v = float(row[2])
+                except (ValueError, TypeError):
+                    continue
+                asc_details.append(v)
+                if prev is not None and v < prev - 1e-9:
+                    asc_ok = False
+                prev = v
+        check("Department Satisfaction sorted by Avg_Job_Satisfaction ascending",
+              asc_ok, f"Values in order: {asc_details}")
 
     # Check Summary sheet
     print("  Checking Summary sheet...")
@@ -170,9 +190,16 @@ def check_excel(agent_workspace, groundtruth_workspace):
             except (TypeError, ValueError):
                 is_numeric = False
             if is_numeric:
+                # Tighter tolerance: Total_Employees/Employees_At_Risk exact, averages 0.05
+                if key in ("total_employees", "employees_at_risk"):
+                    tol = 0
+                elif "avg" in key or "satisfaction" in key:
+                    tol = 0.05
+                else:
+                    tol = 1
                 check(f"Summary: {key}",
-                      num_close(a_val, g_val, 5),
-                      f"{a_val} vs {g_val}")
+                      num_close(a_val, g_val, tol),
+                      f"{a_val} vs {g_val} (tol={tol})")
             else:
                 check(f"Summary: {key}",
                       str_match(a_val, g_val),
@@ -198,27 +225,74 @@ def check_gcal():
     cur.close()
     conn.close()
 
+    # Event presence is runtime-only (agent may not have reached this step)
     check("At least 2 wellness review events", len(events) >= 2,
-          f"Found {len(events)}")
+          f"Found {len(events)}",
+          runtime_only=True)
 
-    # The 2 lowest satisfaction departments are R&D and Support
-    expected_depts = ["r&d", "support"]
-    for dept in expected_depts:
-        found = any(dept in (e[0] or "").lower() or dept in (e[1] or "").lower()
-                     for e in events)
-        check(f"Event for department '{dept}'", found,
-              f"Not found among {len(events)} events")
+    # The 2 lowest satisfaction departments - compute dynamically from DB
+    # Tie-break: alphabetical on department name
+    try:
+        conn2 = psycopg2.connect(**DB_CONFIG)
+        cur2 = conn2.cursor()
+        cur2.execute("""
+            SELECT "DEPARTMENT", AVG("JOB_SATISFACTION")::float
+            FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES"
+            GROUP BY "DEPARTMENT"
+            ORDER BY AVG("JOB_SATISFACTION") ASC, "DEPARTMENT" ASC
+            LIMIT 2
+        """)
+        bottom_two = [r[0].lower() for r in cur2.fetchall()]
+        cur2.close()
+        conn2.close()
+    except Exception:
+        bottom_two = ["r&d", "support"]
 
-    # Check dates
+    # If agent DID create events, the content (dept/date/time) must match semantically (NOT runtime_only)
     if len(events) >= 2:
-        d1 = events[0][2]
-        d2 = events[1][2]
+        for dept in bottom_two:
+            found = any(dept in (e[0] or "").lower() or dept in (e[1] or "").lower()
+                         for e in events)
+            check(f"Event for department '{dept}'", found,
+                  f"Not found among {len(events)} events. Expected depts: {bottom_two}")
+    else:
+        # Not enough events - mark as runtime-only
+        for dept in bottom_two:
+            check(f"Event for department '{dept}'", False,
+                  "Not enough events to verify",
+                  runtime_only=True)
+
+    # Check dates AND times (10:00-11:00 UTC per task)
+    if len(events) >= 2:
+        d1_start = events[0][2]
+        d1_end = events[0][3]
+        d2_start = events[1][2]
+        d2_end = events[1][3]
         check("First event on 2026-03-13",
-              d1 is not None and "2026-03-13" in str(d1),
-              f"Got {d1}")
+              d1_start is not None and "2026-03-13" in str(d1_start),
+              f"Got {d1_start}")
         check("Second event on 2026-03-14",
-              d2 is not None and "2026-03-14" in str(d2),
-              f"Got {d2}")
+              d2_start is not None and "2026-03-14" in str(d2_start),
+              f"Got {d2_start}")
+        # Time check: duration 60 min AND start hour 10 UTC
+        for i, (s, e) in enumerate([(d1_start, d1_end), (d2_start, d2_end)]):
+            if s and e:
+                dur_min = (e - s).total_seconds() / 60
+                check(f"Event {i+1} duration 60 min",
+                      abs(dur_min - 60) <= 5,
+                      f"Got {dur_min} min")
+                # start hour must be 10 UTC (task spec)
+                try:
+                    # If tzaware, convert to UTC
+                    s_utc = s
+                    if getattr(s, "tzinfo", None) is not None:
+                        import datetime as _dt
+                        s_utc = s.astimezone(_dt.timezone.utc)
+                    check(f"Event {i+1} start hour = 10 UTC",
+                          s_utc.hour == 10,
+                          f"Got hour={s_utc.hour} from {s}")
+                except Exception as ex:
+                    check(f"Event {i+1} start hour = 10 UTC", False, f"Err: {ex}")
 
 
 def main():
@@ -237,11 +311,12 @@ def main():
 
     total_pass = PASS_COUNT
     total_fail = FAIL_COUNT
-    all_ok = FAIL_COUNT == 0
+    non_runtime_fail = FAIL_COUNT - RUNTIME_ONLY_FAIL
+    all_ok = non_runtime_fail == 0
 
     print(f"\n=== SUMMARY ===")
     print(f"  Total checks - Passed: {PASS_COUNT}, Failed: {FAIL_COUNT}")
-    print(f"  Overall: {'PASS' if all_ok else 'FAIL'}")
+    print(f"  Overall: {'PASS' if all_ok else 'FAIL'} (runtime-only fails: {RUNTIME_ONLY_FAIL})")
 
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:

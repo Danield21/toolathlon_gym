@@ -85,6 +85,8 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
     record("Excel readable", True)
 
     # Check Recipes sheet
+    name_col = None
+    ing_col = None
     recipes_rows = load_sheet_rows(wb, "Recipes")
     if recipes_rows is not None:
         record("Sheet 'Recipes' exists", True)
@@ -170,6 +172,51 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
             record("Summary: Easiest_Recipe has value", ok, f"Got {val}")
         else:
             record("Summary: Easiest_Recipe exists", False, f"Keys: {list(metrics.keys())}")
+
+        # --- Cross-check consistency ---
+        if recipes_rows and name_col is not None and ing_col is not None:
+            try:
+                data_rows = recipes_rows[1:]
+                total_row_count = len([r for r in data_rows if r and r[name_col]])
+                # Total_Recipes matches row count
+                if total_key is not None and metrics.get(total_key) is not None:
+                    ok = num_close(metrics[total_key], total_row_count, 0.5)
+                    record("Summary Total_Recipes matches Recipes row count", ok,
+                           f"Summary={metrics[total_key]} vs rows={total_row_count}")
+                # Avg_Ingredients = mean of Ingredients_Count
+                ing_vals = []
+                for r in data_rows:
+                    if r and ing_col < len(r) and r[ing_col] is not None:
+                        try:
+                            ing_vals.append(float(r[ing_col]))
+                        except (ValueError, TypeError):
+                            pass
+                if ing_vals and avg_key is not None and metrics.get(avg_key) is not None:
+                    exp_avg = sum(ing_vals) / len(ing_vals)
+                    ok = num_close(metrics[avg_key], exp_avg, 0.2)
+                    record("Summary Avg_Ingredients matches mean", ok,
+                           f"Summary={metrics[avg_key]} vs mean={exp_avg:.2f}")
+                # Easiest_Recipe = row with min Ingredients_Count
+                if easiest_key is not None and metrics.get(easiest_key) is not None and ing_vals:
+                    min_idx = None
+                    min_val = None
+                    for idx, r in enumerate(data_rows):
+                        if r and ing_col < len(r) and r[ing_col] is not None:
+                            try:
+                                v = float(r[ing_col])
+                                if min_val is None or v < min_val:
+                                    min_val = v
+                                    min_idx = idx
+                            except (ValueError, TypeError):
+                                pass
+                    if min_idx is not None and data_rows[min_idx][name_col]:
+                        expected_name = str(data_rows[min_idx][name_col]).strip().lower()
+                        actual_name = str(metrics[easiest_key]).strip().lower()
+                        ok = expected_name in actual_name or actual_name in expected_name
+                        record("Summary Easiest_Recipe matches min-ingredient row",
+                               ok, f"Easiest='{metrics[easiest_key]}' vs row-min='{data_rows[min_idx][name_col]}'")
+            except Exception as e:
+                print(f"  WARN: cross-check skipped: {e}")
     else:
         record("Sheet 'Summary' exists", False, f"Available: {wb.sheetnames}")
 

@@ -63,6 +63,20 @@ def main():
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
 
+        # Verify alphabetical sort on Course_Name (first column)
+        agent_codes = [str(r[0]).strip() if r and r[0] else "" for r in a_data]
+        if agent_codes != sorted(agent_codes, key=str.lower):
+            all_errors.append(f"Course Grades not sorted alphabetically. Got: {agent_codes[:5]}")
+
+        # NEW: First row should be alphabetical first among the 7 Fall 2014 courses
+        # GT starts with "Applied Analytics & Algorithms (Fall 2014)"
+        if agent_codes and not agent_codes[0].lower().startswith("applied analytics"):
+            all_errors.append(f"Course Grades first row should be 'Applied Analytics...', got '{agent_codes[0]}'")
+
+        # NEW: Total row count = 7 (exact)
+        if len(a_data) != 7:
+            all_errors.append(f"Course Grades should have exactly 7 rows, got {len(a_data)}")
+
         # Build lookup by partial course name match (case-insensitive)
         a_lookup = {}
         for row in a_data:
@@ -89,9 +103,9 @@ def main():
                 all_errors.append(f"Missing course: {g_row[0]}")
                 continue
 
-            # Enrolled_Students (col 1)
+            # Enrolled_Students (col 1) — tighter: tol 1 (was 5)
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 20):
+                if not num_close(a_row[1], g_row[1], 1):
                     all_errors.append(f"{key[:40]}.Enrolled: {a_row[1]} vs {g_row[1]}")
 
             # Avg_Score (col 2)
@@ -169,11 +183,30 @@ def main():
             from docx import Document
             doc = Document(word_file)
             text = " ".join(p.text for p in doc.paragraphs).lower()
-            has_content = len(text) > 50
+            has_content = len(text) > 100
             if not has_content:
-                all_errors.append("Grade_Summary.docx has too little content")
+                all_errors.append(f"Grade_Summary.docx has too little content ({len(text)} chars)")
             else:
-                print("    PASS")
+                import re
+                has_numbers = bool(re.search(r"\d+", text))
+                has_keywords = any(kw in text for kw in ["course", "grade", "average", "student"])
+                # NEW: Must mention total course count (7) OR total students / overall average
+                mentions_seven = bool(re.search(r"\b7\b|\bseven\b", text))
+                mentions_total = any(kw in text for kw in ["total", "overall"])
+                mentions_best = any(kw in text for kw in ["highest", "best", "environmental"])
+                mentions_worst = any(kw in text for kw in ["lowest", "worst", "biochem"])
+                if not has_numbers:
+                    all_errors.append("Grade_Summary.docx missing numeric content")
+                elif not has_keywords:
+                    all_errors.append("Grade_Summary.docx missing grade-related keywords")
+                elif not (mentions_seven or mentions_total):
+                    all_errors.append("Grade_Summary.docx should mention total course count or 'overall'")
+                elif not mentions_best:
+                    all_errors.append("Grade_Summary.docx should mention highest/best course")
+                elif not mentions_worst:
+                    all_errors.append("Grade_Summary.docx should mention lowest/worst course")
+                else:
+                    print("    PASS")
         except ImportError:
             # If python-docx not installed, just check file size
             if os.path.getsize(word_file) > 100:

@@ -45,50 +45,127 @@ def check_excel(workspace):
     sheets = wb.sheetnames
     check("Has at least 4 sheets", len(sheets) >= 4, f"Found {len(sheets)}: {sheets}")
 
-    sheets_lower = [s.lower() for s in sheets]
+    def _find_sheet(needle):
+        # Exact (case-insensitive), then prefix, then substring
+        for s in sheets:
+            if s.lower() == needle.lower():
+                return s
+        for s in sheets:
+            if s.lower().startswith(needle.lower()):
+                return s
+        for s in sheets:
+            if needle.lower() in s.lower():
+                return s
+        return None
 
-    # Market_Data sheet
-    md_idx = next((i for i, s in enumerate(sheets_lower) if "market" in s or "data" in s), 0)
-    ws = wb[sheets[md_idx]]
-    rows = list(ws.iter_rows(values_only=True))
-    data_rows = [r for r in rows[1:] if any(c for c in r)]
-    check("Market_Data has 2 stock rows", len(data_rows) >= 2, f"Found {len(data_rows)}")
-
-    all_text = " ".join(str(c) for r in rows for c in r if c).lower()
-    check("Contains JPM", "jpm" in all_text, f"Text: {all_text[:120]}")
-    check("Contains XOM", "xom" in all_text, f"Text: {all_text[:120]}")
+    # Market_Data sheet (require exact name)
+    md_name = _find_sheet("Market_Data")
+    if md_name is None:
+        check("Market_Data sheet exists", False, f"Sheets: {sheets}")
+    else:
+        check("Market_Data sheet exists", True)
+        ws = wb[md_name]
+        rows = list(ws.iter_rows(values_only=True))
+        data_rows = [r for r in rows[1:] if any(c for c in r)]
+        check("Market_Data has exactly 2 stock rows", len(data_rows) == 2, f"Found {len(data_rows)}")
+        all_text = " ".join(str(c) for r in rows for c in r if c).lower()
+        check("Contains JPM", "jpm" in all_text, f"Text: {all_text[:120]}")
+        check("Contains XOM", "xom" in all_text, f"Text: {all_text[:120]}")
+        # Sector references
+        check("Mentions Financial sector for JPM", "financial" in all_text or "banking" in all_text)
+        check("Mentions Energy sector for XOM", "energy" in all_text)
 
     # Academic_Papers sheet
-    ap_idx = next((i for i, s in enumerate(sheets_lower) if "academic" in s or "paper" in s), 1)
-    if ap_idx < len(sheets):
-        ws2 = wb[sheets[ap_idx]]
+    ap_name = _find_sheet("Academic_Papers")
+    if ap_name is None:
+        check("Academic_Papers sheet exists", False, f"Sheets: {sheets}")
+    else:
+        check("Academic_Papers sheet exists", True)
+        ws2 = wb[ap_name]
         rows2 = list(ws2.iter_rows(values_only=True))
         data_rows2 = [r for r in rows2[1:] if any(c for c in r)]
         check("Academic_Papers has at least 4 rows", len(data_rows2) >= 4, f"Found {len(data_rows2)}")
         all_text2 = " ".join(str(c) for r in rows2 for c in r if c).lower()
-        check("Contains market efficiency reference", "efficient" in all_text2 or "market" in all_text2,
-              f"Text: {all_text2[:120]}")
+        # Specific paper references (must include at least 2 of these)
+        paper_titles_seen = sum([
+            "efficient capital markets" in all_text2 or ("efficient" in all_text2 and "capital" in all_text2),
+            "random walk" in all_text2,
+            "algorithmic trading" in all_text2,
+            "big data" in all_text2 or "modern data" in all_text2,
+        ])
+        check("Academic_Papers mentions at least 2 specific market-efficiency paper topics",
+              paper_titles_seen >= 2,
+              f"Recognized paper-topic count: {paper_titles_seen}; text sample: {all_text2[:200]}")
+        # Should mention 'market efficiency' or 'efficient market' explicitly
+        check("Academic_Papers explicitly references market efficiency",
+              "market efficiency" in all_text2 or "efficient market" in all_text2 or
+              "weak-form" in all_text2 or "weak form" in all_text2,
+              f"Sample: {all_text2[:200]}")
 
     # Statistical_Tests sheet
-    st_idx = next((i for i, s in enumerate(sheets_lower) if "statistic" in s or "test" in s), 2)
-    if st_idx < len(sheets):
-        ws3 = wb[sheets[st_idx]]
+    st_name = _find_sheet("Statistical_Tests")
+    if st_name is None:
+        check("Statistical_Tests sheet exists", False, f"Sheets: {sheets}")
+    else:
+        check("Statistical_Tests sheet exists", True)
+        ws3 = wb[st_name]
         rows3 = list(ws3.iter_rows(values_only=True))
         data_rows3 = [r for r in rows3[1:] if any(c for c in r)]
-        check("Statistical_Tests has at least 4 rows", len(data_rows3) >= 4, f"Found {len(data_rows3)}")
+        check("Statistical_Tests has exactly 4 rows (autocorr + normality for 2 stocks)",
+              len(data_rows3) == 4, f"Found {len(data_rows3)}")
         all_text3 = " ".join(str(c) for r in rows3 for c in r if c).lower()
-        check("Contains autocorrelation test", "autocorrelation" in all_text3 or "ljung" in all_text3,
-              f"Text: {all_text3[:120]}")
-        check("Contains normality test", "normality" in all_text3 or "jarque" in all_text3,
-              f"Text: {all_text3[:120]}")
+        check("Contains autocorrelation test (Ljung-Box)",
+              "autocorrelation" in all_text3 or "ljung" in all_text3,
+              f"Text: {all_text3[:200]}")
+        check("Contains normality test (Jarque-Bera)",
+              "normality" in all_text3 or "jarque" in all_text3,
+              f"Text: {all_text3[:200]}")
+        # Check that p-values exist in a 'p_value' / 'p-value' column
+        header_row = rows3[0] if rows3 else []
+        p_col_idx = None
+        for i, h in enumerate(header_row):
+            hl = str(h or "").strip().lower().replace("-", "_")
+            if hl in ("p_value", "pvalue") or "p_value" in hl:
+                p_col_idx = i
+                break
+        p_vals = []
+        if p_col_idx is not None:
+            for r in data_rows3:
+                if p_col_idx < len(r):
+                    try:
+                        v = float(r[p_col_idx])
+                        if 0.0 <= v <= 1.0:
+                            p_vals.append(v)
+                    except (TypeError, ValueError):
+                        continue
+        check("Statistical_Tests has p_value column with values in [0,1] for all 4 tests",
+              p_col_idx is not None and len(p_vals) == len(data_rows3),
+              f"p_col_idx={p_col_idx}, found {len(p_vals)} valid p-values; first={p_vals[:6]}")
+        # Conclusion column - must mention reject/fail-to-reject for each row
+        concl_count = sum(1 for r in data_rows3
+                          if any("reject" in str(c).lower() for c in r if c))
+        check("Statistical_Tests has reject-related conclusions for all 4 tests",
+              concl_count == len(data_rows3),
+              f"Got {concl_count}/{len(data_rows3)} rows with reject-conclusion")
 
     # Research_Summary sheet
-    rs_idx = next((i for i, s in enumerate(sheets_lower) if "research" in s or "summary" in s or "finding" in s), 3)
-    if rs_idx < len(sheets):
-        ws4 = wb[sheets[rs_idx]]
+    rs_name = _find_sheet("Research_Summary")
+    if rs_name is None:
+        check("Research_Summary sheet exists", False, f"Sheets: {sheets}")
+    else:
+        check("Research_Summary sheet exists", True)
+        ws4 = wb[rs_name]
         rows4 = list(ws4.iter_rows(values_only=True))
         data_rows4 = [r for r in rows4[1:] if any(c for c in r)]
-        check("Research_Summary has at least 3 rows", len(data_rows4) >= 3, f"Found {len(data_rows4)}")
+        check("Research_Summary has at least 3 findings", len(data_rows4) >= 3, f"Found {len(data_rows4)}")
+        # Each row should have non-empty finding/evidence/implication
+        complete_rows = sum(
+            1 for r in data_rows4
+            if len([c for c in r[:3] if c and str(c).strip()]) >= 3
+        )
+        check("Research_Summary rows have finding+evidence+implication populated",
+              complete_rows >= 3,
+              f"Got {complete_rows}/{len(data_rows4)} complete rows")
 
 
 def check_word(workspace):
@@ -122,36 +199,43 @@ def check_email():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
-    # Check sent_log or messages for the email
     cur.execute("""
         SELECT subject, to_addr, body_text FROM email.messages
-        WHERE lower(subject) LIKE '%%fintech%%' OR lower(subject) LIKE '%%market efficiency%%'
-        ORDER BY created_at DESC LIMIT 5
+        WHERE lower(to_addr::text) LIKE '%%research-committee@company.org%%'
     """)
     msgs = cur.fetchall()
 
-    if not msgs:
-        cur.execute("""
-            SELECT subject, to_addr, body_text FROM email.messages
-            ORDER BY created_at DESC LIMIT 5
-        """)
-        msgs = cur.fetchall()
-
-    found_email = False
-    for subj, to_addr, body in msgs:
-        subj_lower = (subj or "").lower()
-        to_str = str(to_addr).lower() if to_addr else ""
-        if ("fintech" in subj_lower or "market" in subj_lower) and "research" in to_str:
-            found_email = True
-            break
-
-    check("Email sent about FinTech research", found_email or len(msgs) > 0,
-          f"Found {len(msgs)} messages")
+    check("Email sent to research-committee@company.org",
+          len(msgs) >= 1,
+          f"Found {len(msgs)} matching messages")
 
     if msgs:
-        any_body = " ".join(str(m[2] or "") for m in msgs).lower()
-        check("Email mentions JPM or XOM", "jpm" in any_body or "xom" in any_body or "morgan" in any_body,
-              f"Body sample: {any_body[:150]}")
+        # Subject must be exactly: "FinTech Research Report - Market Efficiency Analysis"
+        ok_subj = False
+        ok_jpm = False
+        ok_xom = False
+        ok_test = False
+        for subj, to_addr, body in msgs:
+            sl = (subj or "").strip().lower()
+            bl = (body or "").lower()
+            # Strict equality on subject
+            if sl == "fintech research report - market efficiency analysis":
+                ok_subj = True
+            if "jpm" in bl or "morgan" in bl:
+                ok_jpm = True
+            if "xom" in bl or "exxon" in bl:
+                ok_xom = True
+            # Body should reference statistical test results (autocorrelation/ljung/normality/jarque)
+            if any(kw in bl for kw in ("autocorrelation", "ljung", "normality", "jarque", "p-value", "p value")):
+                ok_test = True
+        check("Subject 'FinTech Research Report - Market Efficiency Analysis'", ok_subj,
+              f"Subjects: {[s for s, _, _ in msgs]}")
+        check("Email body mentions JPM / Morgan", ok_jpm,
+              f"Bodies sample: {[(b or '')[:200] for _, _, b in msgs[:1]]}")
+        check("Email body mentions XOM / Exxon", ok_xom,
+              f"Bodies sample: {[(b or '')[:200] for _, _, b in msgs[:1]]}")
+        check("Email body references statistical test results", ok_test,
+              f"Bodies sample: {[(b or '')[:200] for _, _, b in msgs[:1]]}")
 
     cur.close()
     conn.close()
@@ -160,7 +244,31 @@ def check_email():
 def check_script(workspace):
     print("\n=== Check 4: market_analysis.py ===")
     path = os.path.join(workspace, "market_analysis.py")
-    check("market_analysis.py exists", os.path.exists(path))
+    if not os.path.exists(path):
+        check("market_analysis.py exists", False, f"Not found at {path}")
+        return
+    check("market_analysis.py exists", True)
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read().lower()
+    except Exception as e:
+        check("market_analysis.py readable", False, str(e))
+        return
+    check("market_analysis.py readable", True)
+    # Should reference autocorrelation / Ljung-Box test
+    check("Script implements autocorrelation / Ljung-Box test",
+          "ljung" in content or "autocorrelation" in content or "acorr_ljungbox" in content,
+          f"Sample: {content[:200]}")
+    check("Script implements normality test (Jarque-Bera or shapiro)",
+          "jarque" in content or "jarque_bera" in content or "normaltest" in content
+          or "shapiro" in content or "normality" in content,
+          f"Sample: {content[:200]}")
+    check("Script computes daily returns",
+          "return" in content and ("pct_change" in content or "diff" in content or "log" in content),
+          f"Sample: {content[:200]}")
+    check("Script uses 0.05 significance level",
+          "0.05" in content or "alpha = 0.05" in content or "alpha=0.05" in content,
+          f"Sample: {content[:200]}")
 
 
 def check_reverse_validation(workspace):
@@ -222,7 +330,8 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    # Use FAIL_COUNT == 0 as the bar (replaces 70% threshold which masked critical fails)
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

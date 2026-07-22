@@ -116,6 +116,16 @@ def check_excel(workspace):
             for pid in PAPERS_WITH_ID:
                 record(f"Paper {pid} in Method Details", pid in found_ids, f"Found: {found_ids}")
 
+        # Key_Contribution and Dataset_Used columns should be non-empty
+        kc_col = find_col(md_rows[0], ["Key_Contribution", "Key Contribution", "contribution"])
+        ds_col = find_col(md_rows[0], ["Dataset_Used", "Dataset Used", "dataset"])
+        if kc_col is not None:
+            empty_kc = sum(1 for r in data2 if kc_col >= len(r) or not r[kc_col] or not str(r[kc_col]).strip())
+            record("All Key_Contribution values non-empty", empty_kc == 0, f"{empty_kc} empty")
+        if ds_col is not None:
+            empty_ds = sum(1 for r in data2 if ds_col >= len(r) or not r[ds_col] or not str(r[ds_col]).strip())
+            record("All Dataset_Used values non-empty", empty_ds == 0, f"{empty_ds} empty")
+
     # Summary sheet
     sum_rows = load_sheet_rows(wb, "Summary")
     if sum_rows is None:
@@ -141,7 +151,8 @@ def check_excel(workspace):
 
         ts_key = next((k for k in metrics if "top" in k and "score" in k), None)
         if ts_key:
-            record("Top_Score = 95.0", num_close(metrics[ts_key], 95.0, tol=1), f"Got {metrics[ts_key]}")
+            # Exact 95.0 expected
+            record("Top_Score = 95.0", num_close(metrics[ts_key], 95.0, tol=0), f"Got {metrics[ts_key]}")
 
     return True
 
@@ -172,11 +183,8 @@ def check_notion():
         page_ids = [p[0] for p in pages]
         cur.execute("SELECT COUNT(*) FROM notion.blocks WHERE parent_id = ANY(%s)", (page_ids,))
         count = cur.fetchone()[0]
-        if count == 0:
-            cur.execute("SELECT COUNT(*) FROM notion.blocks")
-            count = cur.fetchone()[0]
-
-        record("Notion page has content blocks", count >= 3, f"Found {count}")
+        # Do NOT fall back to total block count -- must be under this page
+        record("Notion page has content blocks", count >= 3, f"Found {count} blocks under target page")
 
         cur.execute("SELECT block_data FROM notion.blocks")
         blocks = cur.fetchall()

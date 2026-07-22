@@ -4,7 +4,7 @@ import argparse, json, os, sys, shutil, subprocess, time
 from datetime import datetime, timedelta
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -32,17 +32,24 @@ def inject_data(launch_time):
     conn = get_conn()
     cur = conn.cursor()
     launch_dt = datetime.strptime(launch_time, "%Y-%m-%d %H:%M:%S")
-    # Inject scholarly papers (noise + relevant)
+    # Inject scholarly papers matching task topics: machine learning,
+    # data analytics, computational thinking.
     cur.execute("""INSERT INTO scholarly.arxiv_papers (id, title, authors, abstract, categories, primary_category, pdf_url, published)
-        VALUES ('2301.00001', 'LLM Reasoning Survey', '[{"name": "Author A"}]'::jsonb, 'A survey of reasoning methods in large language models.',
-        '["cs.CL", "cs.AI"]'::jsonb, 'cs.CL', 'https://arxiv.org/pdf/2301.00001', '2023-01-15')""")
+        VALUES ('2401.00001', 'Recent Advances in Machine Learning', '[{"name": "Author A"}]'::jsonb, 'A survey of recent advances in machine learning techniques and their applications.',
+        '["cs.LG", "cs.AI"]'::jsonb, 'cs.LG', 'https://arxiv.org/pdf/2401.00001', '2024-01-10')""")
     cur.execute("""INSERT INTO scholarly.arxiv_papers (id, title, authors, abstract, categories, primary_category, pdf_url, published)
-        VALUES ('2302.00002', 'Prompt Engineering Guide', '[{"name": "Author B"}]'::jsonb, 'A comprehensive guide to prompt engineering.',
-        '["cs.AI"]'::jsonb, 'cs.AI', 'https://arxiv.org/pdf/2302.00002', '2023-02-20')""")
+        VALUES ('2402.00002', 'Modern Data Analytics Techniques', '[{"name": "Author B"}]'::jsonb, 'A comprehensive review of modern data analytics methods including statistical approaches and machine learning.',
+        '["cs.DB", "stat.ML"]'::jsonb, 'cs.DB', 'https://arxiv.org/pdf/2402.00002', '2024-02-15')""")
     cur.execute("""INSERT INTO scholarly.arxiv_papers (id, title, authors, abstract, categories, primary_category, pdf_url, published)
-        VALUES ('2303.00003', 'In-Context Learning Theory', '[{"name": "Author C"}]'::jsonb, 'Theoretical foundations of in-context learning.',
-        '["cs.LG"]'::jsonb, 'cs.LG', 'https://arxiv.org/pdf/2303.00003', '2023-03-10')""")
-    # Noise papers
+        VALUES ('2403.00003', 'Computational Thinking in Education', '[{"name": "Author C"}]'::jsonb, 'A framework for teaching computational thinking skills in undergraduate computer science programs.',
+        '["cs.CY"]'::jsonb, 'cs.CY', 'https://arxiv.org/pdf/2403.00003', '2024-03-05')""")
+    cur.execute("""INSERT INTO scholarly.arxiv_papers (id, title, authors, abstract, categories, primary_category, pdf_url, published)
+        VALUES ('2404.00004', 'Deep Learning for Pattern Recognition', '[{"name": "Author F"}]'::jsonb, 'Recent progress in deep learning approaches for pattern recognition tasks.',
+        '["cs.LG", "cs.CV"]'::jsonb, 'cs.LG', 'https://arxiv.org/pdf/2404.00004', '2024-04-01')""")
+    cur.execute("""INSERT INTO scholarly.arxiv_papers (id, title, authors, abstract, categories, primary_category, pdf_url, published)
+        VALUES ('2405.00005', 'Big Data Analytics Methods', '[{"name": "Author G"}]'::jsonb, 'Methods for analyzing large-scale datasets in business and scientific contexts.',
+        '["cs.DB"]'::jsonb, 'cs.DB', 'https://arxiv.org/pdf/2405.00005', '2024-05-12')""")
+    # Noise papers - off-topic
     cur.execute("""INSERT INTO scholarly.arxiv_papers (id, title, authors, abstract, categories, primary_category, pdf_url, published)
         VALUES ('2304.99901', 'Quantum Computing Basics', '[{"name": "Author D"}]'::jsonb, 'Introduction to quantum computing.',
         '["quant-ph"]'::jsonb, 'quant-ph', 'https://arxiv.org/pdf/2304.99901', '2023-04-01')""")

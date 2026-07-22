@@ -43,6 +43,18 @@ def num_close(a, b, tol=1.0):
         return False
 
 
+def money_close(a, b, abs_tol=0.5, rel_tol=0.005):
+    """Compare monetary values with combined absolute + relative tolerance.
+
+    Allows 0.5 currency units or 0.5% of expected, whichever is larger.
+    """
+    try:
+        fa, fb = float(a), float(b)
+        return abs(fa - fb) <= max(abs_tol, abs(fb) * rel_tol)
+    except (TypeError, ValueError):
+        return False
+
+
 def pct_close(a, b, tol=0.5):
     """Compare percentage values with tolerance."""
     try:
@@ -204,7 +216,8 @@ def check_excel(workspace, expected_summary, expected_products, expected_dji):
                         record(f"Sales Summary '{metric}'", num_close(sheet_val, expected_val, tol=0.5),
                                f"expected {expected_val}, got {sheet_val}")
                     else:
-                        record(f"Sales Summary '{metric}'", num_close(sheet_val, expected_val, tol=5.0),
+                        # Monetary: relative 0.5% or abs 0.5 (whichever larger)
+                        record(f"Sales Summary '{metric}'", money_close(sheet_val, expected_val),
                                f"expected {expected_val}, got {sheet_val}")
 
     # --- Top Products sheet ---
@@ -252,7 +265,7 @@ def check_excel(workspace, expected_summary, expected_products, expected_dji):
                     record(f"Top Products #{i+1} name", name_ok,
                            f"expected '{exp_name[:60]}...', got '{agent_name[:60]}...'")
                     if rev_idx is not None:
-                        record(f"Top Products #{i+1} revenue", num_close(row[rev_idx], exp["Revenue"], tol=5.0),
+                        record(f"Top Products #{i+1} revenue", money_close(row[rev_idx], exp["Revenue"]),
                                f"expected {exp['Revenue']}, got {row[rev_idx]}")
 
     # --- Market Context sheet ---
@@ -292,7 +305,10 @@ def check_excel(workspace, expected_summary, expected_products, expected_dji):
                        f"expected DJI-related, got '{idx_val}'")
 
                 if close_col is not None:
-                    record("Market Context close", num_close(data_row[close_col], expected_dji["Recent_Close"], tol=500),
+                    # DJI close: tighter relative 0.1% (~50 units for 50k DJI)
+                    record("Market Context close",
+                           money_close(data_row[close_col], expected_dji["Recent_Close"],
+                                       abs_tol=5.0, rel_tol=0.001),
                            f"expected ~{expected_dji['Recent_Close']}, got {data_row[close_col]}")
 
                 if change_col is not None:
@@ -377,6 +393,17 @@ def check_pptx(workspace, expected_summary):
            "recommend" in full_text or "takeaway" in full_text or "action" in full_text or "insight" in full_text or "conclusion" in full_text,
            "No recommendations/takeaways content found")
 
+    # Each of the 5 expected slides should carry a meaningful title
+    slide_titles = []
+    for sl in slides:
+        title = ''
+        if sl.shapes.title and sl.shapes.title.has_text_frame:
+            title = sl.shapes.title.text_frame.text or ''
+        slide_titles.append(title.strip())
+    non_empty_titles = [t for t in slide_titles if t]
+    record("PPTX slides have non-empty titles", len(non_empty_titles) >= 4,
+           f"Only {len(non_empty_titles)} non-empty titles in {len(slides)} slides")
+
 
 # ============================================================================
 # Check 3: Email
@@ -459,6 +486,17 @@ def check_email(expected_summary):
         body_has_rev = any(s in body for s in rev_strs)
         record("Email body mentions revenue", body_has_rev,
                f"Looking for revenue ~{rev} in body")
+
+        # Additional: body should mention top product name (partial match)
+        try:
+            top_products = get_expected_sales_data()[1]
+            if top_products:
+                top_name = top_products[0]["Product_Name"].strip().lower()
+                record("Email body mentions top product",
+                       top_name[:20] in body,
+                       f"Top product '{top_name[:40]}' not in body")
+        except Exception:
+            pass
 
     conn.close()
 

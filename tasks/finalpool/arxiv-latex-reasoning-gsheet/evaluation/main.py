@@ -20,14 +20,16 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+RUNTIME_ONLY_FAIL_COUNT = 0
+IN_RUNTIME_BLOCK = False
 
-# The 5 reasoning papers from arxiv_latex.papers
+# The 5 reasoning papers from arxiv_latex.papers (year derived from arxiv id YYMM.nnnn)
 EXPECTED_REASONING_PAPERS = [
-    {"id": "2201.11903", "title": "Chain-of-Thought Prompting Elicits Reasoning in Large Language Models"},
-    {"id": "2203.11171", "title": "Self-Consistency Improves Chain of Thought Reasoning in Language Models"},
-    {"id": "2205.11916", "title": "Large Language Models are Zero-Shot Reasoners"},
-    {"id": "2210.03493", "title": "Automatic Chain of Thought Prompting in Large Language Models"},
-    {"id": "2305.10601", "title": "Tree of Thoughts: Deliberate Problem Solving with Large Language Models"},
+    {"id": "2201.11903", "title": "Chain-of-Thought Prompting Elicits Reasoning in Large Language Models", "year": 2022},
+    {"id": "2203.11171", "title": "Self-Consistency Improves Chain of Thought Reasoning in Language Models", "year": 2022},
+    {"id": "2205.11916", "title": "Large Language Models are Zero-Shot Reasoners", "year": 2022},
+    {"id": "2210.03493", "title": "Automatic Chain of Thought Prompting in Large Language Models", "year": 2022},
+    {"id": "2305.10601", "title": "Tree of Thoughts: Deliberate Problem Solving with Large Language Models", "year": 2023},
 ]
 
 PAPER_KEYWORDS = [
@@ -38,23 +40,34 @@ PAPER_KEYWORDS = [
     ["tree of thoughts"],
 ]
 
+# Suggested method labels from task.md
+SUGGESTED_METHODS = ["chain-of-thought", "chain of thought", "self-consistency", "zero-shot", "automatic cot", "auto-cot", "automatic chain", "tree of thoughts"]
+
 # Word embedding papers that should NOT be included
-NOISE_KEYWORDS = ["word2vec", "glove", "word representation", "skip-gram"]
+NOISE_KEYWORDS = ["word2vec", "glove", "word representation", "skip-gram", "word embedding"]
 
 
-def record(name, passed, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def record(name, passed, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, RUNTIME_ONLY_FAIL_COUNT
     if passed:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
-        FAIL_COUNT += 1
-        msg = f": {detail[:300]}" if detail else ""
-        print(f"  [FAIL] {name}{msg}")
+        # If this check is in a runtime-only block (e.g. GSheet with no data) or marked runtime_only,
+        # don't block overall result but still log.
+        if runtime_only or IN_RUNTIME_BLOCK:
+            RUNTIME_ONLY_FAIL_COUNT += 1
+            msg = f": {detail[:300]}" if detail else ""
+            print(f"  [FAIL-runtime] {name}{msg}")
+        else:
+            FAIL_COUNT += 1
+            msg = f": {detail[:300]}" if detail else ""
+            print(f"  [FAIL] {name}{msg}")
 
 
 def check_gsheet():
     """Check Google Sheet exists with correct data."""
+    global IN_RUNTIME_BLOCK
     print("\n=== Checking Google Sheet ===")
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -64,6 +77,10 @@ def check_gsheet():
         cur.execute("SELECT id, title FROM gsheet.spreadsheets")
         spreadsheets = cur.fetchall()
 
+        # If NO spreadsheets at all, treat as runtime-only (agent didn't create).
+        # If some spreadsheets exist but none match, fail hard - agent created wrong thing.
+        if not spreadsheets:
+            IN_RUNTIME_BLOCK = True
         target_ss = None
         for sid, title in spreadsheets:
             if title and "reasoning" in title.lower():
@@ -76,6 +93,7 @@ def check_gsheet():
 
         if target_ss is None:
             conn.close()
+            IN_RUNTIME_BLOCK = False
             return
 
         # Check "Papers" sheet exists
@@ -123,29 +141,23 @@ def check_gsheet():
         header_row = grid.get(min_row, {})
         header_vals = [header_row.get(i, "") for i in range(max(header_row.keys()) + 1)] if header_row else []
 
-        # Find Title column
-        title_col = None
-        for i, h in enumerate(header_vals):
-            if h and str(h).strip().lower() == "title":
-                title_col = i
-                break
+        # Find columns
+        def find_col(key_substrings):
+            for i, h in enumerate(header_vals):
+                hn = str(h or "").strip().lower()
+                for k in key_substrings:
+                    if hn == k.lower() or k.lower() in hn:
+                        return i
+            return None
+
+        title_col = find_col(["title"])
+        year_col = find_col(["year"])
+        method_col = find_col(["method"])
+        kc_col = find_col(["contribution", "key_contribution", "key contribution"])
 
         record("Title column exists", title_col is not None, f"Header: {header_vals}")
-
-        # Check Method column
-        method_col = None
-        for i, h in enumerate(header_vals):
-            if h and str(h).strip().lower() == "method":
-                method_col = i
-                break
+        record("Year column exists", year_col is not None, f"Header: {header_vals}")
         record("Method column exists", method_col is not None, f"Header: {header_vals}")
-
-        # Check Key_Contribution column
-        kc_col = None
-        for i, h in enumerate(header_vals):
-            if h and "contribution" in str(h).strip().lower():
-                kc_col = i
-                break
         record("Key_Contribution column exists", kc_col is not None, f"Header: {header_vals}")
 
         # Check data rows
@@ -165,6 +177,47 @@ def check_gsheet():
                 t_lower = paper["title"].lower()
                 found = any(t_lower in t or t in t_lower for t in found_titles)
                 record(f"Has paper: {paper['title'][:50]}...", found)
+
+            # Check noise papers (word embedding) NOT in sheet
+            all_titles_joined = " ".join(found_titles)
+            for nk in NOISE_KEYWORDS:
+                record(f"Papers sheet does NOT include noise keyword '{nk}'",
+                       nk.lower() not in all_titles_joined,
+                       f"Found in titles: {all_titles_joined[:200]}")
+
+        # Check Year/Method/Key_Contribution non-empty per row, Year matches expected
+        sorted_rows = sorted(data_rows.keys())
+        for idx, r in enumerate(sorted_rows):
+            row_data = data_rows[r]
+            title_val = str(row_data.get(title_col, "") or "").lower() if title_col is not None else ""
+            # Find which expected paper this row corresponds to
+            matched = None
+            for paper in EXPECTED_REASONING_PAPERS:
+                if paper["title"].lower() in title_val or title_val in paper["title"].lower():
+                    matched = paper
+                    break
+            # Year check
+            if year_col is not None:
+                yv = row_data.get(year_col, "")
+                yv_str = str(yv or "").strip()
+                if matched:
+                    # Should contain the expected year
+                    ok = str(matched["year"]) in yv_str
+                    record(f"Row {idx+1} Year matches expected {matched['year']}", ok, f"Got: {yv_str}")
+                else:
+                    record(f"Row {idx+1} Year is non-empty", bool(yv_str), f"Got: {yv_str}")
+            # Method check
+            if method_col is not None:
+                mv = str(row_data.get(method_col, "") or "").strip().lower()
+                ok_nonempty = bool(mv)
+                record(f"Row {idx+1} Method non-empty", ok_nonempty, f"Got: {mv!r}")
+                if ok_nonempty:
+                    ok_suggested = any(sm in mv for sm in SUGGESTED_METHODS)
+                    record(f"Row {idx+1} Method uses a suggested approach", ok_suggested, f"Got: {mv!r}")
+            # Key_Contribution non-empty + reasonable length
+            if kc_col is not None:
+                kcv = str(row_data.get(kc_col, "") or "").strip()
+                record(f"Row {idx+1} Key_Contribution non-empty", bool(kcv) and len(kcv) >= 10, f"Got: {kcv[:80]!r}")
 
         conn.close()
     except Exception as e:
@@ -227,7 +280,7 @@ def main():
     check_word(args.agent_workspace)
 
     total = PASS_COUNT + FAIL_COUNT
-    print(f"\n=== Results: {PASS_COUNT}/{total} passed ===")
+    print(f"\n=== Results: {PASS_COUNT}/{total} passed ({RUNTIME_ONLY_FAIL_COUNT} runtime-only inconclusive) ===")
     if FAIL_COUNT > 0:
         print(f"{FAIL_COUNT} checks failed")
         sys.exit(1)

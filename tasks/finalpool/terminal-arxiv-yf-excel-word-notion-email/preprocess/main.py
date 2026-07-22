@@ -10,7 +10,7 @@ from datetime import datetime
 
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
+DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
           user="eigent", password="camel")
 
 # 4 relevant papers (AI + finance)
@@ -151,6 +151,9 @@ def main():
         noise_emails = [
             ("Meeting reminder: Q4 planning", "admin@firm.com", "team@firm.com", "Please join the Q4 planning meeting tomorrow at 2pm."),
             ("Lunch order for Friday", "social@firm.com", "office@firm.com", "Please submit your lunch orders by Thursday EOD."),
+            ("Office Supplies Reorder Request", "admin@firm.com", "facilities@firm.com", "We are running low on printer paper and toner."),
+            ("Training Session Invitation", "hr@firm.com", "staff@firm.com", "Join us for the compliance refresher training next Monday."),
+            ("Building Maintenance Notice", "admin@firm.com", "team@firm.com", "Scheduled HVAC maintenance on Saturday between 8am and noon."),
         ]
         for subj, from_a, to_a, body in noise_emails:
             cur.execute("""

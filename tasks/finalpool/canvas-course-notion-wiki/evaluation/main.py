@@ -39,6 +39,31 @@ EXPECTED_ASSIGNMENTS = {
 }
 
 
+def load_expected_from_db():
+    """Query Canvas DB for student and assignment counts (resilient fallback)."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        students = {}
+        assignments = {}
+        for code in COURSE_CODES:
+            cur.execute("SELECT id FROM canvas.courses WHERE course_code = %s", (code,))
+            r = cur.fetchone()
+            if not r:
+                return None, None
+            cid = r[0]
+            cur.execute("SELECT COUNT(*) FROM canvas.enrollments WHERE course_id = %s AND type = 'StudentEnrollment'", (cid,))
+            students[code] = int(cur.fetchone()[0])
+            cur.execute("SELECT COUNT(*) FROM canvas.assignments WHERE course_id = %s", (cid,))
+            assignments[code] = int(cur.fetchone()[0])
+        cur.close()
+        conn.close()
+        return students, assignments
+    except Exception as e:
+        print(f"[eval] Warning: could not load expected data from DB: {e}")
+        return None, None
+
+
 def record(name, passed, detail=""):
     global PASS_COUNT, FAIL_COUNT
     if passed:
@@ -71,6 +96,18 @@ def int_close(a, b, tol=10):
 
 def check_excel(agent_workspace, groundtruth_workspace):
     print("\n=== Checking Excel Output ===")
+
+    # Track the starting FAIL_COUNT so we can detect NEW failures from this
+    # check and signal them as critical.
+    start_fail = FAIL_COUNT
+
+    # Try DB fallback — refreshes EXPECTED_STUDENTS/ASSIGNMENTS on each run
+    db_students, db_assignments = load_expected_from_db()
+    global EXPECTED_STUDENTS, EXPECTED_ASSIGNMENTS
+    if db_students and db_assignments and len(db_students) == 7 and len(db_assignments) == 7:
+        EXPECTED_STUDENTS = db_students
+        EXPECTED_ASSIGNMENTS = db_assignments
+        print("  Using DB-derived expected data (Student_Count / Assignment_Count)")
 
     agent_file = os.path.join(agent_workspace, "course_catalog.xlsx")
     gt_file = os.path.join(groundtruth_workspace, "course_catalog.xlsx")
@@ -111,6 +148,8 @@ def check_excel(agent_workspace, groundtruth_workspace):
            agent_codes == sorted(agent_codes),
            f"Got: {agent_codes}")
 
+    import re
+    date_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     for code in COURSE_CODES:
         agent_row = None
         for r in rows:
@@ -121,6 +160,18 @@ def check_excel(agent_workspace, groundtruth_workspace):
             record(f"Course {code} present", False, "Missing")
             continue
         record(f"Course {code} present", True)
+        # Validate date format on start/end
+        for idx, lbl in [(2, "Start_Date"), (3, "End_Date")]:
+            if len(agent_row) > idx and agent_row[idx]:
+                val = str(agent_row[idx]).strip()
+                record(f"{code} {lbl} YYYY-MM-DD format", bool(date_re.match(val)),
+                       f"Got {val}")
+        # Validate instructor names alphabetical
+        if len(agent_row) > 6 and agent_row[6]:
+            names = [n.strip() for n in str(agent_row[6]).split(",") if n.strip()]
+            record(f"{code} Instructor_Names alphabetical",
+                   names == sorted(names, key=str.lower),
+                   f"Got: {names}")
 
         # Check student count
         record(f"Course {code}: Student_Count",
@@ -168,7 +219,8 @@ def check_excel(agent_workspace, groundtruth_workspace):
            str_match(summary.get("most_assignments", ""), "FFF-2014J"),
            f"Got {summary.get('most_assignments')}")
 
-    return True
+    # If any Excel-specific check recorded a FAIL, propagate.
+    return FAIL_COUNT == start_fail
 
 
 # ============================================================================
@@ -196,12 +248,18 @@ def check_notion():
            f"Found {len(pages)}")
 
     # Check each course code appears in page properties/title
-    all_text = " ".join(str(p[1] or "") for p in pages).lower()
+    all_text = " ".join(str(p[1] or "") for p in pages).lower().replace("–", "-").replace("—", "-")
 
+    import re
     for code in COURSE_CODES:
         found = code.lower() in all_text
         record(f"Notion: page for {code} exists",
                found, f"{code} not found in any page properties")
+        # Check title format '[CODE] - [NAME]'
+        pattern = re.compile(re.escape(code.lower()) + r"\s*-\s*\S", re.IGNORECASE)
+        has_format = bool(pattern.search(all_text))
+        record(f"Notion: {code} title has '[Code] - [Name]' format", has_format,
+               f"Pattern not matched for {code}")
 
     return True
 

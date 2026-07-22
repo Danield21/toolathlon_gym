@@ -17,6 +17,7 @@ def check_pptx(workspace):
     """Check PowerPoint file structure and content."""
     from pptx import Presentation
 
+    errors = []
     pptx_path = os.path.join(workspace, "Event_Menu_Presentation.pptx")
     if not os.path.exists(pptx_path):
         return False, "Event_Menu_Presentation.pptx not found"
@@ -27,34 +28,46 @@ def check_pptx(workspace):
     if len(slides) < 5:
         return False, f"PPT has {len(slides)} slides, expected at least 5"
 
-    # Collect all text from all slides
-    all_text = ""
+    # Per-slide text
+    slide_texts = []
     for slide in slides:
+        t = ""
         for shape in slide.shapes:
             if shape.has_text_frame:
                 for paragraph in shape.text_frame.paragraphs:
-                    all_text += paragraph.text.lower() + " "
-            if hasattr(shape, "text"):
-                all_text += shape.text.lower() + " "
+                    t += paragraph.text + " "
+            elif hasattr(shape, "text"):
+                t += shape.text + " "
+        slide_texts.append(t)
+    slide_lower = [t.lower() for t in slide_texts]
+    all_text = " ".join(slide_lower)
 
-    # Check title slide contains dinner or menu
-    title_slide_text = ""
-    for shape in slides[0].shapes:
-        if shape.has_text_frame:
-            for paragraph in shape.text_frame.paragraphs:
-                title_slide_text += paragraph.text.lower() + " "
-        if hasattr(shape, "text"):
-            title_slide_text += shape.text.lower() + " "
+    # Title slide must contain exact "Company Team Dinner Menu"
+    if "company team dinner menu" not in slide_lower[0]:
+        errors.append(f"Title slide missing exact phrase 'Company Team Dinner Menu': got {slide_texts[0][:100]}")
 
-    if "dinner" not in title_slide_text and "menu" not in title_slide_text:
-        return False, "Title slide does not contain 'dinner' or 'menu'"
+    # Each course type appears in a dedicated slide (not just somewhere)
+    for course in ["appetizer", "main", "dessert"]:
+        slide_with_course = [i for i, t in enumerate(slide_lower[1:-1], 1) if course in t]
+        if not slide_with_course:
+            errors.append(f"No course slide for '{course}'")
 
-    # Check course types are present somewhere in the presentation
-    course_types = ["appetizer", "main", "dessert"]
-    missing = [c for c in course_types if c not in all_text]
-    if missing:
-        return False, f"Missing course types in PPT: {missing}"
+    # Each course slide should have ingredients content
+    has_ingredients = any("ingredient" in t for t in slide_lower[1:-1])
+    if not has_ingredients:
+        errors.append("No course slide mentions ingredients")
 
+    # Summary slide (last) should mention total ingredients count
+    summary_text = slide_lower[-1]
+    import re
+    # Look for a number in the summary slide
+    if not re.search(r"\b\d+\b", summary_text):
+        errors.append("Summary slide has no numeric total")
+    if not any(kw in summary_text for kw in ["total", "summary", "menu summary"]):
+        errors.append("Summary slide missing 'total' or 'summary' keyword")
+
+    if errors:
+        return False, "; ".join(errors)
     return True, "PPT check passed"
 
 
@@ -62,6 +75,7 @@ def check_excel(workspace):
     """Check Excel file structure."""
     from openpyxl import load_workbook
 
+    errors = []
     xlsx_path = os.path.join(workspace, "Menu_Budget.xlsx")
     if not os.path.exists(xlsx_path):
         return False, "Menu_Budget.xlsx not found"
@@ -82,27 +96,80 @@ def check_excel(workspace):
     required_headers = ["course", "recipe_name", "ingredients_count", "difficulty"]
     for rh in required_headers:
         if not any(rh.replace("_", " ") in h or rh in h for h in headers):
-            return False, f"Menu Items sheet missing header: {rh}. Found: {headers}"
+            errors.append(f"Menu Items sheet missing header: {rh}")
 
-    # Check at least 3 data rows (one per course)
-    data_rows = sum(1 for row in menu_sheet.iter_rows(min_row=2) if row[0].value is not None)
-    if data_rows < 3:
-        return False, f"Menu Items sheet has {data_rows} data rows, expected at least 3"
+    # Check exactly 3 data rows (one per course)
+    data_rows = [row for row in menu_sheet.iter_rows(min_row=2, values_only=True) if row[0] is not None]
+    if len(data_rows) != 3:
+        errors.append(f"Menu Items sheet has {len(data_rows)} data rows, expected exactly 3")
 
-    # Check Summary sheet has data
+    # Check all 3 courses appear in Course column (col 0)
+    courses_found = set()
+    for row in data_rows:
+        if row[0]:
+            c = str(row[0]).strip().lower()
+            for course in ["appetizer", "main", "dessert"]:
+                if course in c:
+                    courses_found.add(course)
+    missing_courses = {"appetizer", "main", "dessert"} - courses_found
+    if missing_courses:
+        errors.append(f"Menu Items missing course(s): {missing_courses}")
+
+    # Difficulty must be 1/2/3
+    for row in data_rows:
+        if len(row) > 3 and row[3] is not None:
+            try:
+                d = int(row[3])
+                if d not in (1, 2, 3):
+                    errors.append(f"Difficulty {d} not in {{1,2,3}} for {row[1]}")
+            except (TypeError, ValueError):
+                errors.append(f"Difficulty not numeric for {row[1]}: {row[3]}")
+
+    # Compute Total_Ingredients from Menu Items (col 2)
+    total_ingredients = 0
+    for row in data_rows:
+        if len(row) > 2 and row[2] is not None:
+            try:
+                total_ingredients += int(row[2])
+            except (TypeError, ValueError):
+                pass
+
+    # Check Summary sheet
     summary_sheet = wb[wb.sheetnames[sheet_names.index("summary")]]
-    summary_text = ""
-    for row in summary_sheet.iter_rows():
-        for cell in row:
-            if cell.value:
-                summary_text += str(cell.value).lower() + " "
+    summary_rows = list(summary_sheet.iter_rows(values_only=True))
+    summary_map = {}
+    for row in summary_rows[1:]:
+        if row[0] is not None:
+            summary_map[str(row[0]).strip().lower()] = row[1] if len(row) > 1 else None
 
-    if "total_recipes" not in summary_text and "total recipes" not in summary_text:
-        return False, "Summary sheet missing Total_Recipes metric"
+    # Total_Recipes == 3 (exact)
+    tr = summary_map.get("total_recipes") or summary_map.get("total recipes")
+    try:
+        if int(tr) != 3:
+            errors.append(f"Total_Recipes={tr}, expected 3")
+    except (TypeError, ValueError):
+        errors.append(f"Total_Recipes missing or non-numeric: {tr}")
 
-    if "total_ingredients" not in summary_text and "total ingredients" not in summary_text:
-        return False, "Summary sheet missing Total_Ingredients metric"
+    # Total_Ingredients == sum of Menu Items column
+    ti = summary_map.get("total_ingredients") or summary_map.get("total ingredients")
+    try:
+        if int(ti) != total_ingredients:
+            errors.append(f"Total_Ingredients={ti} does not equal sum of Menu Items = {total_ingredients}")
+    except (TypeError, ValueError):
+        errors.append(f"Total_Ingredients missing or non-numeric: {ti}")
 
+    # Avg_Difficulty present + numeric
+    ad = summary_map.get("avg_difficulty") or summary_map.get("average_difficulty")
+    if ad is None:
+        errors.append("Avg_Difficulty missing from Summary")
+    else:
+        try:
+            float(ad)
+        except (TypeError, ValueError):
+            errors.append(f"Avg_Difficulty not numeric: {ad}")
+
+    if errors:
+        return False, "; ".join(errors)
     return True, "Excel check passed"
 
 

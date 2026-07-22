@@ -295,9 +295,11 @@ def check_excel(agent_workspace, expected, groundtruth_workspace=None):
             )
 
             # Recipe name should be non-empty Chinese text
-            check(f"Bundle {i+1} has a recipe name",
-                  recipe_name is not None and len(str(recipe_name).strip()) > 0,
-                  f"Got: {recipe_name}")
+            rn_str = str(recipe_name).strip() if recipe_name else ""
+            has_chinese = any('一' <= c <= '鿿' for c in rn_str)
+            check(f"Bundle {i+1} has a Chinese recipe name",
+                  recipe_name is not None and len(rn_str) > 0 and has_chinese,
+                  f"Got: {recipe_name} (has_chinese={has_chinese})")
 
             # Recipe category should be a valid HowToCook category
             cat_str = str(recipe_cat).strip() if recipe_cat else ""
@@ -321,8 +323,12 @@ def check_excel(agent_workspace, expected, groundtruth_workspace=None):
                 product_prices = expected['product_prices_by_name']
                 product_name_lower = str(paired_product).strip().lower()
                 matched_price = None
+                def _norm_name(s):
+                    return " ".join(str(s).strip().lower().split())
+                pn_norm = _norm_name(product_name_lower)
                 for pname, pprice in product_prices.items():
-                    if pname == product_name_lower or pname[:30] in product_name_lower or product_name_lower[:30] in pname:
+                    pname_norm = _norm_name(pname)
+                    if pname_norm == pn_norm or pname_norm[:30] in pn_norm or pn_norm[:30] in pname_norm:
                         matched_price = pprice
                         break
 
@@ -363,7 +369,13 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
     if use_db:
         print("INFO: Using dynamically computed expected values from PostgreSQL")
     else:
-        print("INFO: Falling back to static groundtruth Excel file")
+        # Fail loudly instead of silently degrading to static GT - the preprocess
+        # sanity check should have caught missing Home Appliances / GC=F data,
+        # but this guard defends the evaluation difficulty if DB is unreachable.
+        print("ERROR: PostgreSQL expected values unavailable. Evaluation cannot validate task correctness dynamically.")
+        global FAIL_COUNT
+        FAIL_COUNT += 1
+        print("[FAIL] Data source unavailable (must have wc.products Home Appliances and yf.stock_prices GC=F)")
 
     check_excel(agent_workspace, db_expected, groundtruth_workspace)
 

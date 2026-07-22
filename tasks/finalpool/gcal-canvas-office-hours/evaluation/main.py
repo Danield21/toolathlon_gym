@@ -205,10 +205,19 @@ def check_excel(agent_workspace):
             if not found:
                 all_ok = False
 
+        # Locate the Time_Slots column index
+        time_slots_col_idx = None
+        for i, h in enumerate(headers):
+            if "time_slot" in h.replace(" ", "_") or "time slots" in h or "timeslots" in h.replace("_", ""):
+                time_slots_col_idx = i
+                break
+
         # Check total bookings per date
         date_counts = {}
+        date_slots = {}  # date -> set of time slots
         for r in responses:
             date_counts[r["date"]] = date_counts.get(r["date"], 0) + 1
+            date_slots.setdefault(r["date"], set()).add(str(r["time_slot"]).strip())
 
         for row in data_rows:
             if row and row[0]:
@@ -236,6 +245,16 @@ def check_excel(agent_workspace):
                     except (ValueError, TypeError):
                         check(f"Summary total for '{date_val}' is numeric", False,
                               f"Got {total_val}")
+
+                # Validate Time_Slots column contains expected slot list
+                if matched_date and time_slots_col_idx is not None and time_slots_col_idx < len(row):
+                    raw_slots = row[time_slots_col_idx]
+                    if raw_slots is not None:
+                        actual_slots = {s.strip() for s in str(raw_slots).split(",") if s.strip()}
+                        expected_slots = date_slots.get(matched_date, set())
+                        check(f"Summary Time_Slots for '{date_val}' contains expected slots",
+                              expected_slots.issubset(actual_slots),
+                              f"Expected {expected_slots}, got {actual_slots}")
 
     return all_ok
 
@@ -312,6 +331,17 @@ def check_gcal():
     check("Events have ~30 minute duration",
           duration_ok >= 4,
           f"{duration_ok} events have ~30min duration")
+
+    # Check exactly 6 unique (date, time_slot) events match the 6 expected unique slots
+    gcal_unique = set()
+    for summary, description, start_dt, end_dt in events:
+        if start_dt:
+            date_key = start_dt.strftime("%Y-%m-%d")
+            time_key = start_dt.strftime("%H:%M")
+            gcal_unique.add((date_key, time_key))
+    check(f"Exactly {len(unique_slots)} unique (date, time) events",
+          len(gcal_unique) == len(unique_slots),
+          f"Expected {len(unique_slots)} unique (date,time) events, got {len(gcal_unique)}")
 
 
 # ============================================================================

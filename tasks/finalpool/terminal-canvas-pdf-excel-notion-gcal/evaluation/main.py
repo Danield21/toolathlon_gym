@@ -13,9 +13,10 @@ FAIL_COUNT = 0
 
 
 def get_expected_from_db():
-    """Query canvas schema dynamically for expected average scores."""
-    defaults = {
-        "avg_gpa": 75.4,
+    """Query canvas schema dynamically for expected average scores. Sets db_query_ok=False on failure."""
+    expected = {
+        "avg_gpa": None,
+        "db_query_ok": False,
     }
     try:
         import psycopg2
@@ -25,12 +26,13 @@ def get_expected_from_db():
         cur.execute("SELECT AVG(score) FROM canvas.submissions WHERE score IS NOT NULL")
         row = cur.fetchone()
         if row and row[0] is not None:
-            defaults["avg_gpa"] = float(row[0])
+            expected["avg_gpa"] = float(row[0])
+            expected["db_query_ok"] = True
         cur.close()
         conn.close()
     except Exception as e:
-        print(f"  [WARN] DB query for expected values failed, using defaults: {e}")
-    return defaults
+        print(f"  [WARN] DB query for expected values failed: {e}")
+    return expected
 
 
 EXPECTED = get_expected_from_db()
@@ -170,16 +172,26 @@ def check_notion():
             db_id, props = accred_db
             props_data = props if isinstance(props, dict) else json.loads(props) if isinstance(props, str) else {}
 
-            # Check properties
+            # Check ALL required properties (Criterion title, Status, Owner, Due_Date, Evidence)
             prop_names = [k.lower() for k in props_data.keys()]
-            check("DB has Status property", any("status" in p for p in prop_names), f"Props: {list(props_data.keys())}")
-            check("DB has Due_Date or date property", any("date" in p or "due" in p for p in prop_names), f"Props: {list(props_data.keys())}")
+            check("DB has Criterion (title) property",
+                  any("criterion" in p or "name" in p or "title" in p for p in prop_names),
+                  f"Props: {list(props_data.keys())}")
+            check("DB has Status property", any("status" in p for p in prop_names),
+                  f"Props: {list(props_data.keys())}")
+            check("DB has Owner property", any("owner" in p for p in prop_names),
+                  f"Props: {list(props_data.keys())}")
+            check("DB has Due_Date property",
+                  any("due" in p and "date" in p for p in prop_names) or any(p == "date" for p in prop_names),
+                  f"Props: {list(props_data.keys())}")
+            check("DB has Evidence property", any("evidence" in p for p in prop_names),
+                  f"Props: {list(props_data.keys())}")
 
             # Check pages
             cur.execute("SELECT id, properties FROM notion.pages WHERE parent::text LIKE %s AND archived = false",
                         (f'%{db_id}%',))
             pages = cur.fetchall()
-            check("Notion has 8 accreditation criterion pages", len(pages) >= 8, f"Got {len(pages)}")
+            check("Notion has exactly 8 accreditation criterion pages", len(pages) == 8, f"Got {len(pages)}")
 
             if pages:
                 # Check page content
@@ -237,13 +249,13 @@ def check_gcal(launch_time):
                 s = str(e[0]).lower()
                 if e[2] and "evidence" in s:
                     days_diff = (e[2].replace(tzinfo=None) - launch_dt).days
-                    check("Evidence deadline ~30 days from launch", 25 <= days_diff <= 35, f"Days: {days_diff}")
+                    check("Evidence deadline ~30 days from launch", 28 <= days_diff <= 32, f"Days: {days_diff}")
                 elif e[2] and "draft" in s:
                     days_diff = (e[2].replace(tzinfo=None) - launch_dt).days
-                    check("Draft due ~60 days from launch", 55 <= days_diff <= 65, f"Days: {days_diff}")
+                    check("Draft due ~60 days from launch", 58 <= days_diff <= 62, f"Days: {days_diff}")
                 elif e[2] and "final" in s and "submission" in s:
                     days_diff = (e[2].replace(tzinfo=None) - launch_dt).days
-                    check("Final submission ~90 days from launch", 85 <= days_diff <= 95, f"Days: {days_diff}")
+                    check("Final submission ~90 days from launch", 88 <= days_diff <= 92, f"Days: {days_diff}")
 
         cur.close()
         conn.close()
@@ -264,9 +276,13 @@ def check_scripts(agent_workspace):
         with open(metrics_path) as f:
             metrics = json.load(f)
         check("Metrics has avg_gpa", "avg_gpa" in metrics, f"Keys: {list(metrics.keys())}")
-        if "avg_gpa" in metrics:
+        # Record DB query failure as a check failure (no silent fallback)
+        check("DB expected-value query succeeded (avg_gpa)",
+              EXPECTED.get("db_query_ok") is True,
+              "DB query for expected avg_gpa failed; cannot validate metric")
+        if "avg_gpa" in metrics and EXPECTED.get("db_query_ok") and EXPECTED.get("avg_gpa") is not None:
             check("avg_gpa roughly correct",
-                  num_close(metrics["avg_gpa"], EXPECTED["avg_gpa"], tol=3.0),
+                  num_close(metrics["avg_gpa"], EXPECTED["avg_gpa"], tol=1.0),
                   f"Got {metrics.get('avg_gpa')}, expected ~{EXPECTED['avg_gpa']:.1f}")
 
     # Check compliance_assessment.json
@@ -277,9 +293,21 @@ def check_scripts(agent_workspace):
             compliance = json.load(f)
         # Should be a list or dict with 8 criteria
         if isinstance(compliance, list):
-            check("Compliance has 8 entries", len(compliance) >= 8, f"Got {len(compliance)}")
+            check("Compliance has >= 8 entries", len(compliance) >= 8, f"Got {len(compliance)}")
         elif isinstance(compliance, dict):
-            check("Compliance has criteria data", len(compliance) >= 3, f"Keys: {list(compliance.keys())[:10]}")
+            # Common patterns: top-level is criteria_count or has 'criteria' key with list
+            criteria_list = None
+            for k in ["criteria", "items", "results", "assessments"]:
+                if k in compliance and isinstance(compliance[k], list):
+                    criteria_list = compliance[k]
+                    break
+            if criteria_list is not None:
+                check("Compliance dict has 'criteria' list with >= 8 items",
+                      len(criteria_list) >= 8, f"Got {len(criteria_list)}")
+            else:
+                # 8 criteria as keys
+                check("Compliance has >= 8 keys/criteria", len(compliance) >= 8,
+                      f"Keys: {list(compliance.keys())[:10]}")
 
     # Check accreditation_summary.txt
     summary_path = os.path.join(agent_workspace, "accreditation_summary.txt")
@@ -385,7 +413,8 @@ def main():
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
-    sys.exit(0 if accuracy >= 70 else 1)
+    # Strict gate: ALL checks must pass
+    sys.exit(0 if FAIL_COUNT == 0 else 1)
 
 
 if __name__ == "__main__":

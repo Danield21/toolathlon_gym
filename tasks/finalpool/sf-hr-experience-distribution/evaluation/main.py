@@ -3,6 +3,14 @@ import argparse
 import os
 import sys
 import openpyxl
+import psycopg2
+
+DB = {
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5432")),
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": "eigent", "password": "camel",
+}
 
 
 def num_close(a, b, tol=1.0):
@@ -14,6 +22,45 @@ def num_close(a, b, tol=1.0):
         return abs(float(a) - float(b)) <= tol
     except (TypeError, ValueError):
         return str(a).strip().lower() == str(b).strip().lower()
+
+
+def is_numeric(val):
+    """Check if a value can be parsed as float."""
+    if val is None:
+        return False
+    try:
+        # strip commas / currency
+        s = str(val).replace(",", "").replace("$", "").strip()
+        float(s)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def check_notion_page(errors_list):
+    """Verify Notion page titled 'HR Experience Distribution' exists with content."""
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, properties FROM notion.pages
+            WHERE archived = false
+              AND (properties::text ILIKE '%hr experience distribution%'
+                   OR properties::text ILIKE '%experience distribution%')
+        """)
+        rows = cur.fetchall()
+        if not rows:
+            errors_list.append("Notion page 'HR Experience Distribution' not found")
+            cur.close(); conn.close()
+            return
+        page_id = rows[0][0]
+        cur.execute("SELECT COUNT(*) FROM notion.blocks WHERE parent_id = %s", (page_id,))
+        block_count = cur.fetchone()[0]
+        if block_count < 1:
+            errors_list.append(f"Notion page has no body blocks (got {block_count})")
+        cur.close(); conn.close()
+    except Exception as e:
+        errors_list.append(f"Notion check error: {e}")
 
 
 def str_match(a, b):
@@ -83,12 +130,12 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 5):
-                    errors.append(f"{key}.Employee_Count: {a_row[1]} vs {g_row[1]} (tol=5)")
+                if not num_close(a_row[1], g_row[1], 0):  # exact employee count
+                    errors.append(f"{key}.Employee_Count: {a_row[1]} vs {g_row[1]} (exact)")
 
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 10.0):
-                    errors.append(f"{key}.Avg_Salary: {a_row[2]} vs {g_row[2]} (tol=10.0)")
+                if not num_close(a_row[2], g_row[2], 1.0):  # ±$1 due to rounding
+                    errors.append(f"{key}.Avg_Salary: {a_row[2]} vs {g_row[2]} (tol=1.0)")
 
             if len(a_row) > 3 and len(g_row) > 3:
                 if not num_close(a_row[3], g_row[3], 0.1):
@@ -134,8 +181,13 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not str_match(a_row[1], g_row[1]):
-                    errors.append(f"{key}.Value: '{a_row[1]}' vs '{g_row[1]}'")
+                # Use numeric compare when GT value is numeric, else string match
+                if is_numeric(g_row[1]):
+                    if not num_close(a_row[1], g_row[1], 0):  # exact integer count
+                        errors.append(f"{key}.Value: '{a_row[1]}' vs '{g_row[1]}' (numeric)")
+                else:
+                    if not str_match(a_row[1], g_row[1]):
+                        errors.append(f"{key}.Value: '{a_row[1]}' vs '{g_row[1]}' (string)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -145,6 +197,17 @@ def main():
             print(f"    PASS")
 
     
+
+    # Notion check
+    print(f"  Checking Notion page...")
+    notion_errors = []
+    check_notion_page(notion_errors)
+    all_errors.extend(notion_errors)
+    if notion_errors:
+        for e in notion_errors:
+            print(f"    {e}")
+    else:
+        print("    PASS")
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

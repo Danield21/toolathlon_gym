@@ -95,8 +95,21 @@ def main():
                     errors.append(f"{key}.Avg_Rating: {a_row[3]} vs {g_row[3]} (tol=0.1)")
 
             if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 5):
-                    errors.append(f"{key}.Employees: {a_row[4]} vs {g_row[4]} (tol=5)")
+                if not num_close(a_row[4], g_row[4], 1):
+                    errors.append(f"{key}.Employees: {a_row[4]} vs {g_row[4]} (tol=1)")
+
+        # Validate sort order: descending by Avg_Satisfaction
+        a_satisfaction = []
+        for r in a_data:
+            if r and r[0] is not None and len(r) > 1:
+                try:
+                    a_satisfaction.append(float(r[1]))
+                except (TypeError, ValueError):
+                    pass
+        if a_satisfaction:
+            sorted_desc = sorted(a_satisfaction, reverse=True)
+            if a_satisfaction != sorted_desc:
+                errors.append(f"Satisfaction Analysis not sorted by Avg_Satisfaction descending: {a_satisfaction}")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -110,6 +123,10 @@ def main():
     print(f"  Checking Summary...")
     a_rows = load_sheet_rows(agent_wb, "Summary")
     g_rows = load_sheet_rows(gt_wb, "Summary")
+    # Accept either of the top two raw-satisfaction departments for Happiest_Dept,
+    # since rounding to 2 decimals creates a near-tie between Finance and Sales.
+    HAPPIEST_ACCEPTED = {"finance", "sales"}
+    LEAST_HAPPY_ACCEPTED = {"r&d", "rd", "r and d", "r & d"}
     if a_rows is None:
         all_errors.append("Sheet 'Summary' not found in agent output")
     elif g_rows is None:
@@ -119,7 +136,7 @@ def main():
         errors = []
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
-        
+
         a_lookup = {}
         for row in a_data:
             if row and row[0] is not None:
@@ -132,10 +149,20 @@ def main():
             if a_row is None:
                 errors.append(f"Missing row: {g_row[0]}")
                 continue
-            
+
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 0.5):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=0.5)")
+                # Tightened: 0.1 for numeric averages; string fields use exact-set match
+                if key == "happiest_dept":
+                    av = str(a_row[1] or "").strip().lower()
+                    if av not in HAPPIEST_ACCEPTED:
+                        errors.append(f"{key}.Value: {a_row[1]} not in accepted set {HAPPIEST_ACCEPTED}")
+                elif key == "least_happy_dept":
+                    av = str(a_row[1] or "").strip().lower()
+                    if av not in LEAST_HAPPY_ACCEPTED:
+                        errors.append(f"{key}.Value: {a_row[1]} not in accepted set {LEAST_HAPPY_ACCEPTED}")
+                else:
+                    if not num_close(a_row[1], g_row[1], 0.1):
+                        errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=0.1)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -154,12 +181,21 @@ def main():
             _doc = _DocCheck(docx_path)
             _text = " ".join(p.text for p in _doc.paragraphs).lower()
             _headings = " ".join(p.text for p in _doc.paragraphs if p.style.name.startswith("Heading")).lower()
-            if len(_text.strip()) < 50:
-                all_errors.append("Satisfaction_Summary.docx has too little text content (< 50 chars)")
-            _kws = ["satisfaction", "summary"]
-            _missing = [k for k in _kws if k not in _text and k not in _headings]
-            if len(_missing) == len(_kws):
-                all_errors.append(f"Satisfaction_Summary.docx missing expected keywords: {_missing}")
+            # Tighter requirement: at least 200 chars and multiple topic keywords
+            if len(_text.strip()) < 200:
+                all_errors.append(f"Satisfaction_Summary.docx has too little text content (< 200 chars, got {len(_text.strip())})")
+            _required_kws = ["satisfaction"]
+            # Need at least 2 of these supporting topic words to demonstrate narrative depth
+            _supporting_kws = ["work-life", "work life", "balance", "department", "rating", "trend"]
+            _missing = [k for k in _required_kws if k not in _text and k not in _headings]
+            if _missing:
+                all_errors.append(f"Satisfaction_Summary.docx missing required keywords: {_missing}")
+            _support_hits = sum(1 for k in _supporting_kws if k in _text or k in _headings)
+            if _support_hits < 2:
+                all_errors.append(
+                    f"Satisfaction_Summary.docx narrative too shallow: only {_support_hits} of "
+                    f"{_supporting_kws} found (need at least 2)"
+                )
         except ImportError:
             if os.path.getsize(docx_path) < 100:
                 all_errors.append("Satisfaction_Summary.docx too small")

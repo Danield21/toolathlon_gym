@@ -69,13 +69,67 @@ def check_gsheet():
     has_summary = any("summary" in t.lower() for t in sheet_tabs)
     check("Has SLA_Compliance sheet", has_sla, f"Tabs: {sheet_tabs}")
     check("Has Summary sheet", has_summary, f"Tabs: {sheet_tabs}")
+    # Fetch Summary sheet cells if present and verify Best/Worst priority references
+    if has_summary:
+        cur.execute("""
+            SELECT c.value FROM gsheet.cells c
+            JOIN gsheet.sheets s ON c.spreadsheet_id = s.spreadsheet_id AND c.sheet_id = s.id
+            WHERE c.spreadsheet_id = %s AND s.title ILIKE '%%summary%%'
+        """, (ss_id,))
+        sum_cells = [str(r[0]).lower() for r in cur.fetchall() if r[0] is not None]
+        sum_text = " ".join(sum_cells)
+        # task.md: Best_Priority = priority with HIGHEST CSAT; Worst_SLA_Priority = priority with LOWEST compliance rate
+        # Dynamically compute from DB (with fallback constants)
+        try:
+            ck_conn = psycopg2.connect(**DB)
+            ck_cur = ck_conn.cursor()
+            ck_cur.execute('''
+                WITH m AS (
+                    SELECT LOWER("PRIORITY") AS priority, "RESPONSE_TIME_HOURS", "CUSTOMER_SATISFACTION"
+                    FROM sf_data."SUPPORT_CENTER__PUBLIC__TICKETS"
+                    WHERE "CUSTOMER_SATISFACTION" IS NOT NULL
+                )
+                SELECT priority,
+                       AVG("CUSTOMER_SATISFACTION") AS avg_csat,
+                       AVG(CASE
+                           WHEN (priority='high' AND "RESPONSE_TIME_HOURS"<=4) OR
+                                (priority='medium' AND "RESPONSE_TIME_HOURS"<=8) OR
+                                (priority='low' AND "RESPONSE_TIME_HOURS"<=24)
+                           THEN 100.0 ELSE 0.0 END) AS compliance_rate
+                FROM m GROUP BY priority
+            ''')
+            stats = {row[0]: (float(row[1]), float(row[2])) for row in ck_cur.fetchall()}
+            ck_cur.close(); ck_conn.close()
+            best_priority = max(stats, key=lambda p: round(stats[p][0], 2))
+            worst_sla_priority = min(stats, key=lambda p: stats[p][1])
+        except Exception as e:
+            # Fallback: based on SLA_DATA constants
+            stats = {k: (v['csat'], v['rate']) for k, v in SLA_DATA.items()}
+            best_priority = max(stats, key=lambda p: stats[p][0])
+            worst_sla_priority = min(stats, key=lambda p: stats[p][1])
+        # Tied CSAT (e.g., high and medium both 3.26): accept either of the top-tied priorities
+        top_csat = round(max(s[0] for s in stats.values()), 2)
+        best_candidates = [p for p, (c, _) in stats.items() if round(c, 2) == top_csat]
+        check(
+            f"Summary Best_Priority matches task.md rule (highest CSAT, one of {best_candidates})",
+            any(p in sum_text for p in best_candidates),
+            f"Summary: {sum_text[:200]}"
+        )
+        check(
+            f"Summary Worst_SLA_Priority matches task.md rule (lowest compliance rate: {worst_sla_priority})",
+            worst_sla_priority in sum_text,
+            f"Summary: {sum_text[:200]}"
+        )
 
-    # Check cells contain priority data
+    # Fetch cells with row/col structure for SLA_Compliance sheet
     cur.execute("""
-        SELECT c.value FROM gsheet.cells c
+        SELECT s.title, c.row_index, c.col_index, c.value
+        FROM gsheet.cells c
+        JOIN gsheet.sheets s ON c.spreadsheet_id = s.spreadsheet_id AND c.sheet_id = s.id
         WHERE c.spreadsheet_id = %s
     """, (ss_id,))
-    cells = [str(r[0]) for r in cur.fetchall() if r[0] is not None]
+    all_cells = cur.fetchall()
+    cells = [str(r[3]) for r in all_cells if r[3] is not None]
     all_vals = " ".join(cells).lower()
 
     check("Sheet contains 'High' priority data", "high" in all_vals, "Not found")
@@ -85,6 +139,29 @@ def check_gsheet():
     # Check numeric compliance data appears
     check("Sheet contains ticket counts", any(str(v) in all_vals for v in ["6466", "15774", "9348"]),
           "Ticket counts not found")
+
+    # Structural validation: each priority row should have compliance rate close to SLA_DATA
+    sla_rows = {}
+    for title, row_idx, col_idx, value in all_cells:
+        if title and "sla" in title.lower() and value is not None:
+            sla_rows.setdefault(row_idx, {})[col_idx] = value
+    matched_pairs = 0
+    for row_idx, cols in sla_rows.items():
+        row_text = " ".join(str(v).lower() for v in cols.values() if v is not None)
+        for prio, info in SLA_DATA.items():
+            if prio in row_text:
+                # Look for the compliance rate in the row
+                for v in cols.values():
+                    try:
+                        if abs(float(v) - info["rate"]) <= 1.0:
+                            matched_pairs += 1
+                            break
+                    except (TypeError, ValueError):
+                        continue
+                break
+    check("SLA_Compliance sheet rows match expected rates (>=2 of 3 priorities)",
+          matched_pairs >= 2,
+          f"Matched {matched_pairs}/3 priority-rate pairs")
 
     cur.close()
     conn.close()
@@ -108,6 +185,21 @@ def check_gform():
         cur.execute("SELECT COUNT(*) FROM gform.questions WHERE form_id = %s", (form_id,))
         q_count = cur.fetchone()[0]
         check("Form has 4 questions", q_count == 4, f"Got {q_count}")
+        # Check that at least one question has Yes/No/Partially choice options
+        cur.execute("""
+            SELECT q.id, q.question_type, q.config
+            FROM gform.questions q
+            WHERE q.form_id = %s
+        """, (form_id,))
+        questions = cur.fetchall()
+        found_yes_no_part = False
+        for q_id, q_type, config in questions:
+            choices_str = str(config).lower() if config is not None else ""
+            if "yes" in choices_str and "no" in choices_str and ("partial" in choices_str or "partly" in choices_str):
+                found_yes_no_part = True
+                break
+        check("Form has question with Yes/No/Partially options", found_yes_no_part,
+              "No question found with Yes/No/Partially choices")
 
     cur.close()
     conn.close()
@@ -137,6 +229,11 @@ def check_email():
         check("Email body mentions SLA or compliance",
               any(kw in body for kw in ["sla", "compliance", "csat", "satisfaction", "high", "medium", "low"]),
               "Body missing key terms")
+        # At least one specific SLA rate should be referenced
+        rate_strings = [f"{info['rate']:.1f}" for info in SLA_DATA.values()] + [f"{info['rate']:.2f}" for info in SLA_DATA.values()]
+        check("Email body mentions at least one SLA rate value",
+              any(r in body for r in rate_strings),
+              f"Expected one of rates: {rate_strings}")
 
     cur.close()
     conn.close()

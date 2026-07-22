@@ -26,7 +26,7 @@ DB_CONFIG = {
 EXPECTED_AVERAGES = {
     "leadership": 3.5,
     "workload": 3.5,
-    "communication": 3.6,
+    "communication": 3.625,
     "growth": 3.5,
 }
 
@@ -87,15 +87,15 @@ def check_excel(agent_workspace):
     if ws_data:
         data_rows = list(ws_data.iter_rows(min_row=2, values_only=True))
         data_rows = [r for r in data_rows if r and r[0] is not None]
-        check("Survey Data has 10 rows", len(data_rows) == 10,
-              f"Found {len(data_rows)} data rows")
+        check("Survey Data has exactly 8 rows", len(data_rows) == 8,
+              f"Found {len(data_rows)} data rows (expected 8)")
 
         all_names = " ".join(str(r[0]).lower() for r in data_rows if r and r[0])
-        expected_names = ["alice", "bob", "carol", "david", "eva", "frank", "grace", "henry", "irene", "jack"]
+        expected_names = ["alice", "bob", "carol", "david", "eva", "frank", "grace", "henry"]
         names_found = sum(1 for n in expected_names if n in all_names)
-        check("At least 6 of 8 respondent names present",
-              names_found >= 6,
-              f"Found {names_found}/8 names")
+        check("All 8 respondent names present",
+              names_found == 8,
+              f"Found {names_found}/8 names: {sorted([n for n in expected_names if n in all_names])}")
 
     has_summary_sheet = any("summary" in s or "statistic" in s or "average" in s for s in sheet_names_lower)
     check("Has Summary Statistics sheet", has_summary_sheet,
@@ -109,20 +109,31 @@ def check_excel(agent_workspace):
             break
 
     if ws_summary:
-        all_values = []
+        # Collect all rows as text+number pairs so we can verify each
+        # dimension's average is reported in the same row as its label.
+        rows_text = []
         for row in ws_summary.iter_rows(values_only=True):
+            text_cells = []
+            num_cells = []
             for cell in row:
-                if cell is not None:
-                    try:
-                        all_values.append(float(cell))
-                    except (TypeError, ValueError):
-                        pass
+                if cell is None:
+                    continue
+                try:
+                    num_cells.append(float(cell))
+                except (TypeError, ValueError):
+                    text_cells.append(str(cell).lower())
+            rows_text.append((" ".join(text_cells), num_cells))
 
         for dimension, expected_avg in EXPECTED_AVERAGES.items():
-            found = any(num_close(v, expected_avg, 0.2) for v in all_values)
-            check(f"Average {dimension} ~{expected_avg}",
-                  found,
-                  f"Expected {expected_avg}, numeric values: {[v for v in all_values if abs(v - expected_avg) < 1][:5]}")
+            # Look for a row that mentions this dimension AND has the expected
+            # numeric average within tight tolerance (0.05).
+            found_labeled = any(
+                dimension in txt and any(num_close(v, expected_avg, 0.05) for v in nums)
+                for txt, nums in rows_text
+            )
+            check(f"Average {dimension} ~{expected_avg} reported with label",
+                  found_labeled,
+                  f"Expected {expected_avg} alongside '{dimension}'; rows: {rows_text[:6]}")
 
 
 def check_pptx(agent_workspace):
@@ -162,8 +173,8 @@ def check_pptx(agent_workspace):
                 for para in shape.text_frame.paragraphs:
                     first_text += para.text + " "
         first_lower = first_text.lower()
-        check("Title slide mentions engineering or quarterly or report",
-              "engineering" in first_lower or "quarterly" in first_lower or "report" in first_lower,
+        check("Title slide mentions 'engineering' AND 'quarterly report'",
+              "engineering" in first_lower and ("quarterly" in first_lower and "report" in first_lower),
               f"First slide text: {first_text[:150]}")
 
     project_names = ["alpha", "beta", "gamma", "delta", "epsilon"]
@@ -237,11 +248,19 @@ def check_emails():
               dims_mentioned >= 3,
               f"Found {dims_mentioned}/4 dimensions in email body")
 
-        has_scores = any(str(v) in body_lower or f"{v:.1f}" in body_lower
-                        for v in EXPECTED_AVERAGES.values())
-        check("Email mentions average scores",
-              has_scores or "3.5" in body_lower or "3.625" in body_lower or "3.63" in body_lower,
-              "No average scores found in email body")
+        # Require at least 3 of the 4 dimension averages appear (formatted as
+        # either '3.5', '3.50', or '3.500' — match the value robustly).
+        score_hits = 0
+        for v in EXPECTED_AVERAGES.values():
+            patterns = [f"{v:.1f}", f"{v:.2f}", f"{v:.3f}"]
+            # 3.5 will appear in many forms; 3.625 is precise so include 3.6 too
+            if abs(v - 3.625) < 0.01:
+                patterns.extend(["3.625", "3.63", "3.6"])
+            if any(p in body_lower for p in patterns):
+                score_hits += 1
+        check("Email mentions at least 3 of 4 dimension averages",
+              score_hits >= 3,
+              f"Found {score_hits}/4 dimension averages in email body")
 
         project_mentions = sum(1 for p in ["alpha", "beta", "gamma", "delta", "epsilon"]
                              if p in body_lower)
@@ -270,18 +289,19 @@ def main():
     print(f"  Failed: {FAIL_COUNT}")
     print(f"  Pass Rate: {pass_rate:.1%}")
 
+    success = (FAIL_COUNT == 0 and PASS_COUNT > 0)
     result = {
         "passed": PASS_COUNT,
         "failed": FAIL_COUNT,
         "pass_rate": round(pass_rate, 3),
-        "success": pass_rate >= 0.7,
+        "success": success,
     }
 
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    sys.exit(0 if pass_rate >= 0.7 else 1)
+    sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":

@@ -45,7 +45,7 @@ TARGET_PRICES = {
     'XOM': 115,
 }
 
-DB_CONFIG = dict(host=os.environ.get('PGHOST', 'localhost'), port=5432, database='toolathlon_gym', user='postgres', password='postgres')
+DB_CONFIG = dict(host=os.environ.get('PGHOST', 'localhost'), port=5432, database='toolathlon_gym', user='eigent', password='camel')
 
 
 def _str_match(a, b):
@@ -227,8 +227,20 @@ def _check_against_db(agent_wb, expected):
                 try:
                     gt_num = float(gt_val)
                     agent_num = float(agent_val)
-                    if abs(gt_num - agent_num) > 1.0:
-                        col_name = expected_headers[col_idx - 1]
+                    col_name = expected_headers[col_idx - 1]
+                    # Tighter tolerances as suggested by QA review:
+                    # price columns -> 0.05, alpha -> 0.5, target -> 0.5
+                    tol_map = {
+                        'Price_1Y_Ago': 0.05,
+                        'Current_Price': 0.05,
+                        'Target_Price': 0.5,
+                        'Return_Pct': 0.5,
+                        'Benchmark_Return_Pct': 0.01,
+                        'Alpha': 0.5,
+                        'Upside_Pct': 0.5,
+                    }
+                    tol = tol_map.get(col_name, 1.0)
+                    if abs(gt_num - agent_num) > tol:
                         return False, f"Performance mismatch at row {row_idx}, col {col_name}: expected {gt_num}, got {agent_num}"
                 except (TypeError, ValueError):
                     col_name = expected_headers[col_idx - 1]
@@ -289,7 +301,16 @@ def _check_against_db(agent_wb, expected):
             try:
                 gt_num = float(gt_value)
                 agent_num = float(agent_value)
-                if abs(gt_num - agent_num) > 1.0:
+                # Avg_Alpha needs tight tolerance per QA review (0.1)
+                gt_label_l = str(gt_label).lower()
+                if gt_label_l == 'avg_alpha':
+                    sum_tol = 0.1
+                elif 'above' in gt_label_l or 'below' in gt_label_l:
+                    # integer counts: exact match
+                    sum_tol = 0.0
+                else:
+                    sum_tol = 1.0
+                if abs(gt_num - agent_num) > sum_tol:
                     return False, f"Summary value mismatch for {gt_label}: expected {gt_num}, got {agent_num}"
             except (TypeError, ValueError):
                 if not _str_match(gt_value, agent_value):
@@ -335,8 +356,20 @@ def _check_against_gt(agent_wb, gt_wb):
                 try:
                     gt_num = float(gt_val)
                     agent_num = float(agent_val)
-                    if abs(gt_num - agent_num) > 1.0:
-                        col_name = gt_headers[col_idx - 1]
+                    col_name = gt_headers[col_idx - 1]
+                    # Tighter tolerances as suggested by QA review:
+                    # price columns -> 0.05, alpha -> 0.5, target -> 0.5
+                    tol_map = {
+                        'Price_1Y_Ago': 0.05,
+                        'Current_Price': 0.05,
+                        'Target_Price': 0.5,
+                        'Return_Pct': 0.5,
+                        'Benchmark_Return_Pct': 0.01,
+                        'Alpha': 0.5,
+                        'Upside_Pct': 0.5,
+                    }
+                    tol = tol_map.get(col_name, 1.0)
+                    if abs(gt_num - agent_num) > tol:
                         return False, f"Performance mismatch at row {row_idx}, col {col_name}: expected {gt_num}, got {agent_num}"
                 except (TypeError, ValueError):
                     col_name = gt_headers[col_idx - 1]
@@ -399,7 +432,16 @@ def _check_against_gt(agent_wb, gt_wb):
             try:
                 gt_num = float(gt_value)
                 agent_num = float(agent_value)
-                if abs(gt_num - agent_num) > 1.0:
+                # Avg_Alpha needs tight tolerance per QA review (0.1)
+                gt_label_l = str(gt_label).lower()
+                if gt_label_l == 'avg_alpha':
+                    sum_tol = 0.1
+                elif 'above' in gt_label_l or 'below' in gt_label_l:
+                    # integer counts: exact match
+                    sum_tol = 0.0
+                else:
+                    sum_tol = 1.0
+                if abs(gt_num - agent_num) > sum_tol:
                     return False, f"Summary value mismatch for {gt_label}: expected {gt_num}, got {agent_num}"
             except (TypeError, ValueError):
                 if not _str_match(gt_value, agent_value):

@@ -13,11 +13,12 @@ This script:
 
 import os
 import argparse
+import json
 import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -45,6 +46,68 @@ def clear_notion(cur):
     print("[preprocess] Notion data cleared.")
 
 
+def inject_noise_emails(cur):
+    """Insert unrelated inbound emails to test agent filtering."""
+    print("[preprocess] Injecting noise emails...")
+    noise = [
+        (
+            "Q3 Marketing Campaign Metrics",
+            "marketing-analytics@mcp.com",
+            '["ops-manager@mcp.com"]',
+            "FYI on Q3 metrics - no action needed.",
+        ),
+        (
+            "Reminder: Annual Security Training",
+            "security@mcp.com",
+            '["ops-manager@mcp.com"]',
+            "Please complete the annual security training module by month end.",
+        ),
+        (
+            "Supplier Trade Show Invitation",
+            "events@partners.com",
+            '["ops-manager@mcp.com"]',
+            "You are invited to the annual trade show. Unrelated to restock requests.",
+        ),
+    ]
+    for subj, from_addr, to_addr, body in noise:
+        cur.execute(
+            "INSERT INTO email.messages (folder_id, subject, from_addr, to_addr, body_text) "
+            "VALUES (%s, %s, %s, %s::jsonb, %s)",
+            (3100, subj, from_addr, to_addr, body),
+        )
+    print(f"[preprocess] Injected {len(noise)} noise emails.")
+
+
+def inject_noise_notion(cur):
+    """Insert unrelated Notion pages to test agent filtering.
+
+    Only inserts pages (no blocks) - simple noise pages unrelated to Q4 review.
+    """
+    print("[preprocess] Injecting noise Notion pages...")
+    import uuid
+
+    def make_title_prop(text):
+        return json.dumps({
+            "title": {
+                "title": [
+                    {"type": "text", "text": {"content": text}}
+                ]
+            }
+        })
+
+    noise_titles = [
+        "Team Offsite Planning 2026",
+        "Onboarding Docs (Draft)",
+        "Weekly Standup Notes - Week 10",
+    ]
+    for t in noise_titles:
+        cur.execute(
+            "INSERT INTO notion.pages (id, properties, archived) VALUES (%s, %s::jsonb, false)",
+            (str(uuid.uuid4()), make_title_prop(t)),
+        )
+    print(f"[preprocess] Injected {len(noise_titles)} noise Notion pages.")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -57,6 +120,8 @@ def main():
     try:
         clear_emails(cur)
         clear_notion(cur)
+        inject_noise_emails(cur)
+        inject_noise_notion(cur)
         conn.commit()
         print("[preprocess] Done.")
     except Exception as e:

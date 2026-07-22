@@ -92,28 +92,73 @@ def check_word_doc(agent_workspace):
 
     check("Table has 12 month rows", len(data_rows) == 12, f"Got {len(data_rows)} rows")
 
-    # Verify revenue values for each month
+    # Verify revenue and related metrics for each month
     total_revenue = sum(float(r[1]) for r in expected)
     matched_months = 0
+    matched_orders = 0
+    matched_customers = 0
     for exp_row in expected:
         month_str = exp_row[0].strftime("%Y-%m")
         exp_revenue = float(exp_row[1])
+        exp_orders = int(exp_row[2]) if exp_row[2] is not None else None
+        exp_customers = int(exp_row[3]) if exp_row[3] is not None else None
         found = False
+        orders_ok = False
+        customers_ok = False
         for dr in data_rows:
             if month_str in dr[0]:
-                # Try to extract revenue value
-                rev_text = dr[1].replace("$", "").replace(",", "").strip()
-                try:
-                    if num_close(float(rev_text), exp_revenue, 100.0):
-                        found = True
-                except ValueError:
-                    pass
+                def parse_num(txt):
+                    try:
+                        return float(str(txt).replace("$","").replace(",","").strip())
+                    except Exception:
+                        return None
+                rev_val = parse_num(dr[1]) if len(dr) > 1 else None
+                if rev_val is not None and num_close(rev_val, exp_revenue, max(100.0, exp_revenue*0.01)):
+                    found = True
+                # Check order_count (col 2) & unique_customers (col 3)
+                if len(dr) > 2 and exp_orders is not None:
+                    v = parse_num(dr[2])
+                    if v is not None and abs(v - exp_orders) <= max(1, exp_orders*0.02):
+                        orders_ok = True
+                if len(dr) > 3 and exp_customers is not None:
+                    v = parse_num(dr[3])
+                    if v is not None and abs(v - exp_customers) <= max(1, exp_customers*0.02):
+                        customers_ok = True
                 break
         if found:
             matched_months += 1
+        if orders_ok:
+            matched_orders += 1
+        if customers_ok:
+            matched_customers += 1
 
-    check("At least 10/12 months have correct revenue", matched_months >= 10,
+    # Stricter: all 12 months must match
+    check("All 12 months have correct revenue", matched_months == 12,
           f"Matched {matched_months}/12")
+    check("All 12 months have correct order_count", matched_orders == 12,
+          f"Matched {matched_orders}/12")
+    check("All 12 months have correct unique_customers", matched_customers == 12,
+          f"Matched {matched_customers}/12")
+
+    # Avg_Order_Value per month (column 4 in table)
+    matched_aov = 0
+    for exp_row in expected:
+        month_str = exp_row[0].strftime("%Y-%m")
+        exp_aov = float(exp_row[4]) if exp_row[4] is not None else None
+        for dr in data_rows:
+            if month_str in dr[0]:
+                def parse_num(txt):
+                    try:
+                        return float(str(txt).replace("$","").replace(",","").strip())
+                    except Exception:
+                        return None
+                if len(dr) > 4 and exp_aov is not None:
+                    v = parse_num(dr[4])
+                    if v is not None and abs(v - exp_aov) <= 1.0:
+                        matched_aov += 1
+                break
+    check("All 12 months have correct avg_order_value", matched_aov == 12,
+          f"Matched {matched_aov}/12")
 
     # Check summary section
     full_text = " ".join(p.text for p in doc.paragraphs)
@@ -122,8 +167,61 @@ def check_word_doc(agent_workspace):
           "Expected total revenue in summary")
 
     # Check H1/H2 analysis
-    has_h1h2 = "h1" in full_text.lower() or "first half" in full_text.lower()
+    full_lower = full_text.lower()
+    has_h1h2 = "h1" in full_lower or "first half" in full_lower or "second half" in full_lower
     check("Document has H1/H2 trend analysis", has_h1h2)
+
+    # Check Best/Worst month (strict: must mention YYYY-MM or full month name)
+    if expected:
+        best = max(expected, key=lambda r: float(r[1]))
+        worst = min(expected, key=lambda r: float(r[1]))
+        best_month = best[0].strftime("%Y-%m")
+        worst_month = worst[0].strftime("%Y-%m")
+        best_name = best[0].strftime("%B").lower()
+        worst_name = worst[0].strftime("%B").lower()
+        best_hit = (best_month in full_text) or (best_name in full_lower)
+        worst_hit = (worst_month in full_text) or (worst_name in full_lower)
+        check(f"Document mentions best month ({best_month}/{best_name})", best_hit,
+              f"Expected {best_month} or {best_name}")
+        check(f"Document mentions worst month ({worst_month}/{worst_name})", worst_hit,
+              f"Expected {worst_month} or {worst_name}")
+
+        # Check Best/Worst revenue values present
+        best_rev = float(best[1])
+        worst_rev = float(worst[1])
+        import re
+        nums_in_text = []
+        for n in re.findall(r"\$?([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?)", full_text):
+            try:
+                nums_in_text.append(float(n.replace(",", "")))
+            except Exception:
+                pass
+        check(f"Document mentions best revenue (~${best_rev:,.2f})",
+              any(abs(v - best_rev) < max(10.0, best_rev * 0.005) for v in nums_in_text),
+              f"Expected best revenue {best_rev}")
+        check(f"Document mentions worst revenue (~${worst_rev:,.2f})",
+              any(abs(v - worst_rev) < max(10.0, worst_rev * 0.005) for v in nums_in_text),
+              f"Expected worst revenue {worst_rev}")
+
+        # Check H1/H2 revenue totals + difference + percentage
+        h1_revenue = sum(float(r[1]) for r in expected[:6])
+        h2_revenue = sum(float(r[1]) for r in expected[6:])
+        diff = h2_revenue - h1_revenue
+        pct = round(abs(diff) / h1_revenue * 100, 1) if h1_revenue else 0.0
+        check(f"Document mentions H1 revenue (~${h1_revenue:,.2f})",
+              any(abs(v - h1_revenue) < max(50.0, h1_revenue * 0.01) for v in nums_in_text),
+              f"Expected H1 revenue {h1_revenue}")
+        check(f"Document mentions H2 revenue (~${h2_revenue:,.2f})",
+              any(abs(v - h2_revenue) < max(50.0, h2_revenue * 0.01) for v in nums_in_text),
+              f"Expected H2 revenue {h2_revenue}")
+        # diff
+        check(f"Document mentions H1/H2 revenue difference (~${abs(diff):,.2f})",
+              any(abs(v - abs(diff)) < max(50.0, abs(diff) * 0.02) for v in nums_in_text),
+              f"Expected diff ~{abs(diff)}")
+        # pct
+        check(f"Document mentions H1/H2 pct change (~{pct}%)",
+              any(abs(v - pct) < 0.3 for v in nums_in_text) or f"{pct}" in full_text,
+              f"Expected pct {pct}")
 
     return True
 
@@ -162,10 +260,43 @@ def check_pdf(agent_workspace):
     text_lower = text.lower()
     check("PDF contains Sales Trend title", "sales trend" in text_lower or "sales" in text_lower)
 
-    # Check some month data appears
-    months_found = sum(1 for m in ["2025-01", "2025-06", "2025-12"] if m in text)
-    check("PDF contains month data", months_found >= 2,
-          f"Found {months_found}/3 sample months")
+    # Check all months appear (YYYY-MM, allow YYYY-MM or full name)
+    expected = get_expected_data()
+    months_expected = [r[0].strftime("%Y-%m") for r in expected]
+    month_names = [r[0].strftime("%B").lower() for r in expected]
+    months_found = sum(1 for m, n in zip(months_expected, month_names)
+                       if m in text or n in text_lower)
+    check("PDF contains at least 10/12 months", months_found >= 10,
+          f"Found {months_found}/12 months")
+
+    # Check revenue numbers for a sample (best and worst)
+    best = max(expected, key=lambda r: float(r[1]))
+    worst = min(expected, key=lambda r: float(r[1]))
+    import re
+    nums_in_text = []
+    for n in re.findall(r"\$?([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]+)?)", text):
+        try:
+            nums_in_text.append(float(n.replace(",", "")))
+        except Exception:
+            pass
+    best_rev = float(best[1])
+    worst_rev = float(worst[1])
+    check(f"PDF mentions best revenue (~${best_rev:,.2f})",
+          any(abs(v - best_rev) < max(10.0, best_rev * 0.01) for v in nums_in_text),
+          f"Expected best revenue {best_rev}")
+    check(f"PDF mentions worst revenue (~${worst_rev:,.2f})",
+          any(abs(v - worst_rev) < max(10.0, worst_rev * 0.01) for v in nums_in_text),
+          f"Expected worst revenue {worst_rev}")
+
+    # H1/H2 totals
+    h1_revenue = sum(float(r[1]) for r in expected[:6])
+    h2_revenue = sum(float(r[1]) for r in expected[6:])
+    check(f"PDF mentions H1 revenue (~${h1_revenue:,.2f})",
+          any(abs(v - h1_revenue) < max(50.0, h1_revenue * 0.01) for v in nums_in_text),
+          f"Expected H1 revenue {h1_revenue}")
+    check(f"PDF mentions H2 revenue (~${h2_revenue:,.2f})",
+          any(abs(v - h2_revenue) < max(50.0, h2_revenue * 0.01) for v in nums_in_text),
+          f"Expected H2 revenue {h2_revenue}")
 
     return True
 

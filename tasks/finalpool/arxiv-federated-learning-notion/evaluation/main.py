@@ -58,29 +58,32 @@ def check_notion():
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
 
-        # Check for page with "Federated Learning Research Hub" title
+        # Check for page with "Federated Learning Research Hub" title.
+        # Tighten: title must contain BOTH "federated" AND ("research hub"
+        # or "hub"). The bare-'federated' fallback would let any FL-related
+        # title pass.
         cur.execute("SELECT id, properties FROM notion.pages")
         pages = cur.fetchall()
 
         hub_page = None
         for pid, props in pages:
-            props_str = json.dumps(props).lower() if props else ""
-            if "federated learning" in props_str and "research hub" in props_str:
-                hub_page = pid
-                break
-            if "federated" in props_str and "hub" in props_str:
+            # Extract title text (not all properties text) so a database row
+            # whose 'Title' property happens to mention 'hub' doesn't match.
+            title_text = ""
+            if isinstance(props, dict):
+                title_obj = props.get("title", {})
+                if isinstance(title_obj, dict):
+                    title_list = title_obj.get("title", [])
+                    if isinstance(title_list, list):
+                        for t in title_list:
+                            if isinstance(t, dict):
+                                title_text += t.get("text", {}).get("content", "")
+            tl = title_text.lower()
+            if "federated" in tl and "hub" in tl:
                 hub_page = pid
                 break
 
-        if hub_page is None:
-            # Broader search
-            for pid, props in pages:
-                props_str = json.dumps(props).lower() if props else ""
-                if "federated" in props_str:
-                    hub_page = pid
-                    break
-
-        record("Notion page 'Federated Learning Research Hub' exists",
+        record("Notion page 'Federated Learning Research Hub' exists (title contains 'federated' AND 'hub')",
                hub_page is not None,
                f"Found {len(pages)} pages, none matching")
 
@@ -178,6 +181,8 @@ def check_excel(agent_workspace):
 
     title_col = find_col(header, ["Title", "title"])
     id_col = find_col(header, ["Paper_ID", "Paper ID", "ID", "paper_id"])
+    authors_col = find_col(header, ["Authors", "Author", "authors"])
+    year_col = find_col(header, ["Year", "year"])
     abstract_len_col = find_col(header, ["Abstract_Length", "abstract_length", "Abstract Length"])
 
     if title_col is not None:
@@ -191,9 +196,33 @@ def check_excel(agent_workspace):
                         for t in found_titles)
             record(f"Has paper: {expected_title[:50]}...", found)
 
+    # Verify NO non-FL papers (e.g. Dropout, BatchNorm) leaked in.
+    if id_col is not None:
+        found_ids = set()
+        for row in data_rows:
+            if id_col < len(row) and row[id_col]:
+                found_ids.add(str(row[id_col]).strip())
+        leak = found_ids & NON_FL_IDS
+        record("No non-FL papers leaked into Paper Details", len(leak) == 0,
+               f"Leaked: {sorted(leak)}; All IDs: {sorted(found_ids)}")
+
     # Check Abstract_Length column exists
     record("Abstract_Length column exists", abstract_len_col is not None,
            f"Header: {header}")
+    record("Authors column exists", authors_col is not None,
+           f"Header: {header}")
+    record("Year column exists", year_col is not None,
+           f"Header: {header}")
+
+    # Verify Authors values are non-empty and contain at least one comma or full name.
+    if authors_col is not None:
+        bad_authors = 0
+        for row in data_rows:
+            v = row[authors_col] if authors_col < len(row) else None
+            if v is None or len(str(v).strip()) < 4:
+                bad_authors += 1
+        record("All rows have non-empty Authors", bad_authors == 0,
+               f"{bad_authors} rows missing/short authors")
 
     # Check Summary sheet
     summary_rows = load_sheet_rows(wb, "Summary")
@@ -217,10 +246,15 @@ def check_excel(agent_workspace):
             total_key = k
             break
     if total_key:
-        # Allow 4-6 depending on what agent finds
+        # Preprocess injects exactly 4 FL papers and clears all others.
+        # No 5th FL paper exists in the seeded database.
         val = metrics[total_key]
-        ok = val is not None and 4 <= int(float(val)) <= 6
-        record("Summary: Total_Papers between 4-6", ok, f"Got {val}")
+        ok = False
+        try:
+            ok = val is not None and int(float(val)) == 4
+        except (TypeError, ValueError):
+            ok = False
+        record("Summary: Total_Papers == 4", ok, f"Got {val}")
     else:
         record("Summary: Total_Papers exists", False, f"Keys: {list(metrics.keys())}")
 
@@ -232,8 +266,14 @@ def check_excel(agent_workspace):
             break
     if avg_key:
         val = metrics[avg_key]
-        ok = val is not None and float(val) > 100
-        record("Summary: Avg_Abstract_Length > 100", ok, f"Got {val}")
+        # GT computes avg = 804 over 4 FL papers. Allow ±20% tolerance to permit
+        # slight differences if agent picks 5-6 papers but rejects bogus values.
+        ok = False
+        try:
+            ok = val is not None and 600 <= float(val) <= 1100
+        except (TypeError, ValueError):
+            ok = False
+        record("Summary: Avg_Abstract_Length in [600,1100]", ok, f"Got {val}")
     else:
         record("Summary: Avg_Abstract_Length exists", False, f"Keys: {list(metrics.keys())}")
 

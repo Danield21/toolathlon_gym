@@ -139,8 +139,21 @@ def check_excel(agent_workspace, gt_dir):
     if a_sum:
         a_sum_data = {str(r[0]).strip().lower(): r[1] for r in a_sum[1:] if r and r[0]}
         tt = a_sum_data.get("total_tickets")
-        check("Summary Total_Tickets", num_close(tt, 31588, 50),
-              f"got {tt}, expected 31588")
+        # Dynamically compute expected total tickets
+        expected_tt = 31588
+        try:
+            conn_dy = psycopg2.connect(**DB)
+            cur_dy = conn_dy.cursor()
+            cur_dy.execute('SELECT COUNT(*) FROM sf_data."SUPPORT_CENTER__PUBLIC__TICKETS"')
+            r = cur_dy.fetchone()
+            if r and r[0] is not None:
+                expected_tt = int(r[0])
+            cur_dy.close()
+            conn_dy.close()
+        except Exception as e:
+            print(f"  WARN: dynamic query for total tickets failed: {e}")
+        check("Summary Total_Tickets", num_close(tt, expected_tt, max(50, expected_tt*0.005)),
+              f"got {tt}, expected ~{expected_tt}")
         ta = a_sum_data.get("total_agents")
         check("Summary Total_Agents", num_close(ta, 5, 0),
               f"got {ta}, expected 5")
@@ -179,8 +192,33 @@ def check_notion():
     # Check that agent names appear in page properties
     all_props_text = " ".join(str(p[1]) for p in pages).lower()
     found_agents = sum(1 for a in AGENT_NAMES if a.lower() in all_props_text)
-    check("Agent names found in Notion pages", found_agents >= 4,
+    check("All 5 agent names found in Notion pages", found_agents == 5,
           f"Found {found_agents}/5 agents")
+
+    # Verify DB schema has required properties
+    try:
+        db_props = dbs[0][2] if len(dbs[0]) > 2 else {}
+        if isinstance(db_props, str):
+            import json as _json
+            db_props = _json.loads(db_props)
+        prop_keys = [str(k).lower().replace("_", " ") for k in (db_props or {}).keys()]
+        has_tier = any("tier" in p for p in prop_keys)
+        has_freq = any("frequency" in p or "coaching" in p for p in prop_keys)
+        has_team = any("team" in p for p in prop_keys)
+        check("Notion DB has Tier property", has_tier, f"Props: {prop_keys}")
+        check("Notion DB has Coaching_Frequency property", has_freq, f"Props: {prop_keys}")
+        check("Notion DB has Team property", has_team, f"Props: {prop_keys}")
+    except Exception as e:
+        print(f"  WARN: DB properties check skipped: {e}")
+
+    # Reverse validation: noise pages should still exist (not deleted by agent)
+    noise_titles = ["Team Standup Notes", "Q1 OKR Tracker", "Holiday Schedule 2026",
+                    "Engineering Onboarding Checklist", "Product Roadmap Q2"]
+    cur.execute("SELECT properties::text FROM notion.pages WHERE archived = false")
+    all_pages_text = " ".join((r[0] or "") for r in cur.fetchall())
+    noise_preserved = sum(1 for t in noise_titles if t in all_pages_text)
+    check("Reverse: noise Notion pages preserved", noise_preserved >= 4,
+          f"Only {noise_preserved}/5 noise pages remain")
 
     cur.close()
     conn.close()
@@ -224,6 +262,15 @@ def check_gcal():
                     valid_duration += 1
         check("Coaching sessions are ~30 minutes", valid_duration >= 4,
               f"{valid_duration} events have 30-min duration")
+
+    # Reverse validation: noise GCal events preserved
+    noise_gcal = ["Weekly Team Sync", "Product Demo", "All Hands Meeting",
+                  "Quarterly Business Review", "Engineering Retrospective"]
+    cur.execute("SELECT summary FROM gcal.events")
+    all_sums = [(r[0] or "") for r in cur.fetchall()]
+    noise_kept = sum(1 for n in noise_gcal if any(n in s for s in all_sums))
+    check("Reverse: noise GCal events preserved", noise_kept >= 4,
+          f"Only {noise_kept}/5 noise events remain")
 
     cur.close()
     conn.close()

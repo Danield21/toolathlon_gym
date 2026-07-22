@@ -8,6 +8,6 @@ Create an Excel file called Quiz_Item_Analysis.xlsx with three sheets. The first
 
 Write a Word document called Quiz_Analysis_Report.docx with sections for Executive Summary, Methodology, Course-by-Course Findings covering each Fall 2014 course that has quizzes, Question Type Analysis breaking down performance by question type, Recommendations for improving quiz quality, and an Appendix.
 
-Schedule 7 quiz review sessions on the calendar, one for each Fall 2014 course. Each session should be 45 minutes long, scheduled during the week of March 16-20, 2026. Title each event Quiz Review - followed by the course name. Spread them across the week.
+Schedule 7 quiz review sessions on the calendar, one for each Fall 2014 course. Each session should be 45 minutes long, scheduled on weekdays during the week of March 16-20, 2026 (Monday through Friday). Title each event Quiz Review - followed by the course name. Spread them across the week so that no two sessions overlap: for example, at most two review sessions per weekday and ensure each session starts and ends within business hours (09:00-17:00 local time).
 
 Finally send an email to assessment_office@university.edu with a subject line about quiz item analysis findings and a body summarizing the overall results including how many courses had quizzes, the difficulty distribution, and quality ratings.

@@ -93,9 +93,11 @@ def check_excel(agent_workspace, groundtruth_workspace):
 
     if a_hist is not None:
         a_data = [r for r in a_hist[1:] if any(v is not None for v in r)]
-        record("Price History has at least 15 rows (trading days)",
-               len(a_data) >= 15,
+        record("Price History has at least 18 rows (trading days)",
+               len(a_data) >= 18,
                f"Found {len(a_data)} rows")
+        if len(a_data) < 18:
+            all_ok = False
 
         # Check headers
         if a_hist and len(a_hist) > 0:
@@ -137,21 +139,57 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 continue
             record(f"{sym} row exists", True)
 
-            # Latest price (col 1)
+            # Latest price (col 1) - tighten 5.0 -> 1.0
             if len(g_row) > 1 and len(a_row) > 1:
+                ok = num_close(a_row[1], g_row[1], 1.0)
                 record(f"{sym}: Latest_Price correct",
-                       num_close(a_row[1], g_row[1], 5.0),
-                       f"got {a_row[1]}, expected {g_row[1]}")
-            # Return_Pct (col 4, index 4)
+                       ok,
+                       f"got {a_row[1]}, expected {g_row[1]} (tol=1.0)")
+                if not ok:
+                    all_ok = False
+            # Month_Start_Price (col 2)
+            if len(g_row) > 2 and len(a_row) > 2:
+                ok = num_close(a_row[2], g_row[2], 1.0)
+                record(f"{sym}: Month_Start_Price correct", ok,
+                       f"got {a_row[2]}, expected {g_row[2]}")
+                if not ok:
+                    all_ok = False
+            # Price_Change (col 3)
+            if len(g_row) > 3 and len(a_row) > 3:
+                ok = num_close(a_row[3], g_row[3], 1.0)
+                record(f"{sym}: Price_Change correct", ok,
+                       f"got {a_row[3]}, expected {g_row[3]}")
+                if not ok:
+                    all_ok = False
+            # Return_Pct (col 4) - tighten 2.0 -> 0.5
             if len(g_row) > 4 and len(a_row) > 4:
+                ok = num_close(a_row[4], g_row[4], 0.5)
                 record(f"{sym}: Return_Pct correct",
-                       num_close(a_row[4], g_row[4], 2.0),
-                       f"got {a_row[4]}, expected {g_row[4]}")
-            # Volatility (col 7, index 7)
+                       ok,
+                       f"got {a_row[4]}, expected {g_row[4]} (tol=0.5)")
+                if not ok:
+                    all_ok = False
+            # Min_Price (col 5)
+            if len(g_row) > 5 and len(a_row) > 5:
+                ok = num_close(a_row[5], g_row[5], 1.0)
+                record(f"{sym}: Min_Price correct", ok,
+                       f"got {a_row[5]}, expected {g_row[5]}")
+                if not ok:
+                    all_ok = False
+            # Max_Price (col 6)
+            if len(g_row) > 6 and len(a_row) > 6:
+                ok = num_close(a_row[6], g_row[6], 1.0)
+                record(f"{sym}: Max_Price correct", ok,
+                       f"got {a_row[6]}, expected {g_row[6]}")
+                if not ok:
+                    all_ok = False
+            # Volatility (col 7) - REMOVED 'or True' bug; check value is positive numeric and matches GT
             if len(g_row) > 7 and len(a_row) > 7:
-                record(f"{sym}: Volatility_Score is numeric",
-                       a_row[7] is not None and str(a_row[7]).replace('.', '').replace('-', '').isdigit() or True,
-                       f"got {a_row[7]}")
+                ok = num_close(a_row[7], g_row[7], 1.0)
+                record(f"{sym}: Volatility_Score correct", ok,
+                       f"got {a_row[7]}, expected {g_row[7]} (tol=1.0)")
+                if not ok:
+                    all_ok = False
 
     return all_ok
 
@@ -176,23 +214,43 @@ def check_gcal():
     conn.close()
 
     print(f"[check_gcal] Found {len(events)} calendar events.")
-    record("At least 1 calendar event created", len(events) >= 1, f"Found {len(events)}")
 
+    # Tighten: title must contain ALL: 'monthly', 'investment', 'portfolio', 'review' (case-insensitive)
     portfolio_events = [e for e in events
-                        if e[0] and ("portfolio" in e[0].lower() or
-                                     "investment" in e[0].lower() or
-                                     "review" in e[0].lower())]
-    record("Investment/Portfolio review event found",
-           len(portfolio_events) >= 1,
+                        if e[0] and "monthly" in e[0].lower()
+                        and "investment" in e[0].lower()
+                        and "portfolio" in e[0].lower()
+                        and "review" in e[0].lower()]
+    ok_evt = len(portfolio_events) >= 1
+    record("Event titled 'Monthly Investment Portfolio Review' exists",
+           ok_evt,
            f"Events: {[e[0] for e in events[:5]]}")
 
-    # Check March 18 2026
-    march18_events = [e for e in events
-                      if e[1] and "2026-03-18" in str(e[1])]
-    record("Event on March 18 2026", len(march18_events) >= 1,
-           f"March 18 events: {[e[0] for e in march18_events]}")
+    if not ok_evt:
+        return False
 
-    return len(portfolio_events) >= 1
+    # Date 2026-03-18
+    ev = portfolio_events[0]
+    s = str(ev[1])
+    ok_date = "2026-03-18" in s
+    record("Event on 2026-03-18", ok_date, f"start: {s}")
+    # Time 10am-11am: hour 10 in local or 14/15 in UTC
+    ok_time = False
+    try:
+        if len(s) >= 13 and int(s[11:13]) in (10, 14, 15):
+            ok_time = True
+    except ValueError:
+        pass
+    record("Event starts at 10am (local) or UTC equivalent", ok_time, f"start: {s}")
+    # Duration 60 min
+    if ev[2] and ev[1]:
+        try:
+            dur = (ev[2] - ev[1]).total_seconds() / 60.0
+            ok_dur = abs(dur - 60) <= 5
+            record("Event duration is 60 minutes", ok_dur, f"got {dur} min")
+        except Exception:
+            pass
+    return ok_evt and ok_date and ok_time
 
 
 # ============================================================================
@@ -205,41 +263,51 @@ def check_emails():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
+    # Filter strictly by recipient analyst@investment.com (AND not OR)
     cur.execute("""
         SELECT subject, from_addr, to_addr, body_text
         FROM email.messages
+        WHERE to_addr::text ILIKE '%%analyst@investment.com%%'
     """)
-    all_emails = cur.fetchall()
+    target_emails = cur.fetchall()
     cur.close()
     conn.close()
 
-    print(f"[check_emails] Found {len(all_emails)} total emails.")
-    record("At least 1 email sent", len(all_emails) >= 1, f"Found {len(all_emails)}")
-
-    found_email = False
-    for subject, from_addr, to_addr, body_text in all_emails:
-        to_str = str(to_addr or "").lower()
-        subject_lower = (subject or "").lower()
-        if ("analyst@investment.com" in to_str or
-                "stock" in subject_lower or "performance" in subject_lower):
-            found_email = True
-            record("Email to analyst@investment.com found", True)
-
-            record("Email subject mentions stock or performance",
-                   "stock" in subject_lower or "performance" in subject_lower or "march" in subject_lower,
-                   f"Subject: {subject}")
-
-            body_lower = (body_text or "").lower()
-            record("Email body mentions stock symbols",
-                   any(s in body_lower for s in ["googl", "amzn", "jpm", "alphabet", "amazon"]),
-                   "Body missing stock symbols")
-            break
+    print(f"[check_emails] Found {len(target_emails)} emails to analyst@investment.com.")
+    found_email = len(target_emails) >= 1
+    record("Email sent to analyst@investment.com", found_email,
+           f"No email to analyst@investment.com found")
 
     if not found_email:
-        record("Stock performance email found", False,
-               f"Emails: {[(e[0], str(e[2])[:60]) for e in all_emails[:3]]}")
+        return False
 
-    return found_email
+    ok_subj = False
+    ok_body_sym = False
+    ok_body_perf = False
+    for subject, from_addr, to_addr, body_text in target_emails:
+        sl = (subject or "").lower()
+        bl = (body_text or "").lower()
+        # Subject must be 'Stock Performance Report March 2026'
+        if "stock performance report" in sl and "march 2026" in sl:
+            ok_subj = True
+        # Body should mention all 3 stock symbols (or names)
+        sym_count = sum(1 for s in ["googl", "amzn", "jpm", "alphabet", "amazon", "morgan"] if s in bl)
+        if sym_count >= 3:
+            ok_body_sym = True
+        # Body should mention best/worst with a return percentage near each
+        # (regex-based proximity to avoid bare-substring FP)
+        import re
+        # Match e.g. "best ... 12.3%" or "highest return: 12%"
+        best_pct = bool(re.search(r"(best|highest)[^\n]{0,120}\d+(?:\.\d+)?\s*%", bl))
+        worst_pct = bool(re.search(r"(worst|lowest)[^\n]{0,120}\d+(?:\.\d+)?\s*%", bl))
+        if best_pct and worst_pct:
+            ok_body_perf = True
+    record("Email subject 'Stock Performance Report March 2026'",
+           ok_subj, f"Subjects: {[e[0] for e in target_emails]}")
+    record("Email body mentions all 3 stock symbols", ok_body_sym)
+    record("Email body mentions best/worst + return percentage", ok_body_perf)
+
+    return ok_subj and ok_body_sym and ok_body_perf
 
 
 # ============================================================================
@@ -261,10 +329,17 @@ def check_word(agent_workspace):
         all_text = " ".join(p.text for p in doc.paragraphs).lower()
         record("Word doc has content", len(all_text.strip()) >= 100,
                f"Content length: {len(all_text.strip())}")
-        record("Word doc mentions stock analysis",
-               any(term in all_text for term in ["stock", "analysis", "googl", "amzn", "jpm", "alphabet", "amazon"]),
-               "Missing stock analysis content")
-        return True
+        # Heading 'Stock Comparison Analysis March 2026'
+        record("Word doc has heading 'Stock Comparison Analysis March 2026'",
+               "stock comparison analysis" in all_text and "march 2026" in all_text,
+               f"Sample: {all_text[:200]}")
+        # Should mention all 3 stocks
+        ok_3 = sum(1 for s in ["googl", "amzn", "jpm", "alphabet", "amazon", "morgan"] if s in all_text) >= 3
+        record("Word doc mentions all 3 stocks (GOOGL/AMZN/JPM)",
+               ok_3,
+               f"Sample: {all_text[:200]}")
+        return (ok_3 and "stock comparison analysis" in all_text
+                and "march 2026" in all_text)
     except ImportError:
         size = os.path.getsize(docx_path)
         record("Word file has content (>2KB)", size > 2000, f"Size: {size} bytes")

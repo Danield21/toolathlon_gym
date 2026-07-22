@@ -14,8 +14,27 @@ DB_CONFIG = {
     "password": "camel",
 }
 
-# Course codes that should be mentioned in the email body
-EXPECTED_COURSE_CODES = [
+def _fetch_fall2013_codes():
+    """Dynamically fetch course codes ending with 2013J from Canvas DB."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT course_code FROM canvas.courses
+            WHERE course_code ILIKE '%%2013J'
+            ORDER BY course_code
+        """)
+        codes = [r[0] for r in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return codes
+    except Exception as e:
+        print(f"[check_email] Could not fetch course codes dynamically: {e}")
+        return []
+
+
+# Course codes that should be mentioned in the email body (dynamic with fallback)
+EXPECTED_COURSE_CODES = _fetch_fall2013_codes() or [
     "AAA-2013J", "BBB-2013J", "DDD-2013J",
     "EEE-2013J", "FFF-2013J", "GGG-2013J",
 ]
@@ -95,6 +114,13 @@ def check_email():
     # Check body mentions TBD (2 courses have no due date)
     if "tbd" not in body_lower:
         differences.append("Email body does not mention 'TBD' for exams without dates")
+
+    # NEW: Check at least one instructor email OR "points possible" string is mentioned (matches task.md)
+    has_points = "points possible" in body_lower or "points" in body_lower or "100" in body_lower
+    has_instructor_email = "@openuniversity.ac.uk" in body_lower
+    # Instructor name is required; email or points possible = extra
+    if not (has_points or has_instructor_email):
+        differences.append("Email body should mention points_possible numeric value or instructor email")
 
     if differences:
         return False, (

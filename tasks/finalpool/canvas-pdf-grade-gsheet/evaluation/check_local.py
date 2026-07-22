@@ -133,6 +133,26 @@ def check_local(agent_workspace, groundtruth_workspace):
         agent_rows2 = list(agent_ws2.iter_rows(min_row=2, values_only=True))
         gt_rows2 = list(gt_ws2.iter_rows(min_row=2, values_only=True))
 
+        # NEW: Must have exactly 5 rows (A, B, C, D, F) per task.md
+        if len(agent_rows2) != 5:
+            failed += 1
+            errors.append(
+                f"Grade Distribution must have exactly 5 rows (A,B,C,D,F), got {len(agent_rows2)}"
+            )
+        else:
+            passed += 1
+
+        # Check order: A, B, C, D, F
+        expected_order = ["A", "B", "C", "D", "F"]
+        actual_grades = [str(r[0]).strip().upper() for r in agent_rows2 if r and r[0]]
+        if actual_grades != expected_order:
+            failed += 1
+            errors.append(
+                f"Grade Distribution order must be A,B,C,D,F; got {actual_grades}"
+            )
+        else:
+            passed += 1
+
         for gt_row in gt_rows2:
             gt_grade = str(gt_row[0]).strip().upper() if gt_row[0] else ""
             gt_count = gt_row[1] if gt_row[1] is not None else 0

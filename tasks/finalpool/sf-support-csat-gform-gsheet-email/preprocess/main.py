@@ -6,14 +6,18 @@ import os
 import shutil
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym", user="eigent", password="camel")
+DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym", user="eigent", password="camel")
 
 
 def clear_writable_schemas(conn):
+    """Clear only schemas this task actually uses: email, gsheet, gform.
+
+    gcal/notion are not used by this task (see docs/task.md). Skipping them
+    keeps preprocess focused and avoids unnecessary churn on other schemas.
+    """
     cur = conn.cursor()
     cur.execute("DELETE FROM email.sent_log")
     cur.execute("DELETE FROM email.messages")
-    cur.execute("DELETE FROM gcal.events")
     cur.execute("DELETE FROM gsheet.cells")
     cur.execute("DELETE FROM gsheet.sheets")
     cur.execute("DELETE FROM gsheet.spreadsheets")
@@ -21,12 +25,8 @@ def clear_writable_schemas(conn):
     cur.execute("DELETE FROM gform.responses")
     cur.execute("DELETE FROM gform.questions")
     cur.execute("DELETE FROM gform.forms")
-    cur.execute("DELETE FROM notion.blocks")
-    cur.execute("DELETE FROM notion.comments")
-    cur.execute("DELETE FROM notion.pages")
-    cur.execute("DELETE FROM notion.databases")
     conn.commit()
-    print("[preprocess] Writable schemas cleared.")
+    print("[preprocess] Writable schemas cleared (email, gsheet, gform).")
 
 
 def main():

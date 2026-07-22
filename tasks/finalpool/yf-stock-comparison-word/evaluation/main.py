@@ -121,10 +121,10 @@ def check_excel(agent_workspace, groundtruth_workspace):
                     break
             if matched:
                 check(f"{sym} Start_Price",
-                      num_close(matched[1], start_p, 1.0),
+                      num_close(matched[1], start_p, 0.5),
                       f"Expected {start_p}, got {matched[1]}")
                 check(f"{sym} End_Price",
-                      num_close(matched[2], end_p, 1.0),
+                      num_close(matched[2], end_p, 0.5),
                       f"Expected {end_p}, got {matched[2]}")
                 check(f"{sym} Return_Pct",
                       num_close(matched[3], ret_pct, 0.5),

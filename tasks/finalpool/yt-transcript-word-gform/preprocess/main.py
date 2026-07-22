@@ -10,7 +10,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -47,7 +47,12 @@ def clear_tables(conn):
 
 
 def verify_transcript(conn):
-    """Verify the Afrobeat transcript exists (READ-ONLY check)."""
+    """Verify the Afrobeat transcript exists and is non-trivial (READ-ONLY check).
+
+    Reverse validation: assert that the video ID referenced in task.md (7ZQzGq32kAY)
+    resolves to a real row in youtube.transcripts, and that the transcript content
+    has sufficient length to be analyzable. Ensures the task target is solvable.
+    """
     with conn.cursor() as cur:
         cur.execute("""
             SELECT video_id, title, LENGTH(content) as content_len
@@ -55,19 +60,24 @@ def verify_transcript(conn):
             WHERE video_id = '7ZQzGq32kAY'
         """)
         row = cur.fetchone()
-        if row:
-            print(f"[preprocess] Transcript found: video_id={row[0]}, title={row[1]}, length={row[2]}")
-        else:
-            print("[preprocess] WARNING: Afrobeat transcript not found in youtube.transcripts!")
+        if not row:
+            print("[preprocess] ERROR: Afrobeat transcript for 7ZQzGq32kAY not found in youtube.transcripts!")
+            raise RuntimeError("Required transcript missing: 7ZQzGq32kAY")
+        video_id, title, content_len = row
+        assert video_id == '7ZQzGq32kAY', f"video_id mismatch: {video_id}"
+        assert content_len and content_len > 100, f"transcript too short: length={content_len}"
+        print(f"[preprocess] Transcript verified: video_id={video_id}, title={title}, length={content_len}")
 
 
 def ensure_email_folder(conn):
+    """Ensure INBOX and Sent folders exist so sent_log logic and outbound mail work."""
     with conn.cursor() as cur:
-        cur.execute("SELECT id FROM email.folders WHERE name = 'INBOX' LIMIT 1")
-        row = cur.fetchone()
-        if not row:
-            cur.execute("INSERT INTO email.folders (name) VALUES ('INBOX') RETURNING id")
-            conn.commit()
+        for fname in ("INBOX", "Sent"):
+            cur.execute("SELECT id FROM email.folders WHERE name = %s LIMIT 1", (fname,))
+            row = cur.fetchone()
+            if not row:
+                cur.execute("INSERT INTO email.folders (name) VALUES (%s) RETURNING id", (fname,))
+        conn.commit()
 
 
 def main():

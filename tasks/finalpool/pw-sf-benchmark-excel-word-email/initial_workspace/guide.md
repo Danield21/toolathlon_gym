@@ -2,7 +2,7 @@
 
 ### Data Sources
 - **External Benchmarks**: Industry Analytics Dashboard (internal portal) - access via web browser
-- **Internal Metrics**: Company data warehouse (Snowflake)
+- **Internal Metrics**: Company data warehouse (use the available SQL data warehouse tool)
 
 ### Cross-Reference Methodology
 1. Extract benchmark values from the dashboard for each metric

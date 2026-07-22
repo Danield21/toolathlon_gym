@@ -88,11 +88,14 @@ def check_excel(agent_workspace, groundtruth_workspace):
         if matched:
             check(f"Customer {email} rank", num_close(matched[0], rank, 0),
                   f"Expected {rank}, got {matched[0]}")
+            check(f"Customer {email} name == '{name}'",
+                  str_match(matched[1], name),
+                  f"Expected '{name}', got '{matched[1]}'")
             check(f"Customer {email} orders_count",
                   num_close(matched[3], orders, 0),
                   f"Expected {orders}, got {matched[3]}")
             check(f"Customer {email} total_spent",
-                  num_close(matched[4], total, 0.5),
+                  num_close(matched[4], total, 0.01),
                   f"Expected {total}, got {matched[4]}")
         else:
             check(f"Customer {email} found", False, "Not in agent output")
@@ -105,31 +108,23 @@ def check_emails():
     """Check that VIP emails were sent to the correct addresses."""
     print("\n=== Checking Emails ===")
 
-    conn = psycopg2.connect(**DB)
-    cur = conn.cursor()
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+    except psycopg2.Error as e:
+        check("DB connect", False, str(e))
+        return False
 
-    # Get expected top 10 customer emails
+    # Get expected top 10 customers
     cur.execute("""
-        SELECT email, first_name, total_spent
+        SELECT email, first_name, ROUND(total_spent::numeric, 2)
         FROM wc.customers
         ORDER BY total_spent::numeric DESC
         LIMIT 10
     """)
     expected_customers = cur.fetchall()
 
-    # Get sent emails
-    cur.execute("""
-        SELECT subject, from_addr, to_addr, body_text
-        FROM email.messages
-        WHERE folder_id = 2
-    """)
-    sent_emails = cur.fetchall()
-
-    # Also check all messages
-    cur.execute("""
-        SELECT subject, from_addr, to_addr, body_text
-        FROM email.messages
-    """)
+    cur.execute("SELECT subject, from_addr, to_addr, body_text FROM email.messages")
     all_emails = cur.fetchall()
     conn.close()
 
@@ -152,17 +147,31 @@ def check_emails():
                     return subj, from_addr, to_addr, body
         return None
 
-    check("At least 10 emails sent", len(sent_emails) >= 10 or len(all_emails) >= 10,
-          f"Sent folder: {len(sent_emails)}, All: {len(all_emails)}")
+    check("At least 10 emails total", len(all_emails) >= 10,
+          f"Found {len(all_emails)} emails")
 
     for email_addr, fname, total in expected_customers:
         result = find_email_for_recipient(email_addr)
         check(f"Email sent to {email_addr}", result is not None)
-        if result:
-            subj, from_addr, to_addr, body = result
-            has_vip = "vip" in (subj or "").lower() or "thank" in (subj or "").lower()
-            check(f"Email to {email_addr} has VIP/thank subject", has_vip,
-                  f"Subject: {(subj or '')[:100]}")
+        if not result:
+            continue
+        subj, from_addr, to_addr, body = result
+        check(f"  Email to {email_addr}: subject == 'Thank You, VIP Customer!'",
+              (subj or "").strip().lower() == "thank you, vip customer!",
+              f"got: {subj}")
+        check(f"  Email to {email_addr}: from_addr == 'vip-program@store.example.com'",
+              str(from_addr or "").strip().lower() == "vip-program@store.example.com",
+              f"got: {from_addr}")
+        body_text = body or ""
+        body_lower = body_text.lower()
+        check(f"  Email to {email_addr}: body addresses by first name '{fname}'",
+              fname.lower() in body_lower, "missing first name")
+        # body must contain total_spent value (formatted with 2 decimals or as integer)
+        total_str_2 = f"{float(total):.2f}"
+        total_str_int = str(int(float(total)))
+        check(f"  Email to {email_addr}: body mentions total spent {total}",
+              total_str_2 in body_text or total_str_int in body_text,
+              f"missing {total} in body")
 
     return True
 
@@ -183,6 +192,7 @@ def main():
     print("=" * 70)
 
     check_excel(args.agent_workspace, gt_dir)
+    check_emails()
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

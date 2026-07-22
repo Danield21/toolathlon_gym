@@ -139,12 +139,50 @@ def check_excel(agent_workspace):
     ws_state = find_sheet(["state"])
     check("By State sheet exists", ws_state is not None, f"Sheets: {wb.sheetnames}")
     if ws_state:
-        txt = sheet_text(ws_state)
-        # Check top 5 states by tax
-        for s in expected["states"][:5]:
-            check(f"State '{s['state']}' in sheet", s["state"] in txt)
-            check(f"Tax {s['tax']} for {s['state']}",
-                  number_in_text(s["tax"], txt))
+        # Cell-by-cell comparison (not substring)
+        rows = list(ws_state.iter_rows(values_only=True))
+        # Find header to locate columns
+        if rows:
+            header = [str(c).strip().lower() if c else "" for c in rows[0]]
+            state_col = next((i for i, h in enumerate(header) if "state" in h), 0)
+            count_col = next((i for i, h in enumerate(header) if "count" in h or "order" in h), 1)
+            sales_col = next((i for i, h in enumerate(header) if "sale" in h), 2)
+            tax_col = next((i for i, h in enumerate(header) if "tax" in h), 3)
+
+            data_rows = [r for r in rows[1:] if r and r[0]]
+            # Exact row count match
+            check(f"By State has {len(expected['states'])} state rows",
+                  len(data_rows) == len(expected["states"]),
+                  f"Got {len(data_rows)}, expected {len(expected['states'])}")
+
+            # Build state lookup
+            state_map = {}
+            for r in data_rows:
+                if r[state_col]:
+                    state_map[str(r[state_col]).strip().upper()] = r
+
+            # Verify ALL states (not just top 5)
+            for s in expected["states"]:
+                r = state_map.get(s["state"].upper())
+                if r is None:
+                    check(f"State '{s['state']}' present", False, f"Missing")
+                    continue
+                check(f"State '{s['state']}' Order Count",
+                      abs(int(r[count_col] or 0) - s["count"]) <= 0,
+                      f"got {r[count_col]}, expected {s['count']}")
+                check(f"State '{s['state']}' Total Tax",
+                      abs(float(r[tax_col] or 0) - s["tax"]) <= 0.01,
+                      f"got {r[tax_col]}, expected {s['tax']}")
+
+            # Verify sort order: Total Tax descending
+            taxes = []
+            for r in data_rows:
+                try:
+                    taxes.append(float(r[tax_col] or 0))
+                except Exception:
+                    pass
+            is_sorted = all(taxes[i] >= taxes[i+1] for i in range(len(taxes)-1))
+            check("By State sorted by Total Tax descending", is_sorted, f"Taxes: {taxes[:5]}")
 
     # Overall sheet
     ws_ov = find_sheet(["overall"])

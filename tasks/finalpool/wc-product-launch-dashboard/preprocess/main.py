@@ -13,7 +13,7 @@ import tarfile
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -48,9 +48,11 @@ async def setup_mock_server():
     await kill_proc.wait()
     await asyncio.sleep(0.5)
 
+    # Write server.log into tmp_dir (not inside the served mock_dir) so the
+    # agent cannot read it via the mock HTTP server.
     await asyncio.create_subprocess_shell(
         f"nohup python3 -m http.server {port} --directory {mock_dir} "
-        f"> {mock_dir}/server.log 2>&1 &"
+        f"> {tmp_dir}/server.log 2>&1 &"
     )
     await asyncio.sleep(1)
     print(f"[preprocess] Mock market trends dashboard running at http://localhost:{port}")

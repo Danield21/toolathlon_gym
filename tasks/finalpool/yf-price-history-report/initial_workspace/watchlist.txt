@@ -1,0 +1,10 @@
+# Stock Watchlist - 2025 Price History Report
+# These are the stocks tracked in our portfolio for the 2025+ price summary.
+# Pull historical close prices for each symbol via Yahoo Finance starting 2025-01-01.
+AMZN
+GC=F
+GOOGL
+JNJ
+JPM
+XOM
+^DJI

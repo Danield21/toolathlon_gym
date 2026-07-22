@@ -61,6 +61,12 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
             gt_ws = gt_wb["Department_Overview"]
             gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
 
+            # GT columns: Department, Employee_Count, Avg_Salary, Avg_Experience,
+            #             Avg_Performance, Industry_Benchmark_Salary, Salary_Gap
+            COL_NAMES = ["Department", "Employee_Count", "Avg_Salary",
+                         "Avg_Experience", "Avg_Performance",
+                         "Industry_Benchmark_Salary", "Salary_Gap"]
+            TOL = [None, 1, 10.0, 0.05, 0.02, 500, 500]  # per-column absolute tolerance
             for gt_row in gt_rows:
                 dept = gt_row[0]
                 agent_row = None
@@ -69,31 +75,103 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                         agent_row = r
                         break
                 if agent_row:
-                    gt_sal = safe_float(gt_row[2])
-                    ag_sal = safe_float(agent_row[2])
-                    if gt_sal and ag_sal:
-                        check(f"{dept} avg salary", abs(gt_sal - ag_sal) <= 50,
-                              f"expected ~{gt_sal}, got {ag_sal}")
-                    gt_gap = safe_float(gt_row[6])
-                    ag_gap = safe_float(agent_row[6])
-                    if gt_gap is not None and ag_gap is not None:
-                        check(f"{dept} salary gap", abs(gt_gap - ag_gap) <= 100,
-                              f"expected ~{gt_gap}, got {ag_gap}")
+                    # Validate ALL 7 columns, not just salary + gap
+                    for ci in range(1, 7):
+                        gv = safe_float(gt_row[ci])
+                        av = safe_float(agent_row[ci])
+                        if gv is None:
+                            continue
+                        tol = TOL[ci]
+                        if av is None:
+                            check(f"{dept} {COL_NAMES[ci]}", False,
+                                  f"expected ~{gv}, got None")
+                        else:
+                            check(f"{dept} {COL_NAMES[ci]}",
+                                  abs(gv - av) <= tol,
+                                  f"expected ~{gv}, got {av}")
 
         # Sheet 2: Skills_Matrix
         check("Skills_Matrix sheet exists", "Skills_Matrix" in wb.sheetnames)
         if "Skills_Matrix" in wb.sheetnames:
             ws = wb["Skills_Matrix"]
             rows = list(ws.iter_rows(min_row=2, values_only=True))
-            check("Skills_Matrix has 17 skills", len(rows) >= 15, f"got {len(rows)}")
+            # Match GT row count and cell values (Role+Skill key)
+            gt_path = os.path.join(groundtruth_workspace, "Skills_Gap_Analysis.xlsx")
+            try:
+                gt_wb2 = openpyxl.load_workbook(gt_path)
+                gt_sm = gt_wb2["Skills_Matrix"]
+                gt_sm_rows = [r for r in gt_sm.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
+                expected_cnt = len(gt_sm_rows)
+            except Exception:
+                expected_cnt = 17
+                gt_sm_rows = []
+            check(f"Skills_Matrix has {expected_cnt} skills",
+                  len(rows) == expected_cnt, f"got {len(rows)}")
 
-        # Sheet 3: Summary
+            # GT Skills_Matrix cols: Role, Skill, Proficiency_Level, Demand_Score,
+            #                        Industry_Salary, Our_Avg_Salary, Gap_Pct
+            # Match by (Role, Skill) key; validate Demand_Score, Industry_Salary,
+            # Our_Avg_Salary, Gap_Pct per row
+            if gt_sm_rows:
+                # Build agent lookup by (role, skill)
+                agent_lookup = {}
+                for ar in rows:
+                    if ar and len(ar) >= 2 and ar[0] and ar[1]:
+                        k = (str(ar[0]).strip().lower(), str(ar[1]).strip().lower())
+                        agent_lookup[k] = ar
+                for gr in gt_sm_rows[:8]:  # check first 8 rows to limit output
+                    if not (gr and len(gr) >= 2 and gr[0] and gr[1]):
+                        continue
+                    k = (str(gr[0]).strip().lower(), str(gr[1]).strip().lower())
+                    ar = agent_lookup.get(k)
+                    if not ar:
+                        check(f"Skills_Matrix row '{gr[0]}/{gr[1]}' present", False,
+                              "Missing in agent")
+                        continue
+                    # Demand score (col 3), Industry Salary (col 4), Our Avg Salary (col 5), Gap_Pct (col 6)
+                    tol_map = {3: 2.0, 4: 500, 5: 100, 6: 1.0}
+                    for ci, tol in tol_map.items():
+                        if ci >= len(gr) or ci >= len(ar):
+                            continue
+                        gv = safe_float(gr[ci])
+                        av = safe_float(ar[ci])
+                        if gv is None:
+                            continue
+                        if av is None:
+                            check(f"Skills_Matrix '{gr[0]}/{gr[1]}' col{ci+1}",
+                                  False, "Agent value None")
+                        else:
+                            check(f"Skills_Matrix '{gr[0]}/{gr[1]}' col{ci+1}",
+                                  abs(gv - av) <= tol,
+                                  f"expected ~{gv}, got {av}")
+
+        # Sheet 3: Summary - validate ALL rows against GT
         check("Summary sheet exists", "Summary" in wb.sheetnames)
         if "Summary" in wb.sheetnames:
             ws = wb["Summary"]
-            rows = {str(r[0]).strip(): r[1] for r in ws.iter_rows(min_row=2, values_only=True) if r[0]}
-            check("Total_Departments = 7", safe_float(rows.get("Total_Departments")) == 7,
-                  f"got {rows.get('Total_Departments')}")
+            agent_rows = {str(r[0]).strip(): r[1] for r in ws.iter_rows(min_row=2, values_only=True) if r[0]}
+            try:
+                gt_path = os.path.join(groundtruth_workspace, "Skills_Gap_Analysis.xlsx")
+                gt_wb2 = openpyxl.load_workbook(gt_path)
+                gt_sum = gt_wb2["Summary"]
+                gt_rows = {str(r[0]).strip(): r[1] for r in gt_sum.iter_rows(min_row=2, values_only=True) if r[0]}
+            except Exception:
+                gt_rows = {"Total_Departments": 7}
+            for metric, exp_val in gt_rows.items():
+                actual = agent_rows.get(metric)
+                if exp_val is None:
+                    continue
+                exp_f = safe_float(exp_val)
+                ag_f = safe_float(actual)
+                if exp_f is not None and ag_f is not None:
+                    tol = max(1.0, abs(exp_f) * 0.05)
+                    check(f"Summary '{metric}' ~ {exp_f}",
+                          abs(exp_f - ag_f) <= tol, f"got {actual}")
+                elif exp_val is not None and actual is not None:
+                    check(f"Summary '{metric}' matches",
+                          str(exp_val).strip().lower() in str(actual).strip().lower()
+                          or str(actual).strip().lower() in str(exp_val).strip().lower(),
+                          f"expected {exp_val}, got {actual}")
 
     # Check 2: Word document
     word_path = os.path.join(agent_workspace, "Skills_Gap_Report.docx")
@@ -108,13 +186,45 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         headings = [p.text for p in doc.paragraphs if p.style.name.startswith("Heading")]
         check("Word has at least 3 headings", len(headings) >= 3, f"got {len(headings)}")
 
-    # Check 3: Terminal artifacts
-    script_path = os.path.join(agent_workspace, "skills_analysis.py")
-    check("Python script exists", os.path.exists(script_path))
+        # Load GT headings and require all of them exist in agent headings (text equality after normalization)
+        try:
+            gt_doc_path = os.path.join(groundtruth_workspace, "Skills_Gap_Report.docx")
+            gt_doc = Document(gt_doc_path)
+            gt_headings = [p.text.strip().lower() for p in gt_doc.paragraphs
+                           if p.style and p.style.name and p.style.name.startswith("Heading")
+                           and p.text.strip()]
+            agent_headings_norm = [h.strip().lower() for h in headings if h.strip()]
+            missing = [gh for gh in gt_headings if gh not in agent_headings_norm]
+            check("Word headings match GT exactly",
+                  len(missing) == 0,
+                  f"Missing: {missing[:3]}")
+        except Exception as e:
+            check("Word GT headings accessible", False, str(e))
+
+    # Check 3: Terminal artifacts - only check script when running on real agent ws
+    try:
+        gt_canon = os.path.realpath(groundtruth_workspace)
+        ag_canon = os.path.realpath(agent_workspace)
+    except Exception:
+        gt_canon, ag_canon = groundtruth_workspace, agent_workspace
+
+    if gt_canon != ag_canon:
+        script_path = os.path.join(agent_workspace, "skills_analysis.py")
+        check("Python script exists", os.path.exists(script_path))
     json_path = os.path.join(agent_workspace, "raw_skills_data.json")
     check("Raw JSON data exists", os.path.exists(json_path))
     processed_path = os.path.join(agent_workspace, "processed_analysis.json")
     check("Processed JSON exists", os.path.exists(processed_path))
+    # Validate processed_analysis.json structure (not just existence)
+    if os.path.exists(processed_path):
+        try:
+            with open(processed_path) as f:
+                data = json.load(f)
+            check("processed_analysis.json is non-empty JSON",
+                  bool(data) and (isinstance(data, dict) or isinstance(data, list)),
+                  f"type={type(data).__name__}")
+        except Exception as e:
+            check("processed_analysis.json readable JSON", False, str(e))
     
 
     return FAIL_COUNT == 0, f"Passed {PASS_COUNT}/{PASS_COUNT + FAIL_COUNT} checks"

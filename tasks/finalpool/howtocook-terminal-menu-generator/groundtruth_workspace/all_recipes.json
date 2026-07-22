@@ -1,0 +1,44 @@
+[
+  {
+    "name": "可乐鸡翅",
+    "category": "meat",
+    "difficulty": 2,
+    "ingredients": ["Chicken wings", "Cola", "Soy sauce", "Ginger", "Green onion", "Cooking wine", "Salt", "Oil"]
+  },
+  {
+    "name": "水煮鱼",
+    "category": "seafood",
+    "difficulty": 3,
+    "ingredients": ["Fish fillet", "Bean sprouts", "Dried chili peppers", "Sichuan peppercorns", "Garlic", "Ginger", "Doubanjiang", "Cooking wine", "Starch", "Salt", "Oil"]
+  },
+  {
+    "name": "凉拌金针菇",
+    "category": "vegetable",
+    "difficulty": 1,
+    "ingredients": ["Enoki mushroom", "Garlic", "Chili oil", "Soy sauce", "Vinegar", "Sugar", "Sesame oil", "Cilantro"]
+  },
+  {
+    "name": "炒年糕",
+    "category": "staple",
+    "difficulty": 2,
+    "ingredients": ["Rice cake", "Cabbage", "Carrot", "Soy sauce", "Oyster sauce", "Sugar", "Green onion", "Oil", "Water"]
+  },
+  {
+    "name": "奶油蘑菇汤",
+    "category": "soup",
+    "difficulty": 2,
+    "ingredients": ["Button mushrooms", "Butter", "Onion", "Flour", "Milk", "Heavy cream", "Chicken broth", "Salt", "Black pepper", "Thyme"]
+  },
+  {
+    "name": "复杂烤鸭",
+    "category": "meat",
+    "difficulty": 5,
+    "ingredients": ["Duck", "Five spice", "Honey", "Soy sauce"]
+  },
+  {
+    "name": "高难度佛跳墙",
+    "category": "soup",
+    "difficulty": 5,
+    "ingredients": ["Abalone", "Sea cucumber", "Shark fin", "Ham"]
+  }
+]

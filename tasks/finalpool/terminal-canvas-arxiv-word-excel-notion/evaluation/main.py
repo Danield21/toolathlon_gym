@@ -36,6 +36,10 @@ EXPECTED_SUBJECTS = [
 ]
 
 
+def _norm_header(s):
+    return str(s or "").strip().lower().replace(" ", "_")
+
+
 def check_excel(agent_workspace):
     print("\n=== Checking Excel Output ===")
     fpath = os.path.join(agent_workspace, "Curriculum_Gap_Analysis.xlsx")
@@ -58,6 +62,10 @@ def check_excel(agent_workspace):
         record("Course_Topics sheet exists", True)
         ws = wb[ct_sheet]
         rows = list(ws.iter_rows(min_row=2, values_only=True))
+        # Header validation
+        headers = [_norm_header(c) for c in next(ws.iter_rows(values_only=True), [])]
+        for h in ["course_subject", "current_topics"]:
+            record(f"Course_Topics has '{h}' header", h in headers, f"got {headers}")
         # Query dynamic unique subject count from Canvas DB
         try:
             conn = psycopg2.connect(**DB_CONFIG)
@@ -67,7 +75,7 @@ def check_excel(agent_workspace):
             cur.close(); conn.close()
         except Exception:
             expected_course_count = 7
-        record(f"Course_Topics has {expected_course_count} rows",
+        record(f"Course_Topics has exactly {expected_course_count} rows",
                len(rows) == expected_course_count, f"Got {len(rows)}")
 
     # Sheet 2: Research_Frontiers
@@ -82,7 +90,27 @@ def check_excel(agent_workspace):
         record("Research_Frontiers sheet exists", True)
         ws = wb[rf_sheet]
         rows = list(ws.iter_rows(min_row=2, values_only=True))
+        # Header validation
+        headers = [_norm_header(c) for c in next(ws.iter_rows(values_only=True), [])]
+        for h in ["paper_title", "primary_category", "relevance_score"]:
+            record(f"Research_Frontiers has '{h}' header", h in headers, f"got {headers}")
         record("Research_Frontiers has >= 5 rows", len(rows) >= 5, f"Got {len(rows)}")
+        # Relevance scores must be in [1, 10]
+        try:
+            score_idx = headers.index("relevance_score")
+        except ValueError:
+            score_idx = None
+        if score_idx is not None:
+            bad = []
+            for r in rows:
+                if r and len(r) > score_idx:
+                    try:
+                        v = float(r[score_idx])
+                        if v < 1 or v > 10:
+                            bad.append(v)
+                    except (TypeError, ValueError):
+                        bad.append(r[score_idx])
+            record("Research_Frontiers Relevance_Score in [1,10]", not bad, f"out-of-range: {bad[:5]}")
 
     # Sheet 3: Gap_Matrix
     gm_sheet = None
@@ -96,15 +124,51 @@ def check_excel(agent_workspace):
         record("Gap_Matrix sheet exists", True)
         ws = wb[gm_sheet]
         rows = list(ws.iter_rows(min_row=2, values_only=True))
+        # Header validation
+        headers = [_norm_header(c) for c in next(ws.iter_rows(values_only=True), [])]
+        for h in ["course_subject", "paper_title", "relevance_score", "gap_type"]:
+            record(f"Gap_Matrix has '{h}' header", h in headers, f"got {headers}")
         record("Gap_Matrix has >= 20 rows", len(rows) >= 20, f"Got {len(rows)}")
 
-        # Check gap types exist
+        # Check gap types: must include all 3 (Covered, Partial, Gap)
         gap_types = set()
+        try:
+            type_idx = headers.index("gap_type")
+        except ValueError:
+            type_idx = 3
         for row in rows:
-            if row and len(row) > 3 and row[3]:
-                gap_types.add(str(row[3]).strip().lower())
+            if row and len(row) > type_idx and row[type_idx]:
+                gap_types.add(str(row[type_idx]).strip().lower())
         record("Gap_Matrix has Covered type", "covered" in gap_types, f"Found types: {gap_types}")
+        record("Gap_Matrix has Partial type", "partial" in gap_types, f"Found types: {gap_types}")
         record("Gap_Matrix has Gap type", "gap" in gap_types, f"Found types: {gap_types}")
+        # Verify gap_type matches the rule (>=7 covered, 4..6 partial, <4 gap)
+        try:
+            score_idx = headers.index("relevance_score")
+        except ValueError:
+            score_idx = 2
+        bad_classifications = []
+        for row in rows:
+            if not row or len(row) <= max(score_idx, type_idx):
+                continue
+            try:
+                score = float(row[score_idx])
+            except (TypeError, ValueError):
+                continue
+            actual_type = str(row[type_idx] or "").strip().lower()
+            if score >= 7:
+                expected = "covered"
+            elif score >= 4:
+                expected = "partial"
+            else:
+                expected = "gap"
+            if actual_type != expected:
+                bad_classifications.append((score, actual_type, expected))
+        record(
+            "Gap_Matrix gap_type classifications match scoring rule",
+            not bad_classifications,
+            f"mismatches: {bad_classifications[:5]}",
+        )
 
     wb.close()
     return True
@@ -121,11 +185,35 @@ def check_word(agent_workspace):
     from docx import Document
     doc = Document(fpath)
     full_text = " ".join(p.text for p in doc.paragraphs).lower()
-    record("Document mentions curriculum", "curriculum" in full_text)
+    headings = [p.text.strip() for p in doc.paragraphs if p.style.name.startswith("Heading") or p.style.name.startswith("Title")]
+    headings_l = [h.lower() for h in headings]
+    # Title presence
+    record(
+        "Document title 'Curriculum Enhancement Proposal'",
+        any("curriculum enhancement proposal" in h for h in headings_l)
+        or "curriculum enhancement proposal" in full_text,
+        f"headings: {headings[:6]}",
+    )
+    # Required sections: introduction, conclusion — require either as a Heading style or paragraph starting with the word
+    def _has_section(name):
+        # Heading-style match
+        for h in headings_l:
+            if name in h:
+                return True
+        # Paragraph-prefix match (paragraph starts with the word, allowing punctuation/spacing)
+        import re as _re
+        for p in doc.paragraphs:
+            t = (p.text or "").strip().lower()
+            if _re.match(rf"^{name}\b", t):
+                return True
+        return False
+
+    record("Document has introduction section (heading or paragraph prefix)", _has_section("introduction"))
+    record("Document has conclusion section (heading or paragraph prefix)", _has_section("conclusion"))
     record("Document mentions gap", "gap" in full_text)
-    # Check at least 3 course subjects mentioned
+    # Must mention at least 5 of 7 expected subjects (more rigorous than 3)
     mentioned = sum(1 for s in EXPECTED_SUBJECTS if s in full_text)
-    record("Document mentions >= 3 course subjects", mentioned >= 3, f"Found {mentioned}")
+    record("Document mentions >= 5 of 7 course subjects", mentioned >= 5, f"Found {mentioned}")
     return True
 
 
@@ -138,7 +226,16 @@ def check_terminal_output(agent_workspace):
     record("curriculum_gap_output.txt exists", True)
     with open(fpath) as f:
         content = f.read().lower()
-    record("Output mentions relevance or gap", "relevance" in content or "gap" in content or "score" in content)
+    # Must mention at least relevance and gap (not OR)
+    record("Output mentions 'relevance'", "relevance" in content)
+    record("Output mentions 'gap'", "gap" in content)
+    # Must mention at least 3 expected subjects (the agent must list per-subject results)
+    matched = sum(1 for s in EXPECTED_SUBJECTS if s in content)
+    record(
+        "curriculum_gap_output.txt mentions >= 3 course subjects",
+        matched >= 3,
+        f"found {matched}",
+    )
     return True
 
 
@@ -148,20 +245,58 @@ def check_notion():
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
         cur.execute("""
-            SELECT COUNT(*) FROM notion.databases
+            SELECT id, title FROM notion.databases
             WHERE title::text ILIKE '%curriculum%review%'
         """)
-        count = cur.fetchone()[0]
-        record("Notion Curriculum Review Tracker database exists", count >= 1, f"Found {count}")
-
-        # Check pages (entries) exist
-        cur.execute("SELECT COUNT(*) FROM notion.pages")
-        page_count = cur.fetchone()[0]
-        record("Notion has course subject entries", page_count >= 5, f"Found {page_count}")
-
+        dbs = cur.fetchall()
+        record(
+            "Notion Curriculum Review Tracker database exists",
+            len(dbs) >= 1,
+            f"Found {len(dbs)}",
+        )
+        # Determine expected course-subject count from Canvas
+        try:
+            cur.execute("SELECT COUNT(DISTINCT regexp_replace(name, ' \\(.*\\)$', '')) FROM canvas.courses")
+            expected_count = cur.fetchone()[0]
+        except Exception:
+            expected_count = 7
+        # Pages must be in the specific Curriculum Review database (not entire notion.pages)
+        if dbs:
+            db_id = dbs[0][0]
+            cur.execute(
+                "SELECT COUNT(*) FROM notion.pages WHERE parent::jsonb->>'database_id' = %s AND archived = false",
+                (db_id,),
+            )
+            page_count = cur.fetchone()[0]
+            record(
+                f"Curriculum Review DB has exactly {expected_count} entries",
+                page_count == expected_count,
+                f"Found {page_count}, expected {expected_count}",
+            )
+            # Inspect properties for expected select fields
+            cur.execute(
+                "SELECT properties FROM notion.pages WHERE parent::jsonb->>'database_id' = %s AND archived = false",
+                (db_id,),
+            )
+            props_rows = cur.fetchall()
+            seen_status = set()
+            seen_priority = set()
+            for (props,) in props_rows:
+                ps = str(props or "").lower()
+                for s in ["not started", "in progress", "completed"]:
+                    if s in ps:
+                        seen_status.add(s)
+                for p in ["high", "medium", "low"]:
+                    if p in ps:
+                        seen_priority.add(p)
+            record(
+                "Notion entries reference 'Not Started' status",
+                "not started" in seen_status,
+                f"statuses seen: {seen_status}",
+            )
         cur.close()
         conn.close()
-        return count >= 1
+        return len(dbs) >= 1
     except Exception as e:
         record("Notion check", False, str(e))
         return False

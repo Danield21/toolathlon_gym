@@ -286,9 +286,8 @@ def main():
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")
     print(f"  Failed: {FAIL_COUNT}")
-    if db_failures > 0 and file_fails == 0:
-        print(f"  WARNING: {db_failures} DB checks failed (not blocking)")
-    all_passed = file_fails == 0
+    # Tightened: GForm failures must also block (task.md requires GForm creation)
+    all_passed = FAIL_COUNT == 0
     print(f"  Overall: {'PASS' if all_passed else 'FAIL'}")
 
     if args.res_log_file:

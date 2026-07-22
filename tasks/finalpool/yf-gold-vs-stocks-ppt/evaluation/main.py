@@ -78,8 +78,12 @@ def check_excel(ws_path, exp):
         record("Sheet Monthly Prices", False, str(wb.sheetnames))
     else:
         record("Sheet Monthly Prices", True)
-        record("Monthly Prices row count", len(d) >= 12, f"Got {len(d)}")
-        for ep in exp["prices"][:3] + exp["prices"][-2:]:
+        # Task: 2025-03 through 2026-03 = 13 months
+        record(f"Monthly Prices row count == {len(exp['prices'])}",
+               len(d) == len(exp["prices"]),
+               f"Got {len(d)}, expected {len(exp['prices'])}")
+        # Validate ALL months
+        for ep in exp["prices"]:
             m = next((r for r in d if str(r.get("Month","")).strip() == ep["month"]), None)
             if not m:
                 record(f"Month {ep['month']} present", False, "Missing"); continue
@@ -99,23 +103,28 @@ def check_excel(ws_path, exp):
         record("Sheet Returns", False, str(wb.sheetnames))
     else:
         record("Sheet Returns", True)
-        record("Returns row count", len(d) >= 11, f"Got {len(d)}")
-        for er in exp["returns"][:2] + exp["returns"][-2:]:
+        # n-1 returns
+        expected_ret_count = len(exp["returns"])
+        record(f"Returns row count == {expected_ret_count}",
+               len(d) == expected_ret_count,
+               f"Got {len(d)}")
+        # Validate ALL returns; tightened tol from 2.0 to 0.1 (rounded to 2 decimals)
+        for er in exp["returns"]:
             m = next((r for r in d if str(r.get("Month","")).strip() == er["month"]), None)
             if not m:
                 record(f"Return {er['month']} present", False, "Missing"); continue
             if er["gold_ret"] is not None:
                 record(f"Return {er['month']} gold",
-                       num_close(m.get("Gold_Return_Pct"), er["gold_ret"], 2.0),
+                       num_close(m.get("Gold_Return_Pct"), er["gold_ret"], 0.1),
                        f"{m.get('Gold_Return_Pct')} vs {er['gold_ret']}")
             if er["dji_ret"] is not None:
                 record(f"Return {er['month']} DJI",
-                       num_close(m.get("DJI_Return_Pct"), er["dji_ret"], 2.0),
+                       num_close(m.get("DJI_Return_Pct"), er["dji_ret"], 0.1),
                        f"{m.get('DJI_Return_Pct')} vs {er['dji_ret']}")
     wb.close()
 
 
-def check_pptx(ws_path):
+def check_pptx(ws_path, exp):
     print("\n=== Checking PPTX ===")
     p = os.path.join(ws_path, "Gold_vs_Stocks.pptx")
     if not os.path.isfile(p):
@@ -125,21 +134,78 @@ def check_pptx(ws_path):
         from pptx import Presentation
         prs = Presentation(p)
         slides = list(prs.slides)
-        record("Slide count >= 3", len(slides) >= 3, f"Got {len(slides)}")
+        # Task: exactly 3 slides
+        record("Slide count == 3", len(slides) == 3, f"Got {len(slides)}")
+
+        # ----- Slide 1: title + subtitle -----
         if len(slides) >= 1:
-            title_shape = slides[0].shapes.title
-            if title_shape:
-                record("Slide 1 has title", True)
-                t = title_shape.text.lower()
-                record("Slide 1 title mentions gold", "gold" in t, title_shape.text)
-            else:
-                # Check all shapes for title text
-                all_text = " ".join(sh.text for sh in slides[0].shapes if sh.has_text_frame).lower()
-                record("Slide 1 mentions gold", "gold" in all_text, all_text[:200])
+            slide_text = " ".join(sh.text for sh in slides[0].shapes if sh.has_text_frame).lower()
+            title = slides[0].shapes.title.text.lower() if slides[0].shapes.title else ""
+            record(
+                "Slide 1 title 'Gold vs Stock Market Performance'",
+                "gold vs stock market performance" in title or "gold vs stock market performance" in slide_text,
+                f"title text: {slide_text[:200]}",
+            )
+            record(
+                "Slide 1 subtitle mentions March 2025 to March 2026",
+                ("march 2025" in slide_text and "march 2026" in slide_text)
+                or ("2025-03" in slide_text and "2026-03" in slide_text),
+                f"slide text: {slide_text[:200]}",
+            )
+
+        # ----- Slide 2: 'Monthly Price Comparison' table content -----
+        if len(slides) >= 2:
+            slide2_title = slides[1].shapes.title.text.lower() if slides[1].shapes.title else ""
+            slide2_text = " ".join(sh.text for sh in slides[1].shapes if sh.has_text_frame).lower()
+            record(
+                "Slide 2 title 'Monthly Price Comparison'",
+                "monthly price comparison" in slide2_title or "monthly price comparison" in slide2_text,
+                f"title text: {slide2_text[:200]}",
+            )
+            # Slide 2 should mention at least the first month and the last month
+            if exp["prices"]:
+                first_m = exp["prices"][0]["month"]
+                last_m = exp["prices"][-1]["month"]
+                record(
+                    f"Slide 2 mentions first month {first_m}",
+                    first_m in slide2_text,
+                    f"slide text: {slide2_text[:300]}",
+                )
+                record(
+                    f"Slide 2 mentions last month {last_m}",
+                    last_m in slide2_text,
+                    f"slide text: {slide2_text[:300]}",
+                )
+
+        # ----- Slide 3: 'Conclusion' with which asset performed better -----
         if len(slides) >= 3:
-            all_text = " ".join(sh.text for sh in slides[2].shapes if sh.has_text_frame).lower()
-            record("Slide 3 has conclusion content", "conclu" in all_text or "perform" in all_text or "better" in all_text,
-                   all_text[:200])
+            slide3_title = slides[2].shapes.title.text.lower() if slides[2].shapes.title else ""
+            slide3_text = " ".join(sh.text for sh in slides[2].shapes if sh.has_text_frame).lower()
+            record(
+                "Slide 3 title 'Conclusion'",
+                "conclusion" in slide3_title or "conclusion" in slide3_text,
+                f"title: {slide3_title}",
+            )
+            # Determine which asset performed better
+            if exp["prices"] and exp["prices"][0]["gold"] and exp["prices"][-1]["gold"]:
+                gold_overall = (exp["prices"][-1]["gold"] - exp["prices"][0]["gold"]) / exp["prices"][0]["gold"] * 100
+                dji_overall = (exp["prices"][-1]["dji"] - exp["prices"][0]["dji"]) / exp["prices"][0]["dji"] * 100
+                if gold_overall > dji_overall:
+                    expected_winner = "gold"
+                else:
+                    expected_winner = "dji"  # also check 'dow', 'jones', 'stock'
+                if expected_winner == "gold":
+                    record(
+                        "Slide 3 conclusion says gold performed better",
+                        "gold" in slide3_text,
+                        f"slide3 text: {slide3_text[:300]}",
+                    )
+                else:
+                    record(
+                        "Slide 3 conclusion says DJI/Dow Jones/stock performed better",
+                        any(k in slide3_text for k in ["dji", "dow", "jones", "stock"]),
+                        f"slide3 text: {slide3_text[:300]}",
+                    )
     except ImportError:
         record("python-pptx available", False, "Cannot import pptx")
     except Exception as e:
@@ -155,7 +221,7 @@ def main():
     args = parser.parse_args()
     exp = get_expected()
     check_excel(args.agent_workspace, exp)
-    check_pptx(args.agent_workspace)
+    check_pptx(args.agent_workspace, exp)
     print(f"\n=== SUMMARY: {PASS_COUNT} passed, {FAIL_COUNT} failed ===")
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:

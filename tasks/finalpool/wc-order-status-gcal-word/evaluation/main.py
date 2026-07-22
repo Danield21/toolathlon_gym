@@ -61,29 +61,78 @@ def get_order_status_data():
 
 
 def check_gcal_event():
+    """Check exact title + date/time: 2026-03-18 09:00-10:00, 'Weekly Order Operations Review'."""
+    errors = []
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
-        cur.execute("SELECT count(*) FROM gcal.events WHERE LOWER(summary) LIKE '%operations%' OR LOWER(summary) LIKE '%order%'")
-        cnt = cur.fetchone()[0]
+        cur.execute("SELECT summary, start_datetime, end_datetime, start_timezone FROM gcal.events WHERE LOWER(summary) LIKE '%weekly order operations review%'")
+        events = cur.fetchall()
         cur.close()
         conn.close()
-        return cnt >= 1
-    except Exception:
-        return False
+        if not events:
+            return False, "Event 'Weekly Order Operations Review' not found"
+
+        summary, start_dt, end_dt, tz = events[0]
+        if summary.strip().lower() != "weekly order operations review":
+            errors.append(f"Summary not exactly 'Weekly Order Operations Review': got '{summary}'")
+        # Date and time (local)
+        try:
+            if tz and start_dt.tzinfo is not None:
+                import zoneinfo
+                local = start_dt.astimezone(zoneinfo.ZoneInfo(tz))
+            else:
+                local = start_dt
+        except Exception:
+            local = start_dt
+        if local.strftime("%Y-%m-%d") != "2026-03-18":
+            errors.append(f"Date not 2026-03-18: got {local}")
+        if not (local.hour == 9 and local.minute == 0):
+            errors.append(f"Start not 09:00: got {local.hour}:{local.minute:02d}")
+        if start_dt and end_dt:
+            dur = (end_dt - start_dt).total_seconds() / 60
+            if abs(dur - 60) > 2:
+                errors.append(f"Duration not 60min: got {dur:.0f}")
+        return len(errors) == 0, "; ".join(errors)
+    except Exception as e:
+        return False, f"GCal error: {e}"
 
 
 def check_email_sent():
+    """Check exact subject + recipient + key metric mentions in body."""
+    errors = []
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
-        cur.execute("SELECT count(*) FROM email.messages WHERE LOWER(to_addr::text) LIKE '%ops%' AND (LOWER(subject) LIKE '%order%' OR LOWER(subject) LIKE '%status%')")
-        cnt = cur.fetchone()[0]
+        cur.execute("SELECT subject, to_addr, body_text FROM email.messages")
+        rows = cur.fetchall()
         cur.close()
         conn.close()
-        return cnt >= 1
-    except Exception:
-        return False
+        matched = []
+        for subj, to, body in rows:
+            to_str = str(to).lower()
+            if "ops.team@company.com" in to_str:
+                matched.append((subj, body))
+        if not matched:
+            return False, "No email to ops.team@company.com"
+        exact_subj = "order status report - week of march 7 2026"
+        ok = False
+        matching_body = None
+        for subj, body in matched:
+            if (subj or "").strip().lower() == exact_subj:
+                ok = True
+                matching_body = body
+                break
+        if not ok:
+            errors.append(f"Exact subject 'Order Status Report - Week of March 7 2026' not found. Subjects: {[m[0] for m in matched]}")
+        else:
+            body_low = (matching_body or "").lower()
+            for kw in ["total orders", "revenue", "completion rate"]:
+                if kw not in body_low and kw.replace(" ", "_") not in body_low:
+                    errors.append(f"Body missing metric keyword: '{kw}'")
+        return len(errors) == 0, "; ".join(errors)
+    except Exception as e:
+        return False, f"Email error: {e}"
 
 
 def check_word_file(agent_workspace):
@@ -130,6 +179,7 @@ def main():
     except Exception as e:
         print(f"WARNING: Could not query DB: {e}")
         order_data = {
+            "statuses": [],
             "total_orders": 150, "total_rev": 61712.04,
             "completed_count": 72, "completed_total": 30296.82,
             "completion_rate": 48.0, "most_common": "completed",
@@ -155,24 +205,26 @@ def main():
         # Build lookup by status
         a_lookup = {str(r[0]).strip().lower(): r for r in data_rows if r and r[0] is not None}
 
-        # Check completed status
-        completed_row = a_lookup.get("completed")
-        if completed_row is None:
-            all_errors.append("'completed' status not found in Status Breakdown")
-        else:
-            errors = []
-            if len(completed_row) > 1:
-                if not num_close(completed_row[1], order_data["completed_count"], 0):
-                    errors.append(f"completed.Order_Count: {completed_row[1]} vs {order_data['completed_count']}")
-            if len(completed_row) > 2:
-                if not num_close(completed_row[2], order_data["completed_total"], 1.0):
-                    errors.append(f"completed.Total_Value: {completed_row[2]} vs {order_data['completed_total']} (tol=1.0)")
-            if errors:
-                all_errors.extend(errors)
-                for e in errors:
-                    print(f"    ERROR: {e}")
-            else:
-                print("    completed row PASS")
+        # Check every status row against DB
+        for status, count, total in order_data.get("statuses", []):
+            status_row = a_lookup.get(status.lower())
+            if status_row is None:
+                all_errors.append(f"'{status}' status missing in Status Breakdown")
+                continue
+            if len(status_row) > 1 and not num_close(status_row[1], count, 0):
+                all_errors.append(f"{status}.Order_Count: {status_row[1]} vs {count}")
+            if len(status_row) > 2 and not num_close(status_row[2], float(total), 1.0):
+                all_errors.append(f"{status}.Total_Value: {status_row[2]} vs {total}")
+            # Avg_Order_Value = Total / Count
+            if len(status_row) > 3 and status_row[3] is not None and count > 0:
+                expected_avg = round(float(total) / count, 2)
+                if not num_close(status_row[3], expected_avg, 0.05):
+                    all_errors.append(f"{status}.Avg_Order_Value: {status_row[3]} vs {expected_avg}")
+
+        # Sort order: by Order_Count DESC
+        counts = [int(r[1]) for r in data_rows if len(r) > 1 and r[1] is not None]
+        if counts != sorted(counts, reverse=True):
+            all_errors.append(f"Status Breakdown not sorted by Order_Count DESC: {counts}")
 
     # Check Summary sheet
     print("  Checking Summary sheet...")
@@ -222,17 +274,19 @@ def main():
 
     # Check GCal event
     print("  Checking GCal event...")
-    if check_gcal_event():
+    ok, detail = check_gcal_event()
+    if ok:
         print("    PASS")
     else:
-        all_errors.append("Expected calendar event with 'Operations' or 'Order' in title, not found")
+        all_errors.append(f"GCal: {detail}")
 
     # Check email sent
     print("  Checking email to ops.team...")
-    if check_email_sent():
+    ok, detail = check_email_sent()
+    if ok:
         print("    PASS")
     else:
-        all_errors.append("Email to ops.team@company.com with 'order' or 'status' subject not found")
+        all_errors.append(f"Email: {detail}")
 
     # Check Word document
     print("  Checking Word document...")

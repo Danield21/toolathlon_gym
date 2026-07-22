@@ -4,7 +4,7 @@ This guide explains how to use video content to prepare for technology conferenc
 
 When preparing for a technology conference, identify the most viewed or trending videos related to the conference topics from reputable tech education channels. The view count is a strong signal of topic relevance and audience interest. For each video, note the primary technology covered such as a programming language, framework, or cloud tool, and record the estimated duration in minutes for time planning purposes.
 
-For train travel planning, always verify departure and arrival times directly from the booking system. The recommended seat class for business travel is first class. Calculate journey duration by subtracting departure time from arrival time. For the Beijing to Qufu East route, first class tickets are priced at 253 yuan per direction.
+For train travel planning, always verify departure and arrival times directly from the booking system. The recommended seat class for business travel is first class. Calculate journey duration by subtracting departure time from arrival time. Look up the actual first class ticket price for each leg from the rail booking system rather than assuming a fixed value.
 
 The preparation plan should be organized into three areas. Travel details should include both the outbound and return legs with full train information. A video preparation list should rank the top videos by view count and extract the key technology topic from each. A conference schedule should map out all activities from departure to return, including conference sessions, meals, and networking events.
 

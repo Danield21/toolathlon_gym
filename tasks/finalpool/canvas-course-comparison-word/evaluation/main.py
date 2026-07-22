@@ -71,10 +71,11 @@ def get_expected_data():
 
 
 def check_excel(agent_workspace, groundtruth_workspace):
-    """Check Year_Over_Year_Comparison.xlsx."""
+    """Check Year_Over_Year_Comparison.xlsx (compare to GT file directly)."""
     print("\n=== Checking Year_Over_Year_Comparison.xlsx ===")
 
     agent_file = os.path.join(agent_workspace, "Year_Over_Year_Comparison.xlsx")
+    gt_file = os.path.join(groundtruth_workspace, "Year_Over_Year_Comparison.xlsx")
     if not os.path.isfile(agent_file):
         record("Excel file exists", False, f"Not found: {agent_file}")
         return False
@@ -82,12 +83,22 @@ def check_excel(agent_workspace, groundtruth_workspace):
 
     try:
         wb = openpyxl.load_workbook(agent_file, data_only=True)
+        gt_wb = openpyxl.load_workbook(gt_file, data_only=True) if os.path.isfile(gt_file) else None
     except Exception as e:
         record("Excel readable", False, str(e))
         return False
 
     all_ok = True
-    expected = get_expected_data()
+
+    # Build expected from GT directly (preferred) so all 9 columns are validated.
+    expected_rows = []
+    if gt_wb is not None:
+        for s in gt_wb.sheetnames:
+            if "comparison" in s.lower() or "course" in s.lower():
+                gt_ws = gt_wb[s]
+                gt_rows_full = list(gt_ws.iter_rows(min_row=2, values_only=True))
+                expected_rows = [r for r in gt_rows_full if r and r[0]]
+                break
 
     # Check Course Comparison sheet
     comp_sheet = None
@@ -101,74 +112,115 @@ def check_excel(agent_workspace, groundtruth_workspace):
     else:
         record("Sheet 'Course Comparison' exists", True)
         rows = list(comp_sheet.iter_rows(min_row=2, values_only=True))
+        rows = [r for r in rows if r and r[0]]
         record("Course Comparison has correct row count",
-               len(rows) == len(expected),
-               f"Expected {len(expected)}, got {len(rows)}")
+               len(rows) == len(expected_rows),
+               f"Expected {len(expected_rows)}, got {len(rows)}")
 
         agent_lookup = {}
         for r in rows:
-            if r and r[0]:
-                key = str(r[0]).strip().lower()
-                agent_lookup[key] = r
+            key = str(r[0]).strip().lower()
+            agent_lookup[key] = r
 
-        for exp_row in expected:
-            prefix = exp_row[0]
-            course_name_2013 = exp_row[1]
-            # Try matching on prefix or course name
-            matched = None
-            for key, r in agent_lookup.items():
-                if prefix.lower() in key or course_name_2013.lower().split("(")[0].strip().lower() in key:
-                    matched = r
-                    break
+        for exp_row in expected_rows:
+            course_name = exp_row[0]
+            key = str(course_name).strip().lower()
+            matched = agent_lookup.get(key)
+            if matched is None:
+                # Try fuzzy: split on '(' to drop year suffix
+                base = key.split("(")[0].strip()
+                for k, r in agent_lookup.items():
+                    if base in k or k in base:
+                        matched = r
+                        break
 
             if matched is None:
-                record(f"Course '{prefix}' found", False, "Missing")
+                record(f"Course '{course_name}' found", False, "Missing row")
                 all_ok = False
                 continue
 
-            # Check enrollment values
-            ok_e13 = num_close(matched[1], exp_row[2], 10)
-            record(f"'{prefix}' Fall_2013_Enrollment", ok_e13,
-                   f"Expected {exp_row[2]}, got {matched[1]}")
-            if not ok_e13:
-                all_ok = False
+            # Validate ALL 9 columns:
+            #  0: Course_Name (string)
+            #  1: Fall_2013_Enrollment (int, exact)
+            #  2: Fall_2014_Enrollment (int, exact)
+            #  3: Enrollment_Change (int, exact)
+            #  4: Fall_2013_Assignments (int, exact)
+            #  5: Fall_2014_Assignments (int, exact)
+            #  6: Fall_2013_Avg_Grade (float, tol 0.05)
+            #  7: Fall_2014_Avg_Grade (float, tol 0.05)
+            #  8: Grade_Change (float, tol 0.05)
+            int_cols = [(1, "Fall_2013_Enrollment"),
+                        (2, "Fall_2014_Enrollment"),
+                        (3, "Enrollment_Change"),
+                        (4, "Fall_2013_Assignments"),
+                        (5, "Fall_2014_Assignments")]
+            for idx, label in int_cols:
+                if idx < len(matched) and idx < len(exp_row):
+                    ok = num_close(matched[idx], exp_row[idx], 0)
+                    record(f"'{course_name}' {label}", ok,
+                           f"Expected {exp_row[idx]}, got {matched[idx]}")
+                    if not ok:
+                        all_ok = False
 
-            ok_e14 = num_close(matched[2], exp_row[3], 10)
-            record(f"'{prefix}' Fall_2014_Enrollment", ok_e14,
-                   f"Expected {exp_row[3]}, got {matched[2]}")
-            if not ok_e14:
-                all_ok = False
+            float_cols = [(6, "Fall_2013_Avg_Grade"),
+                          (7, "Fall_2014_Avg_Grade"),
+                          (8, "Grade_Change")]
+            for idx, label in float_cols:
+                if idx < len(matched) and idx < len(exp_row):
+                    ok = num_close(matched[idx], exp_row[idx], 0.05)
+                    record(f"'{course_name}' {label}", ok,
+                           f"Expected {exp_row[idx]}, got {matched[idx]}")
+                    if not ok:
+                        all_ok = False
 
-            # Check avg grades
-            ok_g13 = num_close(matched[6], exp_row[6], 2.0)
-            record(f"'{prefix}' Fall_2013_Avg_Grade", ok_g13,
-                   f"Expected {exp_row[6]}, got {matched[6]}")
-            if not ok_g13:
-                all_ok = False
-
-            ok_g14 = num_close(matched[7], exp_row[7], 2.0)
-            record(f"'{prefix}' Fall_2014_Avg_Grade", ok_g14,
-                   f"Expected {exp_row[7]}, got {matched[7]}")
-            if not ok_g14:
-                all_ok = False
-
-    # Check Summary sheet
+    # Check Summary sheet (now validates Avg_Enrollment_Change / Avg_Grade_Change)
     sum_sheet = None
     for name in wb.sheetnames:
         if "summary" in name.lower():
             sum_sheet = wb[name]
             break
+
+    expected_summary = {}
+    if gt_wb is not None:
+        for s in gt_wb.sheetnames:
+            if "summary" in s.lower():
+                for r in gt_wb[s].iter_rows(min_row=2, values_only=True):
+                    if r and r[0] is not None:
+                        expected_summary[str(r[0]).strip().lower()] = r[1]
+                break
+
     if sum_sheet is None:
         record("Sheet 'Summary' exists", False, f"Sheets: {wb.sheetnames}")
         all_ok = False
     else:
         record("Sheet 'Summary' exists", True)
+        agent_summary = {}
+        for r in sum_sheet.iter_rows(min_row=2, values_only=True):
+            if r and r[0] is not None:
+                agent_summary[str(r[0]).strip().lower()] = r[1]
+        for k, exp_v in expected_summary.items():
+            agent_v = agent_summary.get(k)
+            if agent_v is None:
+                record(f"Summary '{k}'", False, "Missing")
+                all_ok = False
+                continue
+            try:
+                exp_f = float(exp_v)
+                # Counts (e.g. Courses_Compared) get tol=0; otherwise 0.1
+                tol = 0 if float(exp_f).is_integer() else 0.1
+                ok = num_close(agent_v, exp_v, tol)
+            except (TypeError, ValueError):
+                ok = str(agent_v).strip().lower() == str(exp_v).strip().lower()
+            record(f"Summary '{k}'", ok,
+                   f"Expected {exp_v}, got {agent_v}")
+            if not ok:
+                all_ok = False
 
     return all_ok
 
 
-def check_word(agent_workspace):
-    """Check Academic_Year_Comparison.docx."""
+def check_word(agent_workspace, groundtruth_workspace):
+    """Check Academic_Year_Comparison.docx with per-course paragraph validation."""
     print("\n=== Checking Academic_Year_Comparison.docx ===")
     from docx import Document
 
@@ -186,6 +238,36 @@ def check_word(agent_workspace):
 
     all_text = " ".join(p.text.lower() for p in doc.paragraphs)
 
+    # Title check
+    record("Word has title 'Fall 2013 vs Fall 2014 Academic Performance Review'",
+           "fall 2013" in all_text and "fall 2014" in all_text
+           and ("academic performance review" in all_text
+                or "performance review" in all_text),
+           "Missing required title text")
+
+    # Per-course paragraph: each GT course name should appear in body
+    expected_names = []
+    gt_file = os.path.join(groundtruth_workspace, "Year_Over_Year_Comparison.xlsx")
+    if os.path.isfile(gt_file):
+        try:
+            gt_wb = openpyxl.load_workbook(gt_file, data_only=True)
+            for s in gt_wb.sheetnames:
+                if "comparison" in s.lower() or "course" in s.lower():
+                    for r in gt_wb[s].iter_rows(min_row=2, values_only=True):
+                        if r and r[0]:
+                            expected_names.append(str(r[0]).strip())
+                    break
+        except Exception:
+            pass
+
+    if expected_names:
+        for nm in expected_names:
+            # Use the leading 8 chars (cuts off year suffix and special chars)
+            key = nm.split("(")[0].strip()
+            ok = key.lower() in all_text
+            record(f"Word mentions course '{nm}'", ok,
+                   f"Course '{key}' not in document")
+
     record("Word mentions '2013'", "2013" in all_text, "No mention of '2013'")
     record("Word mentions '2014'", "2014" in all_text, "No mention of '2014'")
     record("Word mentions 'performance' or 'comparison' or 'review'",
@@ -196,19 +278,51 @@ def check_word(agent_workspace):
 
 
 def check_gsheet():
-    """Check Google Sheet."""
+    """Check Google Sheet 'Academic Year Comparison' with 'Comparison Data' sheet."""
     print("\n=== Checking Google Sheet ===")
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
 
-    cur.execute("SELECT id FROM gsheet.spreadsheets WHERE title ILIKE '%academic%' OR title ILIKE '%year%comparison%'")
+    # Find spreadsheet titled 'Academic Year Comparison'
+    cur.execute(
+        "SELECT id, title FROM gsheet.spreadsheets "
+        "WHERE title ILIKE '%academic year comparison%'"
+    )
     rows = cur.fetchall()
-    found = len(rows) > 0
-    record("GSheet with academic/comparison in title", found, "No matching spreadsheet found")
+    record("GSheet titled 'Academic Year Comparison' exists",
+           len(rows) >= 1, f"Found {len(rows)} matching")
+    if len(rows) == 0:
+        cur.close()
+        conn.close()
+        return False
+
+    spreadsheet_id = rows[0][0]
+    # Validate the 'Comparison Data' sheet exists with rows.
+    # gsheet schema typically has 'sheets' with name and a 'cells' or 'values' table.
+    try:
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema='gsheet' AND table_name='sheets'"
+        )
+        sheet_cols = [r[0] for r in cur.fetchall()]
+    except Exception:
+        sheet_cols = []
+
+    found_sheet = False
+    if "title" in sheet_cols and "spreadsheet_id" in sheet_cols:
+        cur.execute(
+            "SELECT id, title FROM gsheet.sheets "
+            "WHERE spreadsheet_id = %s AND title ILIKE '%%comparison data%%'",
+            (spreadsheet_id,),
+        )
+        srows = cur.fetchall()
+        found_sheet = len(srows) >= 1
+    record("GSheet has 'Comparison Data' sheet", found_sheet,
+           "Sheet 'Comparison Data' not found within spreadsheet")
 
     cur.close()
     conn.close()
-    return found
+    return len(rows) > 0 and found_sheet
 
 
 def main():
@@ -220,19 +334,15 @@ def main():
     args = parser.parse_args()
 
     excel_ok = check_excel(args.agent_workspace, args.groundtruth_workspace)
-    word_ok = check_word(args.agent_workspace)
+    word_ok = check_word(args.agent_workspace, args.groundtruth_workspace)
 
-    db_fail_before = FAIL_COUNT
     gsheet_ok = check_gsheet()
-    db_failures = FAIL_COUNT - db_fail_before
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")
     print(f"  Failed: {FAIL_COUNT}")
-    if db_failures > 0:
-        print(f"  WARNING: {db_failures} DB checks failed (not blocking)")
 
-    overall = excel_ok and word_ok
+    overall = excel_ok and word_ok and gsheet_ok and FAIL_COUNT == 0
     print(f"  Overall: {'PASS' if overall else 'FAIL'}")
     sys.exit(0 if overall else 1)
 

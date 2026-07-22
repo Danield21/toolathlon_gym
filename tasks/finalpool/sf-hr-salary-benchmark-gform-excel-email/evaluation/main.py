@@ -17,15 +17,7 @@ DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolath
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
-DEPT_STATS = [
-    ("Engineering", 7096, 15360.00, 695267.00, 58991.61, 53603),
-    ("HR",          7077, 18307.00, 692232.00, 58920.45, 53656),
-    ("Sales",       7232, 15885.00, 652806.00, 58864.79, 53490),
-    ("Support",     7244, 15916.00, 608157.00, 58400.48, 52944),
-    ("R&D",         7083, 15128.00, 680490.00, 57905.93, 52404),
-    ("Finance",     7148, 15760.00, 638897.00, 57878.19, 52987),
-    ("Operations",  7120, 17168.00, 656505.00, 57808.74, 52293),
-]
+# Note: GT comparison reads from groundtruth Excel directly; no per-dept constants needed.
 
 
 def check(name, condition, detail=""):
@@ -109,11 +101,37 @@ def check_excel(agent_workspace, groundtruth_workspace):
             check(f"'{g_row[0]}' Headcount", ok, f"Expected {g_row[1]}, got {a_row[1]}")
             if not ok:
                 all_ok = False
+            # Min_Salary (col 2)
+            ok = num_close(a_row[2], g_row[2], 1)
+            check(f"'{g_row[0]}' Min_Salary", ok, f"Expected {g_row[2]}, got {a_row[2]}")
+            if not ok:
+                all_ok = False
+            # Max_Salary (col 3)
+            ok = num_close(a_row[3], g_row[3], 1)
+            check(f"'{g_row[0]}' Max_Salary", ok, f"Expected {g_row[3]}, got {a_row[3]}")
+            if not ok:
+                all_ok = False
             # Avg_Salary (col 4)
             ok = num_close(a_row[4], g_row[4], 100)
             check(f"'{g_row[0]}' Avg_Salary", ok, f"Expected {g_row[4]}, got {a_row[4]}")
             if not ok:
                 all_ok = False
+            # Median_Salary (col 5)
+            ok = num_close(a_row[5], g_row[5], 50)
+            check(f"'{g_row[0]}' Median_Salary", ok, f"Expected {g_row[5]}, got {a_row[5]}")
+            if not ok:
+                all_ok = False
+
+        # Sort by Avg_Salary descending verification
+        try:
+            avgs = [float(r[4]) for r in a_rows if r and r[4] is not None]
+            sorted_ok = all(avgs[i] >= avgs[i+1] for i in range(len(avgs)-1))
+        except Exception:
+            sorted_ok = False
+        check("Department_Stats sorted by Avg_Salary descending", sorted_ok,
+              f"Avg_Salaries: {[r[4] for r in a_rows]}")
+        if not sorted_ok:
+            all_ok = False
 
     # Check Summary sheet
     agent_summary = get_sheet(agent_wb, "Summary")
@@ -137,13 +155,13 @@ def check_excel(agent_workspace, groundtruth_workspace):
         cas = a_summary.get("company_avg_salary")
         check("Company_Avg_Salary close to 58396", num_close(cas, 58396.14, 200), f"Got {cas}")
 
-        # Highest_Paid_Dept
+        # Highest_Paid_Dept (exact)
         hpd = str(a_summary.get("highest_paid_dept", "")).strip().lower()
-        check("Highest_Paid_Dept is Engineering", "engineering" in hpd, f"Got '{hpd}'")
+        check("Highest_Paid_Dept exactly 'Engineering'", hpd == "engineering", f"Got '{hpd}'")
 
-        # Lowest_Paid_Dept
+        # Lowest_Paid_Dept (exact)
         lpd = str(a_summary.get("lowest_paid_dept", "")).strip().lower()
-        check("Lowest_Paid_Dept is Operations", "operations" in lpd, f"Got '{lpd}'")
+        check("Lowest_Paid_Dept exactly 'Operations'", lpd == "operations", f"Got '{lpd}'")
 
     return all_ok
 
@@ -152,16 +170,48 @@ def check_gform():
     print("\n=== Checking Google Forms ===")
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
-    cur.execute("SELECT id, title FROM gform.forms WHERE title ILIKE '%compensation%satisfaction%' OR title ILIKE '%compensation%survey%'")
+    cur.execute("SELECT id, title FROM gform.forms")
     forms = cur.fetchall()
-    check("Compensation Satisfaction Survey form exists", len(forms) >= 1,
-          f"Found forms: {[f[1] for f in forms]}")
+    target_id = None
+    for fid, title in forms:
+        if (title or "").strip().lower() == "compensation satisfaction survey":
+            target_id = fid
+            break
+    check("Form titled exactly 'Compensation Satisfaction Survey'", target_id is not None,
+          f"Found titles: {[f[1] for f in forms]}")
 
-    if forms:
-        form_id = forms[0][0]
-        cur.execute("SELECT COUNT(*) FROM gform.questions WHERE form_id = %s", (form_id,))
-        q_count = cur.fetchone()[0]
-        check("Form has 5 questions", q_count == 5, f"Got {q_count}")
+    if target_id is not None:
+        cur.execute("SELECT title, question_type FROM gform.questions WHERE form_id=%s ORDER BY position",
+                    (target_id,))
+        questions = cur.fetchall()
+        check("Form has exactly 5 questions", len(questions) == 5, f"Got {len(questions)}")
+
+        # Q1: satisfaction MC; Q2: pay competitive Yes/No/Not Sure; Q3: benefits short answer;
+        # Q4: leaving Yes/No/Maybe; Q5: comments paragraph
+        q_titles = [(q[0] or "").lower() for q in questions]
+        q_types  = [(q[1] or "").lower() for q in questions]
+
+        has_q1 = any(("satisfied" in t or "satisfaction" in t) and "compensation" in t for t in q_titles)
+        check("Q1 satisfaction question on compensation present", has_q1, f"titles={q_titles}")
+        has_q2 = any(("competitive" in t and ("industry" in t or "pay" in t)) for t in q_titles)
+        check("Q2 competitive vs industry question present", has_q2, f"titles={q_titles}")
+        has_q3 = any("benefit" in t for t in q_titles)
+        check("Q3 benefits question present", has_q3, f"titles={q_titles}")
+        has_q4 = any(("leav" in t or "leaving" in t) and ("pay" in t or "better" in t) for t in q_titles)
+        check("Q4 leaving for better pay question present", has_q4, f"titles={q_titles}")
+        has_q5 = any(("comment" in t or "additional" in t) for t in q_titles)
+        check("Q5 additional comments question present", has_q5, f"titles={q_titles}")
+
+        # Verify question types: 1 MC, 1 yes/no/notsure, 1 short text, 1 yes/no/maybe, 1 paragraph
+        n_choice = sum(1 for t in q_types if t in ("multiple_choice", "radio", "choice", "mc", "choicequestion"))
+        n_short = sum(1 for t in q_types if t in ("text", "short_answer", "textquestion"))
+        n_para = sum(1 for t in q_types if t in ("paragraph", "long_answer", "long"))
+        check("At least 3 multiple-choice/radio questions",
+              n_choice >= 3, f"types={q_types}")
+        check("At least 1 short-answer text question (benefits)",
+              n_short >= 1, f"types={q_types}")
+        check("At least 1 paragraph question (additional comments)",
+              n_para >= 1, f"types={q_types}")
     cur.close()
     conn.close()
 
@@ -170,28 +220,36 @@ def check_email():
     print("\n=== Checking Email ===")
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
-    cur.execute("""
-        SELECT subject, from_addr, to_addr, body_text
-        FROM email.messages
-        WHERE subject ILIKE '%compensation%' AND subject ILIKE '%report%'
-        ORDER BY date DESC
-    """)
-    emails = cur.fetchall()
+    cur.execute("SELECT subject, from_addr, to_addr, body_text FROM email.messages")
+    all_emails = cur.fetchall()
     cur.close()
     conn.close()
 
-    check("Compensation report email exists", len(emails) >= 1, f"Found {len(emails)}")
-    if emails:
-        e = emails[0]
-        to_str = str(e[2])
+    expected_subject = "Compensation Analysis Report - Action Required"
+    target = None
+    for em in all_emails:
+        if (em[0] or "").strip().lower() == expected_subject.lower():
+            target = em
+            break
+    check("Email with exact subject 'Compensation Analysis Report - Action Required'",
+          target is not None, f"Subjects seen: {[e[0] for e in all_emails]}")
+    if target:
+        subj, from_addr, to_addr, body = target
+        to_str = str(to_addr or "").lower()
         check("Email to hr-leadership@company.example.com",
-              "hr-leadership@company.example.com" in to_str.lower(), f"to: {to_str}")
+              "hr-leadership@company.example.com" in to_str, f"to: {to_addr}")
         check("Email from compensation@hr.example.com",
-              "compensation@hr.example.com" in (e[1] or "").lower(), f"from: {e[1]}")
-        body = (e[3] or "").lower()
-        check("Email body mentions salary/compensation data",
-              any(kw in body for kw in ["58396", "58,396", "engineering", "operations", "salary", "compensation"]),
-              "Body missing key data")
+              "compensation@hr.example.com" in (from_addr or "").lower(), f"from: {from_addr}")
+        body_l = (body or "").lower()
+        # Tighten: anchor against trailing digit so '583961' / '58396×' don't false-positive
+        import re
+        has_avg = bool(re.search(r"\$?\s*58[, ]?396(?!\d)", body_l))
+        check("Email body mentions company avg salary number 58396 (anchored)",
+              has_avg, "expected 58396 (or 58,396) not followed by a digit")
+        check("Email body identifies highest dept (Engineering)",
+              "engineering" in body_l, "")
+        check("Email body identifies lowest dept (Operations)",
+              "operations" in body_l, "")
 
 
 def main():

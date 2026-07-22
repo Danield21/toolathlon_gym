@@ -116,13 +116,26 @@ def check_excel(agent_workspace, gt_dir):
             errors = []
             # Total_Assignments (col 1)
             if len(a_row) > 1 and len(gt_row) > 1:
-                if not int_close(a_row[1], gt_row[1], 2):
+                if not int_close(a_row[1], gt_row[1], 1):
                     errors.append(f"Assignments: {a_row[1]} vs {gt_row[1]}")
 
-            # Avg_Submissions (col 2)
+            # Avg_Submissions (col 2) - proportional tolerance (5%) since values are in hundreds/thousands
             if len(a_row) > 2 and len(gt_row) > 2:
-                if not num_close(a_row[2], gt_row[2], 50.0):
-                    errors.append(f"Avg_Submissions: {a_row[2]} vs {gt_row[2]}")
+                try:
+                    gt_val = float(gt_row[2])
+                    a_val = float(a_row[2]) if a_row[2] is not None else None
+                    tol = max(2.0, abs(gt_val) * 0.05)
+                    if a_val is None or abs(a_val - gt_val) > tol:
+                        errors.append(f"Avg_Submissions: {a_row[2]} vs {gt_row[2]} (tol {tol:.1f})")
+                except (TypeError, ValueError):
+                    errors.append(f"Avg_Submissions not numeric: {a_row[2]}")
+
+            # Latest_Due_Date (col 3) - format YYYY-MM-DD
+            if len(a_row) > 3 and len(gt_row) > 3:
+                a_date = str(a_row[3] or "").strip()[:10]
+                gt_date = str(gt_row[3] or "").strip()[:10]
+                if a_date != gt_date:
+                    errors.append(f"Latest_Due_Date: '{a_date}' vs '{gt_date}'")
 
             if errors:
                 record(f"Course '{gt_row[0][:40]}' data", False, "; ".join(errors))
@@ -180,7 +193,7 @@ def check_gcal():
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
-    cur.execute("SELECT summary, description FROM gcal.events ORDER BY summary")
+    cur.execute("SELECT summary, description, start_datetime, end_datetime FROM gcal.events ORDER BY summary")
     events = cur.fetchall()
     cur.close()
     conn.close()
@@ -191,7 +204,7 @@ def check_gcal():
            f"Found {len(events)}")
 
     study_events = [e for e in events if "study session" in (e[0] or "").lower()]
-    record("Study Session events found", len(study_events) >= 3,
+    record("Study Session events count == 3", len(study_events) == 3,
            f"Found {len(study_events)} study session events")
 
     # Check that top 3 months are represented
@@ -200,7 +213,17 @@ def check_gcal():
         found = any(month in (e[0] or "") or month in (e[1] or "") for e in events)
         record(f"Calendar event for month {month}", found)
 
-    return len(study_events) >= 3
+    # Verify scheduled on the 15th at 14:00
+    correct_time = 0
+    for summary, desc, start_dt, end_dt in study_events:
+        s = str(start_dt or "")
+        if "-15" in s[:10] and "14:00" in s:
+            correct_time += 1
+    record("Study sessions on the 15th at 14:00",
+           correct_time == len(study_events) and len(study_events) > 0,
+           f"Found {correct_time}/{len(study_events)} with correct datetime")
+
+    return len(study_events) == 3
 
 
 def check_emails():
@@ -219,7 +242,7 @@ def check_emails():
     found = False
     for subject, from_addr, to_addr, body in all_emails:
         subj_lower = (subject or "").lower()
-        if "workload" in subj_lower or "assignment" in subj_lower:
+        if "workload" in subj_lower and "assignment" in subj_lower:
             found = True
             to_str = str(to_addr or "").lower()
             record("Email sent to academic.advisor@university.example.com",
@@ -227,11 +250,16 @@ def check_emails():
                    f"To: {to_addr}")
 
             body_lower = (body or "").lower()
-            record("Email mentions course count",
-                   "22" in body_lower or "course" in body_lower)
+            # Body should mention the heavy months (top 3) by name AND total course count
+            heavy_months = ["2014-05", "2015-05", "2014-09"]
+            months_found = sum(1 for m in heavy_months if m in body_lower)
+            record("Email body mentions all top 3 busiest months",
+                   months_found == 3, f"Found {months_found}/3")
+            record("Email body mentions course count 22",
+                   "22" in body_lower)
             break
 
-    record("Workload email found", found)
+    record("Assignment Workload email found (subject contains workload+assignment)", found)
     return found
 
 
@@ -247,6 +275,14 @@ def main():
     gt_dir = args.groundtruth_workspace or os.path.join(task_root, "groundtruth_workspace")
 
     excel_ok = check_excel(args.agent_workspace, gt_dir)
+    try:
+        check_gcal()
+    except Exception as e:
+        record("check_gcal ran without DB error", False, str(e))
+    try:
+        check_emails()
+    except Exception as e:
+        record("check_emails ran without DB error", False, str(e))
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

@@ -184,6 +184,7 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
 
 
 def check_gcal():
+    import datetime as dt
     print("\n=== Checking Google Calendar ===")
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -191,21 +192,39 @@ def check_gcal():
 
         # Check prep event on March 8
         cur.execute("""
-            SELECT summary FROM gcal.events
+            SELECT summary, start_datetime FROM gcal.events
             WHERE LOWER(summary) LIKE '%meal prep%' OR LOWER(summary) LIKE '%prep planning%'
         """)
-        prep_events = cur.fetchall()
+        prep_events_raw = cur.fetchall()
+        prep_events = [r[0] for r in prep_events_raw]
         record("GCal has weekly meal prep planning event", len(prep_events) > 0,
                f"Found: {prep_events}")
 
+        # Precise date check: Meal Prep event must be on 2026-03-08
+        prep_date = dt.date(2026, 3, 8)
+        prep_on_date = [r for r in prep_events_raw
+                        if r[1] is not None and r[1].date() == prep_date]
+        record("GCal meal prep event on 2026-03-08",
+               len(prep_on_date) >= 1,
+               f"No meal prep event on {prep_date}, got {[(r[0], r[1].date() if r[1] else None) for r in prep_events_raw]}")
+
         # Check daily reminder events (7 for March 9-15)
         cur.execute("""
-            SELECT summary FROM gcal.events
+            SELECT summary, start_datetime FROM gcal.events
             WHERE LOWER(summary) LIKE '%daily meal reminder%' OR LOWER(summary) LIKE '%meal reminder%'
         """)
-        daily_events = cur.fetchall()
+        daily_events_raw = cur.fetchall()
+        daily_events = [r[0] for r in daily_events_raw]
         record("GCal has at least 7 daily meal reminder events", len(daily_events) >= 7,
                f"Found {len(daily_events)} daily reminder events")
+
+        # Precise date check: daily reminders must cover 2026-03-09..2026-03-15
+        expected_daily_dates = {dt.date(2026, 3, d) for d in range(9, 16)}
+        daily_dates = {r[1].date() for r in daily_events_raw if r[1] is not None}
+        missing = expected_daily_dates - daily_dates
+        record("GCal daily reminders cover 2026-03-09..2026-03-15",
+               not missing,
+               f"Missing dates: {missing}")
 
         # Total events check
         cur.execute("SELECT COUNT(*) FROM gcal.events")
@@ -224,9 +243,25 @@ def check_email():
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
 
+        # Reverse validation: noise preservation
+        cur.execute("SELECT COUNT(*) FROM email.messages WHERE message_id LIKE 'noise-em-wp-%'")
+        noise_em_cnt = cur.fetchone()[0]
+        record("Noise emails preserved", noise_em_cnt >= 3,
+               f"Found {noise_em_cnt}/3 noise emails")
+
+        cur.execute("SELECT COUNT(*) FROM gcal.events WHERE id LIKE 'noise-gcal-wp-%'")
+        noise_gcal_cnt = cur.fetchone()[0]
+        record("Noise gcal events preserved", noise_gcal_cnt >= 3,
+               f"Found {noise_gcal_cnt}/3 noise gcal events")
+
+        cur.execute("SELECT COUNT(*) FROM gsheet.spreadsheets WHERE id LIKE 'noise-ss-wp-%'")
+        noise_ss_cnt = cur.fetchone()[0]
+        record("Noise spreadsheets preserved", noise_ss_cnt >= 3,
+               f"Found {noise_ss_cnt}/3 noise spreadsheets")
+
         cur.execute("""
             SELECT subject, to_addr FROM email.messages
-            WHERE LOWER(subject) LIKE '%meal plan%'
+            WHERE LOWER(subject) LIKE '%meal plan%' AND message_id NOT LIKE 'noise-em-wp-%'
         """)
         emails = cur.fetchall()
         record("Email with 'Meal Plan' in subject sent", len(emails) > 0,

@@ -34,7 +34,11 @@ def inject_data(launch_time):
         ('2301.01234', 'Scaling Laws for Large Language Models', '[{"name": "J. Kaplan"}]'::jsonb,
          'We study empirical scaling laws.', '["cs.CL"]'::jsonb, 'cs.CL', 'https://arxiv.org/pdf/2301.01234', '2023-01-15'),
         ('2302.05678', 'Advances in Vision Transformers', '[{"name": "A. Dosovitskiy"}]'::jsonb,
-         'We survey vision transformers.', '["cs.CV"]'::jsonb, 'cs.CV', 'https://arxiv.org/pdf/2302.05678', '2023-02-20')""")
+         'We survey vision transformers.', '["cs.CV"]'::jsonb, 'cs.CV', 'https://arxiv.org/pdf/2302.05678', '2023-02-20'),
+        ('2303.09012', 'Reinforcement Learning From Human Feedback', '[{"name": "J. Leike"}]'::jsonb,
+         'We discuss RLHF for alignment.', '["cs.LG"]'::jsonb, 'cs.LG', 'https://arxiv.org/pdf/2303.09012', '2023-03-12'),
+        ('2304.03456', 'Federated Learning Survey 2023', '[{"name": "P. Kairouz"}]'::jsonb,
+         'A survey of federated learning approaches.', '["cs.LG"]'::jsonb, 'cs.LG', 'https://arxiv.org/pdf/2304.03456', '2023-04-08')""")
     conn.commit()
     cur.close()
     conn.close()

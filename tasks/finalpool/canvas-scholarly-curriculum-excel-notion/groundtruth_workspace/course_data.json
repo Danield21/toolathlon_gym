@@ -1,0 +1,8 @@
+{
+  "courses": [
+    {"course_name": "Applied Analytics & Algorithms (Fall 2013)", "course_code": "AAA-2013J", "enrollment_count": 500, "avg_score": 65.0},
+    {"course_name": "Biochemistry & Bioinformatics (Fall 2013)", "course_code": "BBB-2013J", "enrollment_count": 400, "avg_score": 62.0},
+    {"course_name": "Creative Computing & Culture (Fall 2014)", "course_code": "CCC-2014J", "enrollment_count": 350, "avg_score": 68.0},
+    {"course_name": "Data-Driven Design (Fall 2013)", "course_code": "DDD-2013J", "enrollment_count": 450, "avg_score": 64.0}
+  ]
+}

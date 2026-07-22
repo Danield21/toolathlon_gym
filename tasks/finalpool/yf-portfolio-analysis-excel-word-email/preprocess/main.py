@@ -9,7 +9,7 @@ import sys
 
 import psycopg2
 
-DB = {"host": os.environ.get("PGHOST", "localhost"), "port": 5432, "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
+DB = {"host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")), "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
 TASK_ROOT = os.path.dirname(os.path.abspath(__file__))
 INITIAL_WORKSPACE = os.path.join(TASK_ROOT, "..", "initial_workspace")
 

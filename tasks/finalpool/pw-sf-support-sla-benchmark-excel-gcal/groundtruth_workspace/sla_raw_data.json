@@ -1,0 +1,12 @@
+{
+  "benchmarks": [
+    {"priority": "High", "avg_response_hrs": 3.5},
+    {"priority": "Medium", "avg_response_hrs": 7},
+    {"priority": "Low", "avg_response_hrs": 20}
+  ],
+  "our_data": [
+    {"priority": "High", "ticket_count": 6466, "avg_response_hrs": 6.23, "avg_csat": 3.26},
+    {"priority": "Medium", "ticket_count": 15774, "avg_response_hrs": 12.28, "avg_csat": 3.26},
+    {"priority": "Low", "ticket_count": 9348, "avg_response_hrs": 25.76, "avg_csat": 3.25}
+  ]
+}

@@ -31,6 +31,16 @@ async def main():
     task_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     files_dir = os.path.join(task_root, "files")
 
+    # 0. Clean any stale output from previous runs
+    if args.agent_workspace:
+        stale = os.path.join(args.agent_workspace, "Q1_Sales_Review.xlsx")
+        if os.path.isfile(stale):
+            try:
+                os.remove(stale)
+                print(f"  Removed stale {stale}")
+            except OSError as e:
+                print(f"  Warning: could not remove {stale}: {e}")
+
     # 1. Unpack mock dashboard HTML from files/
     print("Setting up mock analytics dashboard ...")
     tmp_dir = os.path.join(task_root, "tmp")
@@ -53,7 +63,24 @@ async def main():
         f"> {mock_dir}/server.log 2>&1 &"
     )
     await asyncio.sleep(1)
-    print(f"  -> Mock dashboard running at http://localhost:{port}")
+    # Health check: wait up to 5s for the server to respond on /
+    import urllib.request
+    healthy = False
+    for _ in range(10):
+        try:
+            with urllib.request.urlopen(
+                f"http://localhost:{port}/", timeout=0.5
+            ) as resp:
+                if resp.status == 200:
+                    healthy = True
+                    break
+        except Exception:
+            await asyncio.sleep(0.5)
+    if healthy:
+        print(f"  -> Mock dashboard HEALTHY at http://localhost:{port}")
+    else:
+        print(f"  -> Mock dashboard launched but health check failed at "
+              f"http://localhost:{port}")
 
     print("\nPreprocessing completed successfully!")
 

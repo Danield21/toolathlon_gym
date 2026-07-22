@@ -16,7 +16,7 @@ import psycopg2
 
 DB_CONN = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -213,7 +213,10 @@ async def setup_mock_server():
 
     if os.path.exists(tar_path):
         with tarfile.open(tar_path, "r:gz") as tar:
-            tar.extractall(path=tmp_dir)
+            try:
+                tar.extractall(path=tmp_dir, filter="data")
+            except TypeError:
+                tar.extractall(path=tmp_dir)
         serve_dir = os.path.join(tmp_dir, "mock_pages")
     else:
         serve_dir = tmp_dir

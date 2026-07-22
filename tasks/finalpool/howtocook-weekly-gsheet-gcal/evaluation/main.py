@@ -45,19 +45,16 @@ def check_gsheet():
 
     cur.execute("""
         SELECT id, title FROM gsheet.spreadsheets
-        WHERE title ILIKE '%meal plan%' OR title ILIKE '%weekly%'
+        WHERE title ILIKE '%meal plan%' OR title ILIKE '%weekly%meal%'
         ORDER BY created_at DESC
         LIMIT 1
     """)
     spreadsheet = cur.fetchone()
 
-    if not spreadsheet:
-        # Try any spreadsheet
-        cur.execute("SELECT id, title FROM gsheet.spreadsheets ORDER BY created_at DESC LIMIT 1")
-        spreadsheet = cur.fetchone()
+    # Tightened: removed fallback to "any spreadsheet" — must explicitly match.
 
-    record("Weekly Meal Plan spreadsheet exists", spreadsheet is not None,
-           "No spreadsheet found with 'meal plan' or 'weekly' in title")
+    record("'Weekly Meal Plan' spreadsheet exists", spreadsheet is not None,
+           "No spreadsheet found with 'meal plan' in title")
 
     if spreadsheet:
         spreadsheet_id, title = spreadsheet
@@ -100,20 +97,11 @@ def check_gcal():
         SELECT summary, start_datetime, end_datetime
         FROM gcal.events
         WHERE start_datetime >= '2026-04-07' AND start_datetime <= '2026-04-13 23:59:59'
-        AND (summary ILIKE '%dinner%' OR summary ILIKE '%dinner prep%')
+        AND summary ILIKE '%dinner%'
         ORDER BY start_datetime
     """)
     events = cur.fetchall()
-
-    # Also check for any events in April 2026 if dinner-specific not found
-    if not events:
-        cur.execute("""
-            SELECT summary, start_datetime, end_datetime
-            FROM gcal.events
-            WHERE start_datetime >= '2026-04-07' AND start_datetime <= '2026-04-13 23:59:59'
-            ORDER BY start_datetime
-        """)
-        events = cur.fetchall()
+    # Removed fallback to "any event" — only dinner-themed events count.
 
     cur.close()
     conn.close()
@@ -207,7 +195,7 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

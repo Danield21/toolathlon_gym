@@ -24,6 +24,7 @@ DB_CONFIG = {
 DEPARTMENTS = ["Engineering", "Finance", "HR", "Operations", "R&D", "Sales", "Support"]
 
 # Hardcoded fallback flight risk data (sat<=4 AND perf>=4)
+# Priority rules from task.md: pct>=8.3 High, 7.9<=pct<8.3 Medium, pct<7.9 Low
 _FALLBACK_EXPECTED_DATA = {
     "Engineering": {"headcount": 7096, "flight_risk": 566, "pct": 7.98, "priority": "Medium"},
     "Finance":     {"headcount": 7148, "flight_risk": 598, "pct": 8.37, "priority": "High"},
@@ -59,13 +60,14 @@ def _get_expected_data_from_db():
             flight_risks = {r[0]: r[1] for r in cur.fetchall()}
 
             result = {}
+            # task.md: pct > 8.3 -> High; 7.9 <= pct <= 8.3 -> Medium; pct < 7.9 -> Low
             for dept in DEPARTMENTS:
                 hc = headcounts.get(dept, 0)
                 fr = flight_risks.get(dept, 0)
                 pct = round(fr / hc * 100, 2) if hc > 0 else 0
-                if pct >= 8.3:
+                if pct > 8.3:
                     priority = "High"
-                elif pct <= 7.5:
+                elif pct < 7.9:
                     priority = "Low"
                 else:
                     priority = "Medium"
@@ -223,8 +225,13 @@ def check_notion():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     try:
-        # Check database exists
-        cur.execute("SELECT id, title, properties FROM notion.databases WHERE title::text ILIKE '%retention%action%'")
+        # Check database exists - strict title match: must contain 'retention' + 'action' + 'items'
+        # or exact 'retention action items'.
+        cur.execute("""
+            SELECT id, title, properties FROM notion.databases
+            WHERE (title::text ILIKE '%retention%' AND title::text ILIKE '%action%' AND title::text ILIKE '%items%')
+               OR title::text ILIKE '%retention action items%'
+        """)
         dbs = cur.fetchall()
         if not dbs:
             cur.execute("SELECT id, title, properties FROM notion.databases")
@@ -352,7 +359,8 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    # Tightened: require all checks to pass (previously >=70%).
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

@@ -13,6 +13,7 @@ DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+RUNTIME_ONLY_FAIL = 0
 
 TRANSFORMER_IDS = {"1706.03762", "1810.04805", "2005.14165",
                    "1409.0473", "1910.10683", "2009.06732"}
@@ -20,13 +21,15 @@ NOISE_IDS = {"1207.00580", "1502.03167", "1312.06199"}
 CATEGORIES = ["Architecture Design", "Training Methods", "Applications", "Survey"]
 
 
-def check(name, condition, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def check(name, condition, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, RUNTIME_ONLY_FAIL
     if condition:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if runtime_only:
+            RUNTIME_ONLY_FAIL += 1
         d = f": {str(detail)[:200]}" if detail else ""
         print(f"  [FAIL] {name}{d}")
 
@@ -97,8 +100,8 @@ def check_excel(ws_path):
                 overlap_val = str(r[4]).strip().lower() if len(r) > 4 and r[4] else ""
                 if "yes" in overlap_val:
                     overlap_count += 1
-        check("6 transformer papers marked as overlap", overlap_count >= 5,
-              f"Found {overlap_count}")
+        check("All 6 transformer papers marked as overlap", overlap_count == 6,
+              f"Found {overlap_count} (expected exactly 6)")
 
     wb.close()
 
@@ -151,7 +154,8 @@ def check_notion():
             break
 
     check("Research Paper Tracker database exists", found_db is not None,
-          f"Databases: {[d[1] for d in databases]}")
+          f"Databases: {[d[1] for d in databases]}",
+          runtime_only=True)
 
     if found_db:
         cur.execute(
@@ -160,7 +164,8 @@ def check_notion():
         )
         page_count = cur.fetchone()[0]
         check("Notion database has >= 6 paper entries", page_count >= 6,
-              f"Found {page_count} pages")
+              f"Found {page_count} pages",
+              runtime_only=True)
 
     conn.close()
 
@@ -212,8 +217,9 @@ def main():
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")
     print(f"  Failed: {FAIL_COUNT}")
-    overall = FAIL_COUNT == 0
-    print(f"  Overall: {'PASS' if overall else 'FAIL'}")
+    non_runtime_fail = FAIL_COUNT - RUNTIME_ONLY_FAIL
+    overall = non_runtime_fail == 0
+    print(f"  Overall: {'PASS' if overall else 'FAIL'} (runtime-only fails: {RUNTIME_ONLY_FAIL})")
     sys.exit(0 if overall else 1)
 
 

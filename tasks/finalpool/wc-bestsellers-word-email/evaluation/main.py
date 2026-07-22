@@ -81,16 +81,30 @@ def check_word(workspace, expected):
 
     check("Table has 10 data rows", len(rows) == 10, f"Got {len(rows)} rows")
 
-    # Check top product matches
+    # Check all 10 product names match (by rank)
+    mismatches = 0
+    for i, (exp_name, exp_sold, exp_price) in enumerate(expected):
+        if i >= len(rows):
+            break
+        row = rows[i]
+        if len(row) > 1:
+            actual_name = row[1]
+            if actual_name[:30].lower() != exp_name[:30].lower():
+                mismatches += 1
+    check("All 10 product names match (within first 30 chars)",
+          mismatches == 0,
+          f"{mismatches} of {len(expected)} product names mismatch")
+
+    # Legacy single-product check for backward compat
     if len(rows) >= 1:
         top_name_in_doc = rows[0][1] if len(rows[0]) > 1 else ""
         exp_top_name = expected[0][0]
-        # Compare first 30 chars
         check("Top product name matches",
               top_name_in_doc[:30].lower() == exp_top_name[:30].lower(),
               f"Expected '{exp_top_name[:50]}', got '{top_name_in_doc[:50]}'")
 
-    # Check total_sold values
+    # Check total_sold and price values
+    import re
     for i, (exp_name, exp_sold, exp_price) in enumerate(expected):
         if i >= len(rows):
             break
@@ -103,12 +117,47 @@ def check_word(workspace, expected):
                       f"Expected {exp_sold}, got {actual_sold}")
             except ValueError:
                 check(f"Rank {i+1} Total_Sold", False, f"Cannot parse: {row[2]}")
+        # Price (col 3 typically)
+        if len(row) >= 4:
+            price_str = str(row[3])
+            # Extract first numeric value from the cell
+            m = re.search(r"(-?\d+(?:\.\d+)?)", price_str.replace(",", ""))
+            if m:
+                try:
+                    actual_price = float(m.group(1))
+                    if abs(actual_price - exp_price) > 0.02:
+                        check(f"Rank {i+1} Price", False,
+                              f"Expected {exp_price:.2f}, got {actual_price:.2f}")
+                    else:
+                        check(f"Rank {i+1} Price", True)
+                except ValueError:
+                    check(f"Rank {i+1} Price", False, f"Cannot parse: {price_str}")
 
-    # Check summary section
+    # Check that rows are sorted by Total_Sold descending
+    sold_vals = []
+    for row in rows:
+        if len(row) >= 3:
+            try:
+                sold_vals.append(int(row[2]))
+            except ValueError:
+                pass
+    check("Rows sorted by Total_Sold descending",
+          all(sold_vals[i] >= sold_vals[i+1] for i in range(len(sold_vals)-1)),
+          f"Sold vals: {sold_vals}")
+
+    # Check summary section: total + avg price
     total_sold_all = sum(p[1] for p in expected)
     check("Summary mentions total units",
           str(total_sold_all) in full_text,
           f"Expected {total_sold_all} in text")
+    # Avg price across top 10
+    avg_price = sum(p[2] for p in expected) / len(expected)
+    # Accept avg price with 1 decimal precision
+    avg_price_str_2dec = f"{avg_price:.2f}"
+    avg_price_str_1dec = f"{avg_price:.1f}"
+    check("Summary mentions avg price of top 10",
+          avg_price_str_2dec in full_text or avg_price_str_1dec in full_text,
+          f"Expected ~{avg_price_str_2dec} in text")
 
 
 def check_email(expected):

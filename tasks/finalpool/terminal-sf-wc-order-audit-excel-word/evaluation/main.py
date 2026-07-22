@@ -1,6 +1,6 @@
 """Evaluation for terminal-sf-wc-order-audit-excel-word.
 Checks:
-1. Order_Audit_Report.xlsx with 4 sheets and correct data
+1. Order_Audit_Report.xlsx with 4 sheets and correct data (compared to GT)
 2. Audit_Findings.docx with required sections
 3. audit_analysis.py script exists
 """
@@ -10,9 +10,6 @@ import os
 import sys
 import openpyxl
 import psycopg2
-
-def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
-    return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
 
 
 DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
@@ -33,6 +30,15 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}: {str(detail)[:200]}")
 
 
+def num_close(a, b, tol):
+    if a is None or b is None:
+        return False
+    try:
+        return abs(float(a) - float(b)) <= tol
+    except Exception:
+        return False
+
+
 def safe_float(val, default=None):
     try:
         if val is None:
@@ -42,7 +48,22 @@ def safe_float(val, default=None):
         return default
 
 
-def check_excel(workspace):
+def _norm_header(s):
+    return str(s or "").strip().lower().replace(" ", "_")
+
+
+def _load_sheet(wb, name):
+    for s in wb.sheetnames:
+        if s.lower().replace(" ", "_") == name.lower().replace(" ", "_"):
+            return wb[s]
+    # fallback: substring match
+    for s in wb.sheetnames:
+        if name.lower().split("_")[0] in s.lower():
+            return wb[s]
+    return None
+
+
+def check_excel(workspace, gt_dir):
     print("\n=== Check 1: Order_Audit_Report.xlsx ===")
     path = os.path.join(workspace, "Order_Audit_Report.xlsx")
     if not os.path.exists(path):
@@ -50,82 +71,154 @@ def check_excel(workspace):
         return
     check("Excel file exists", True)
 
-    wb = openpyxl.load_workbook(path)
-    sheets = wb.sheetnames
-    sheets_lower = [s.lower() for s in sheets]
+    wb = openpyxl.load_workbook(path, data_only=True)
+    gt_path = os.path.join(gt_dir, "Order_Audit_Report.xlsx")
+    gt_wb = openpyxl.load_workbook(gt_path, data_only=True) if os.path.exists(gt_path) else None
+    check("Has 4 sheets", len(wb.sheetnames) >= 4, f"Found {len(wb.sheetnames)}: {wb.sheetnames}")
 
-    # Check 4 sheets
-    check("Has at least 4 sheets", len(sheets) >= 4, f"Found {len(sheets)}: {sheets}")
-
-    # DW_Summary sheet
-    dw_idx = next((i for i, s in enumerate(sheets_lower) if "dw" in s or "warehouse" in s), 0)
-    ws_dw = wb[sheets[dw_idx]]
-    rows_dw = list(ws_dw.iter_rows(values_only=True))
-    if len(rows_dw) > 1:
-        all_text = " ".join(str(c) for r in rows_dw for c in r if c).lower()
-        check("DW sheet has Delivered status", "delivered" in all_text, f"Content: {all_text[:100]}")
-        check("DW sheet has Cancelled status", "cancelled" in all_text, f"Content: {all_text[:100]}")
-
-        # Dynamically compute expected values from read-only DB
-        try:
-            conn = psycopg2.connect(**DB)
-            cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM sf_data.orders WHERE LOWER(order_status) = 'delivered'")
-            expected_delivered = cur.fetchone()[0]
-            cur.execute("SELECT COALESCE(SUM(sales), 0) FROM sf_data.orders WHERE LOWER(order_status) = 'delivered'")
-            expected_revenue = float(cur.fetchone()[0])
-            cur.close()
-            conn.close()
-        except Exception:
-            expected_delivered = 14033
-            expected_revenue = 2177149.66
-
-        # Find Delivered row and check count
-        for row in rows_dw[1:]:
-            if row[0] and "deliver" in str(row[0]).lower():
-                count = safe_float(row[1])
-                check(f"Delivered order count ~{expected_delivered}",
-                      count is not None and abs(count - expected_delivered) < max(100, expected_delivered * 0.01),
-                      f"Got {count}, expected ~{expected_delivered}")
-                rev = safe_float(row[2])
-                check(f"Delivered revenue ~{expected_revenue:.0f}",
-                      rev is not None and abs(rev - expected_revenue) < max(5000, expected_revenue * 0.01),
-                      f"Got {rev}, expected ~{expected_revenue:.0f}")
-                break
+    # ---------- DW_Summary ----------
+    ws_dw = _load_sheet(wb, "DW_Summary")
+    if ws_dw is None:
+        check("DW_Summary sheet present", False, f"sheets: {wb.sheetnames}")
     else:
-        check("DW sheet has data", False, "Sheet is empty")
+        check("DW_Summary sheet present", True)
+        rows_dw = list(ws_dw.iter_rows(values_only=True))
+        headers = [_norm_header(c) for c in (rows_dw[0] if rows_dw else [])]
+        for h in ["status", "order_count", "total_revenue"]:
+            check(f"DW_Summary header '{h}'", h in headers, f"got {headers}")
+        if gt_wb:
+            gt_ws = _load_sheet(gt_wb, "DW_Summary")
+            gt_rows = list(gt_ws.iter_rows(values_only=True))
+            gt_headers = [_norm_header(c) for c in gt_rows[0]]
+            gt_data = [r for r in gt_rows[1:] if r and r[0]]
+            a_lookup = {str(r[0]).strip().lower(): r for r in rows_dw[1:] if r and r[0]}
+            for g_row in gt_data:
+                key = str(g_row[0]).strip().lower()
+                a_row = a_lookup.get(key)
+                if a_row is None:
+                    check(f"DW_Summary row '{g_row[0]}'", False)
+                    continue
+                # Order_Count
+                if "order_count" in headers:
+                    oc_idx = headers.index("order_count")
+                    g_oc = g_row[gt_headers.index("order_count")]
+                    check(
+                        f"DW_Summary '{g_row[0]}' order_count",
+                        num_close(safe_float(a_row[oc_idx]), safe_float(g_oc), max(20, safe_float(g_oc, 1) * 0.005)),
+                        f"a={a_row[oc_idx]} g={g_oc}",
+                    )
+                # Total_Revenue (tol 0.5%)
+                if "total_revenue" in headers:
+                    tr_idx = headers.index("total_revenue")
+                    g_tr = g_row[gt_headers.index("total_revenue")]
+                    check(
+                        f"DW_Summary '{g_row[0]}' total_revenue",
+                        num_close(safe_float(a_row[tr_idx]), safe_float(g_tr), max(100, safe_float(g_tr, 1) * 0.005)),
+                        f"a={a_row[tr_idx]} g={g_tr}",
+                    )
 
-    # Store_Summary sheet
-    store_idx = next((i for i, s in enumerate(sheets_lower) if "store" in s), 1)
-    if store_idx < len(sheets):
-        ws_store = wb[sheets[store_idx]]
+    # ---------- Store_Summary ----------
+    ws_store = _load_sheet(wb, "Store_Summary")
+    if ws_store is None:
+        check("Store_Summary sheet present", False)
+    else:
+        check("Store_Summary sheet present", True)
         rows_store = list(ws_store.iter_rows(values_only=True))
-        all_text_store = " ".join(str(c) for r in rows_store for c in r if c).lower()
-        check("Store sheet has product count", "82" in all_text_store or "product" in all_text_store,
-              f"Content snippet: {all_text_store[:100]}")
+        headers = [_norm_header(c) for c in (rows_store[0] if rows_store else [])]
+        for h in ["metric", "value"]:
+            check(f"Store_Summary header '{h}'", h in headers, f"got {headers}")
+        if gt_wb:
+            gt_ws = _load_sheet(gt_wb, "Store_Summary")
+            gt_rows = list(gt_ws.iter_rows(values_only=True))
+            gt_data = [r for r in gt_rows[1:] if r and r[0]]
+            a_lookup = {str(r[0]).strip().lower(): r for r in rows_store[1:] if r and r[0]}
+            for g_row in gt_data:
+                key = str(g_row[0]).strip().lower()
+                a_row = a_lookup.get(key)
+                if a_row is None:
+                    check(f"Store_Summary metric '{g_row[0]}'", False)
+                    continue
+                # Value (tol 0; integer counts and currency)
+                v_idx = headers.index("value") if "value" in headers else 1
+                g_v = g_row[1]
+                check(
+                    f"Store_Summary '{g_row[0]}' value",
+                    num_close(safe_float(a_row[v_idx]), safe_float(g_v), 0.5),
+                    f"a={a_row[v_idx]} g={g_v}",
+                )
 
-    # ShipMode sheet
-    ship_idx = next((i for i, s in enumerate(sheets_lower) if "ship" in s or "mode" in s), 2)
-    if ship_idx < len(sheets):
-        ws_ship = wb[sheets[ship_idx]]
+    # ---------- ShipMode_Breakdown ----------
+    ws_ship = _load_sheet(wb, "ShipMode_Breakdown")
+    if ws_ship is None:
+        check("ShipMode_Breakdown sheet present", False)
+    else:
+        check("ShipMode_Breakdown sheet present", True)
         rows_ship = list(ws_ship.iter_rows(values_only=True))
-        all_text_ship = " ".join(str(c) for r in rows_ship for c in r if c).lower()
-        check("ShipMode sheet has Economy", "economy" in all_text_ship, f"Content: {all_text_ship[:100]}")
-        check("ShipMode sheet has Express", "express" in all_text_ship, f"Content: {all_text_ship[:100]}")
-        check("ShipMode sheet has Standard", "standard" in all_text_ship, f"Content: {all_text_ship[:100]}")
+        headers = [_norm_header(c) for c in (rows_ship[0] if rows_ship else [])]
+        for h in ["ship_mode", "order_count", "total_revenue"]:
+            check(f"ShipMode_Breakdown header '{h}'", h in headers, f"got {headers}")
+        if gt_wb:
+            gt_ws = _load_sheet(gt_wb, "ShipMode_Breakdown")
+            gt_rows = list(gt_ws.iter_rows(values_only=True))
+            gt_headers = [_norm_header(c) for c in gt_rows[0]]
+            gt_data = [r for r in gt_rows[1:] if r and r[0]]
+            a_lookup = {str(r[0]).strip().lower(): r for r in rows_ship[1:] if r and r[0]}
+            # Validate all 4 ship modes (Economy, Express, Next Day, Standard)
+            for g_row in gt_data:
+                key = str(g_row[0]).strip().lower()
+                a_row = a_lookup.get(key)
+                if a_row is None:
+                    check(f"ShipMode '{g_row[0]}' present", False)
+                    continue
+                if "order_count" in headers:
+                    oc_idx = headers.index("order_count")
+                    g_oc = g_row[gt_headers.index("order_count")]
+                    check(
+                        f"ShipMode '{g_row[0]}' order_count",
+                        num_close(safe_float(a_row[oc_idx]), safe_float(g_oc), max(20, safe_float(g_oc, 1) * 0.01)),
+                        f"a={a_row[oc_idx]} g={g_oc}",
+                    )
+                if "total_revenue" in headers:
+                    tr_idx = headers.index("total_revenue")
+                    g_tr = g_row[gt_headers.index("total_revenue")]
+                    check(
+                        f"ShipMode '{g_row[0]}' total_revenue",
+                        num_close(safe_float(a_row[tr_idx]), safe_float(g_tr), max(100, safe_float(g_tr, 1) * 0.01)),
+                        f"a={a_row[tr_idx]} g={g_tr}",
+                    )
 
-    # Reconciliation sheet
-    recon_idx = next((i for i, s in enumerate(sheets_lower) if "recon" in s), 3)
-    if recon_idx < len(sheets):
-        ws_recon = wb[sheets[recon_idx]]
+    # ---------- Reconciliation ----------
+    ws_recon = _load_sheet(wb, "Reconciliation")
+    if ws_recon is None:
+        check("Reconciliation sheet present", False)
+    else:
+        check("Reconciliation sheet present", True)
         rows_recon = list(ws_recon.iter_rows(values_only=True))
-        check("Reconciliation sheet has data", len(rows_recon) > 1,
-              f"Found {len(rows_recon)} rows")
-        if len(rows_recon) > 1:
-            all_text_recon = " ".join(str(c) for r in rows_recon for c in r if c).lower()
-            check("Reconciliation has order count comparison",
-                  "order" in all_text_recon or "20000" in all_text_recon,
-                  f"Content: {all_text_recon[:100]}")
+        headers = [_norm_header(c) for c in (rows_recon[0] if rows_recon else [])]
+        for h in ["metric", "dw_value", "store_value", "difference"]:
+            check(f"Reconciliation header '{h}'", h in headers, f"got {headers}")
+        if gt_wb:
+            gt_ws = _load_sheet(gt_wb, "Reconciliation")
+            gt_rows = list(gt_ws.iter_rows(values_only=True))
+            gt_headers = [_norm_header(c) for c in gt_rows[0]]
+            gt_data = [r for r in gt_rows[1:] if r and r[0]]
+            a_lookup = {str(r[0]).strip().lower(): r for r in rows_recon[1:] if r and r[0]}
+            for g_row in gt_data:
+                key = str(g_row[0]).strip().lower()
+                a_row = a_lookup.get(key)
+                if a_row is None:
+                    check(f"Reconciliation metric '{g_row[0]}' present", False)
+                    continue
+                # dw_value, store_value, difference (tol 0.5% or 5)
+                for col in ["dw_value", "store_value", "difference"]:
+                    if col in headers:
+                        idx = headers.index(col)
+                        g_v = g_row[gt_headers.index(col)]
+                        check(
+                            f"Reconciliation '{g_row[0]}' {col}",
+                            num_close(safe_float(a_row[idx]), safe_float(g_v), max(5, abs(safe_float(g_v, 1)) * 0.01)),
+                            f"a={a_row[idx]} g={g_v}",
+                        )
 
 
 def check_word(workspace):
@@ -140,53 +233,43 @@ def check_word(workspace):
         from docx import Document
         doc = Document(path)
         full_text = " ".join(p.text for p in doc.paragraphs).lower()
-        check("Doc mentions reconciliation or audit", "reconcil" in full_text or "audit" in full_text,
-              f"Text snippet: {full_text[:100]}")
-        check("Doc mentions data warehouse", "warehouse" in full_text or "dw" in full_text,
-              f"Text snippet: {full_text[:100]}")
-        check("Doc mentions online store or woocommerce", "store" in full_text or "woocommerce" in full_text or "ecommerce" in full_text,
-              f"Text snippet: {full_text[:100]}")
-        check("Doc mentions shipping or ship mode", "ship" in full_text,
-              f"Text snippet: {full_text[:100]}")
-        check("Doc has recommendation section", "recommend" in full_text,
-              f"Text snippet: {full_text[:200]}")
+        headings = [p.text.strip().lower() for p in doc.paragraphs if p.style.name.startswith("Heading") or p.style.name.startswith("Title")]
+
+        check(
+            "Doc title 'Order Reconciliation Audit Report' present",
+            any("order reconciliation audit report" in h for h in headings)
+            or "order reconciliation audit report" in full_text,
+            f"headings: {headings[:5]}",
+        )
+        # Required sections (require phrase, not single keyword)
+        check("Doc has data warehouse summary section",
+              "data warehouse" in full_text and "summary" in full_text)
+        check("Doc has online store summary section",
+              ("online store" in full_text or "store summary" in full_text) and "summary" in full_text)
+        check("Doc has ship mode breakdown section", "ship" in full_text and "mode" in full_text)
+        check("Doc has reconciliation findings section", "reconcil" in full_text and "finding" in full_text)
+        check("Doc has recommendations", "recommend" in full_text)
+        check("Doc mentions all 4 status values (delivered, cancelled, processing, shipped)",
+              all(s in full_text for s in ["delivered", "cancelled", "processing", "shipped"]))
+        check("Doc mentions all 4 ship modes", all(s in full_text for s in ["economy", "express", "next day", "standard"]))
     except Exception as e:
         check("Word document readable", False, str(e))
-
-
-def check_reverse_validation(workspace):
-    """Reverse validation: check things that should NOT exist."""
-    print("\n=== Reverse Validation ===")
-    path = os.path.join(workspace, "Order_Audit_Report.xlsx")
-    if os.path.exists(path):
-        wb = openpyxl.load_workbook(path)
-        sheets_lower = [s.lower() for s in wb.sheetnames]
-        # No unexpected/garbage sheets
-        valid_keywords = ["dw", "warehouse", "store", "ship", "mode", "recon", "summary", "audit", "order"]
-        unexpected = [s for s in wb.sheetnames
-                      if not any(k in s.lower() for k in valid_keywords) and s.lower() != "sheet1"]
-        check("No unexpected sheets in Excel", len(unexpected) == 0,
-              f"Unexpected sheets: {unexpected}")
-
-        # Check no test/debug data leaked
-        all_text = ""
-        for ws in wb.worksheets:
-            for row in ws.iter_rows(values_only=True):
-                all_text += " ".join(str(c) for c in row if c) + " "
-        all_lower = all_text.lower()
-        check("No debug/test data in Excel", "test" not in all_lower or "test" in all_lower,
-              True)  # soft check
-        check("No negative order counts", all(
-            safe_float(c, 0) >= 0 for ws in wb.worksheets
-            for row in ws.iter_rows(min_row=2, values_only=True)
-            for c in [row[1]] if c is not None and isinstance(safe_float(c), (int, float))
-        ), "Found negative counts")
 
 
 def check_script(workspace):
     print("\n=== Check 3: audit_analysis.py ===")
     path = os.path.join(workspace, "audit_analysis.py")
-    check("audit_analysis.py exists", os.path.exists(path), f"Not found at {path}")
+    if not os.path.exists(path):
+        check("audit_analysis.py exists", False, f"Not found at {path}")
+        return
+    check("audit_analysis.py exists", True)
+    # Verify script content references reconciliation logic
+    with open(path) as f:
+        content = f.read().lower()
+    check("audit_analysis.py mentions order count comparison",
+          "order" in content and ("count" in content or "total" in content))
+    check("audit_analysis.py mentions ship mode breakdown",
+          ("ship_mode" in content or "ship mode" in content) and any(t in content for t in ["economy", "express", "standard", "next day"]))
 
 
 def main():
@@ -197,29 +280,23 @@ def main():
     parser.add_argument("--res_log_file", required=False)
     args = parser.parse_args()
 
-    check_excel(args.agent_workspace)
+    check_excel(args.agent_workspace, args.groundtruth_workspace)
     check_word(args.agent_workspace)
     check_script(args.agent_workspace)
-    check_reverse_validation(args.agent_workspace)
 
     total = PASS_COUNT + FAIL_COUNT
-    if total == 0:
-        print("\nFAIL: No checks performed.")
-        sys.exit(1)
+    print(f"\nOverall: {PASS_COUNT}/{total} checks passed")
 
-    accuracy = PASS_COUNT / total * 100
-    print(f"\nOverall: {PASS_COUNT}/{total} checks passed ({accuracy:.1f}%)")
-
-    result = {"total_passed": PASS_COUNT, "total_checks": total, "accuracy": accuracy}
+    result = {"total_passed": PASS_COUNT, "total_checks": total}
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:
-        print("FAIL")
+        print(f"FAIL ({FAIL_COUNT} failures)")
         sys.exit(1)
 
 

@@ -1,0 +1,9 @@
+{
+  "contents": [
+    {"id": "2301.00001", "title": "LLM Reasoning Survey", "key_methods": ["chain-of-thought", "tree of thoughts"], "abstract": "A survey of reasoning methods in LLMs."},
+    {"id": "2302.00002", "title": "Prompt Engineering Guide", "key_methods": ["few-shot prompting", "instruction tuning"], "abstract": "A comprehensive guide to prompt engineering."},
+    {"id": "2303.00003", "title": "In-Context Learning Theory", "key_methods": ["retrieval augmented", "in-context learning"], "abstract": "Theoretical foundations of in-context learning."},
+    {"id": "2304.00004", "title": "Chain-of-Thought Reasoning", "key_methods": ["chain-of-thought"], "abstract": "Chain-of-thought reasoning in LLMs."},
+    {"id": "2305.00005", "title": "Survey of In-Context Learning", "key_methods": ["in-context learning"], "abstract": "Survey of in-context learning approaches."}
+  ]
+}

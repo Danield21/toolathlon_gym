@@ -45,7 +45,7 @@ def get_conn():
     return psycopg2.connect(**DB_CONFIG)
 
 
-def values_close(a, b, tolerance=0.15):
+def values_close(a, b, tolerance=0.03):
     """Check if two numeric values are within tolerance (relative)."""
     if a is None or b is None:
         return False
@@ -75,7 +75,22 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
             ws = wb["Internal Metrics"]
             headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
             data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-            check("Internal Metrics has >= 4 rows", len(data_rows) >= 4, f"got {len(data_rows)}")
+            # GT has 6 metric rows; require exact count
+            gt_im_rows = []
+            if gt_wb and "Internal Metrics" in gt_wb.sheetnames:
+                gt_im_rows = list(gt_wb["Internal Metrics"].iter_rows(min_row=2, values_only=True))
+            min_im = max(6, len(gt_im_rows))
+            # Strict equality on row count when GT is known
+            if gt_im_rows:
+                check(f"Internal Metrics has == {min_im} rows", len(data_rows) == min_im, f"got {len(data_rows)}")
+            else:
+                check(f"Internal Metrics has >= {min_im} rows", len(data_rows) >= min_im, f"got {len(data_rows)}")
+
+            # Sort: alphabetical by Metric
+            metric_vals = [str(r[0]).strip() for r in data_rows if r and r[0]]
+            check("Internal Metrics sorted alphabetically",
+                  metric_vals == sorted(metric_vals, key=lambda s: s.lower()),
+                  f"order: {metric_vals[:3]}")
 
             for expected_col in ['metric', 'internal_value', 'source_note']:
                 check(f"Internal Metrics has '{expected_col}' column",
@@ -108,7 +123,21 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
             ws = wb["Gap Analysis"]
             headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
             data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-            check("Gap Analysis has >= 4 rows", len(data_rows) >= 4, f"got {len(data_rows)}")
+            # GT Gap Analysis has 4 calculable rows (N/A metrics excluded)
+            gt_ga_rows = []
+            if gt_wb and "Gap Analysis" in gt_wb.sheetnames:
+                gt_ga_rows = list(gt_wb["Gap Analysis"].iter_rows(min_row=2, values_only=True))
+            min_ga = max(4, len(gt_ga_rows))
+            if gt_ga_rows:
+                check(f"Gap Analysis has == {min_ga} rows", len(data_rows) == min_ga, f"got {len(data_rows)}")
+            else:
+                check(f"Gap Analysis has >= {min_ga} rows", len(data_rows) >= min_ga, f"got {len(data_rows)}")
+
+            # Sort: alphabetical by Metric (per task.md)
+            metric_vals = [str(r[0]).strip() for r in data_rows if r and r[0]]
+            check("Gap Analysis sorted alphabetically by metric",
+                  metric_vals == sorted(metric_vals, key=lambda s: s.lower()),
+                  f"order: {metric_vals[:3]}")
 
             for expected_col in ['metric', 'internal_value', 'industry_avg', 'classification', 'priority']:
                 check(f"Gap Analysis has '{expected_col}' column",
@@ -153,11 +182,59 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
             ws = wb["Action Plan"]
             headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
             data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-            check("Action Plan has >= 2 rows", len(data_rows) >= 2, f"got {len(data_rows)}")
+            gt_ap_rows = []
+            if gt_wb and "Action Plan" in gt_wb.sheetnames:
+                gt_ap_rows = list(gt_wb["Action Plan"].iter_rows(min_row=2, values_only=True))
+            min_ap = max(2, len(gt_ap_rows))
+            if gt_ap_rows:
+                check(f"Action Plan has == {min_ap} rows", len(data_rows) == min_ap, f"got {len(data_rows)}")
+            else:
+                check(f"Action Plan has >= {min_ap} rows", len(data_rows) >= min_ap, f"got {len(data_rows)}")
 
-            for expected_col in ['metric', 'classification', 'recommended_action']:
+            for expected_col in ['metric', 'classification', 'recommended_action',
+                                 'estimated_impact', 'timeline']:
                 check(f"Action Plan has '{expected_col}' column",
                       expected_col in headers, f"headers: {headers}")
+
+            # Sort: by priority ascending. Critical (priority 1) before Moderate (priority 2)
+            class_idx = headers.index('classification') if 'classification' in headers else None
+            if class_idx is not None and data_rows:
+                priority_order = []
+                for r in data_rows:
+                    if r and class_idx < len(r) and r[class_idx]:
+                        c = str(r[class_idx]).lower()
+                        if 'critical' in c:
+                            priority_order.append(1)
+                        elif 'moderate' in c:
+                            priority_order.append(2)
+                        elif 'on track' in c:
+                            priority_order.append(3)
+                        elif 'leading' in c:
+                            priority_order.append(4)
+                        else:
+                            priority_order.append(99)
+                check("Action Plan sorted by priority ascending",
+                      priority_order == sorted(priority_order),
+                      f"priorities={priority_order}")
+
+            # Action Plan content vs GT: each metric has non-empty action/impact/timeline
+            if gt_ap_rows:
+                ra_idx = headers.index('recommended_action') if 'recommended_action' in headers else None
+                ei_idx = headers.index('estimated_impact') if 'estimated_impact' in headers else None
+                tl_idx = headers.index('timeline') if 'timeline' in headers else None
+                gt_metrics = {str(r[0]).strip() for r in gt_ap_rows if r and r[0]}
+                a_by_metric = {str(r[0]).strip(): r for r in data_rows if r and r[0]}
+                for m in gt_metrics:
+                    if m in a_by_metric:
+                        r = a_by_metric[m]
+                        for label, idx in [("recommended_action", ra_idx),
+                                           ("estimated_impact", ei_idx),
+                                           ("timeline", tl_idx)]:
+                            if idx is None or idx >= len(r):
+                                continue
+                            v = (str(r[idx]).strip() if r[idx] is not None else "")
+                            check(f"Action Plan '{m}' {label} non-empty",
+                                  len(v) >= 5, f"got {v!r}")
 
     # --- Word Document Evaluation ---
     word_path = os.path.join(agent_workspace, "Benchmark_Report.docx")
@@ -179,50 +256,106 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                   section.lower() in full_lower,
                   "section not found")
 
-        # Check key values mentioned
+        # Derive expected reference values from GT instead of hardcoding.
+        gt_salary = None
+        gt_order_value = None
+        if gt_wb and "Internal Metrics" in gt_wb.sheetnames:
+            for r in gt_wb["Internal Metrics"].iter_rows(min_row=2, values_only=True):
+                if r and r[0]:
+                    name = str(r[0]).strip().lower()
+                    if name == "avg_salary":
+                        gt_salary = safe_float(r[1])
+                    elif name == "avg_order_value":
+                        gt_order_value = safe_float(r[1])
+        # Build acceptable salary tokens (handles 58396, 58,396, 58396.14)
+        def _value_tokens(v):
+            if v is None:
+                return []
+            s_int = str(int(round(v)))
+            s_int_comma = f"{int(round(v)):,}"
+            s_full = f"{v}"
+            s_one = f"{v:.1f}"
+            return list({s_int, s_int_comma, s_full, s_one})
+        salary_tokens = _value_tokens(gt_salary or 58396)
+        order_tokens = _value_tokens(gt_order_value or 152.45)
         check("Word doc mentions avg salary value",
-              "58396" in full_text or "58,396" in full_text,
-              "avg salary not found")
+              any(t in full_text for t in salary_tokens),
+              f"expected one of {salary_tokens[:3]}")
         check("Word doc mentions avg order value",
-              "152.45" in full_text or "152" in full_text,
-              "avg order value not found")
-        check("Word doc mentions 'Critical' classification",
-              "critical" in full_lower)
-        check("Word doc mentions 'Moderate' classification",
-              "moderate" in full_lower)
+              any(t in full_text for t in order_tokens),
+              f"expected one of {order_tokens[:3]}")
+        # Scope: classification labels must appear inside the Gap Analysis
+        # section of the report (not just any random word elsewhere).
+        ga_idx = full_lower.find("gap analysis")
+        if ga_idx >= 0:
+            ga_section = full_lower[ga_idx:ga_idx + 4000]
+        else:
+            ga_section = ""
+        check("Word doc Gap Analysis section has 'Critical' classification",
+              "critical" in ga_section,
+              "label not found within 4000 chars after 'Gap Analysis' heading")
+        check("Word doc Gap Analysis section has 'Moderate' classification",
+              "moderate" in ga_section,
+              "label not found within 4000 chars after 'Gap Analysis' heading")
 
     # --- Email Evaluation ---
     try:
         conn = get_conn()
         cur = conn.cursor()
 
-        # Check for operations head email
+        # Operations head email - exact subject match
         cur.execute("""SELECT subject, to_addr, body_text FROM email.messages
-            WHERE to_addr::text ILIKE %s""", ('%operations_head%',))
+            WHERE to_addr::text ILIKE %s
+            AND subject ILIKE %s""",
+            ('%operations_head%', '%Annual Benchmark Analysis - Complete Report%'))
         ops_emails = cur.fetchall()
-        check("Email to operations_head@company.com sent", len(ops_emails) >= 1,
-              f"found {len(ops_emails)}")
+        check("Email to operations_head@company.com with correct subject",
+              len(ops_emails) >= 1, f"found {len(ops_emails)}")
+        # Body should mention BOTH a numeric metric value AND a classification term
+        if ops_emails:
+            body = (ops_emails[0][2] or "").lower()
+            has_number = any(t.lower() in body for t in (salary_tokens + order_tokens))
+            has_class = any(t in body for t in ["critical", "moderate", "on track", "leading"])
+            check("Operations email body mentions a metric value",
+                  has_number, body[:200])
+            check("Operations email body mentions a classification label",
+                  has_class, body[:200])
 
-        # Check for HR director email
+        # HR director email - exact subject
         cur.execute("""SELECT subject, to_addr, body_text FROM email.messages
-            WHERE to_addr::text ILIKE %s""", ('%hr_director%',))
+            WHERE to_addr::text ILIKE %s
+            AND subject ILIKE %s""",
+            ('%hr_director%', '%Benchmark Review - HR Metrics%'))
         hr_emails = cur.fetchall()
-        check("Email to hr_director@company.com sent", len(hr_emails) >= 1,
-              f"found {len(hr_emails)}")
+        check("Email to hr_director@company.com with correct subject",
+              len(hr_emails) >= 1, f"found {len(hr_emails)}")
+        # HR email must cover BOTH salary AND satisfaction (both are HR-domain metrics).
+        if hr_emails:
+            body = (hr_emails[0][2] or "").lower()
+            has_salary_topic = ("salary" in body) or any(t.lower() in body for t in salary_tokens)
+            has_satisfaction_topic = ("satisfaction" in body) or ("6.55" in body) or ("6.5" in body)
+            check("HR email body mentions salary topic",
+                  has_salary_topic, body[:200])
+            check("HR email body mentions satisfaction topic",
+                  has_satisfaction_topic, body[:200])
 
-        # Check for sales VP email
+        # Sales VP email - exact subject
         cur.execute("""SELECT subject, to_addr, body_text FROM email.messages
-            WHERE to_addr::text ILIKE %s""", ('%sales_vp%',))
+            WHERE to_addr::text ILIKE %s
+            AND subject ILIKE %s""",
+            ('%sales_vp%', '%Benchmark Review - Sales Metrics%'))
         sales_emails = cur.fetchall()
-        check("Email to sales_vp@company.com sent", len(sales_emails) >= 1,
-              f"found {len(sales_emails)}")
-
-        # Check email subjects
-        cur.execute("""SELECT subject FROM email.messages
-            WHERE subject ILIKE %s""", ('%benchmark%',))
-        benchmark_emails = cur.fetchall()
-        check("At least 3 benchmark-related emails sent", len(benchmark_emails) >= 3,
-              f"found {len(benchmark_emails)}")
+        check("Email to sales_vp@company.com with correct subject",
+              len(sales_emails) >= 1, f"found {len(sales_emails)}")
+        # Sales email must cover BOTH order value AND revenue topics.
+        if sales_emails:
+            body = (sales_emails[0][2] or "").lower()
+            has_order_topic = ("order value" in body) or ("order_value" in body) or any(t.lower() in body for t in order_tokens)
+            has_revenue_topic = ("revenue" in body) or ("60.98" in body) or ("60.9" in body)
+            check("Sales email body mentions order-value topic",
+                  has_order_topic, body[:200])
+            check("Sales email body mentions revenue topic",
+                  has_revenue_topic, body[:200])
 
         conn.close()
     except Exception as e:

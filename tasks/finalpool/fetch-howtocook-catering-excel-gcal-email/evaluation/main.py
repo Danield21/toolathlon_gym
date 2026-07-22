@@ -191,6 +191,25 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                       abs(acm - tc / 10) < 0.01,
                       f"avg={acm}, expected={tc / 10}")
 
+            # Verify Days_Over_Budget threshold logic ($400)
+            dob = budget_map.get("Days_Over_Budget")
+            if dob is not None and "Daily Menu" in wb.sheetnames:
+                daily_ws = wb["Daily Menu"]
+                daily_headers = [str(c.value).strip() if c.value else "" for c in daily_ws[1]]
+                if "Day" in daily_headers and "Estimated_Cost" in daily_headers:
+                    day_col = daily_headers.index("Day")
+                    ec_col = daily_headers.index("Estimated_Cost")
+                    day_totals = {}
+                    for r in daily_ws.iter_rows(min_row=2, values_only=True):
+                        d = str(r[day_col]) if r[day_col] else None
+                        ec = safe_float(r[ec_col])
+                        if d and ec is not None:
+                            day_totals[d] = day_totals.get(d, 0) + ec
+                    expected_dob = sum(1 for v in day_totals.values() if v > 400)
+                    check("Days_Over_Budget matches $400 threshold",
+                          abs(float(dob) - expected_dob) < 0.01,
+                          f"got {dob}, expected {expected_dob}")
+
     # --- Check Calendar Events ---
     try:
         conn = get_conn()

@@ -31,6 +31,8 @@ def get_expected_from_db():
     defaults = {
         "top_category": "electronics",
         "amzn_pct_change": 26.0,
+        "jpm_pct_change": 62.0,
+        "dji_pct_change": 24.0,
     }
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -48,15 +50,17 @@ def get_expected_from_db():
         if row and row[0]:
             defaults["top_category"] = row[0].lower()
 
-        # AMZN percentage change (earliest to latest)
-        cur.execute("""
-            SELECT
-                (SELECT close FROM yf.stock_prices WHERE symbol='AMZN' ORDER BY date ASC LIMIT 1) as first_close,
-                (SELECT close FROM yf.stock_prices WHERE symbol='AMZN' ORDER BY date DESC LIMIT 1) as last_close
-        """)
-        row = cur.fetchone()
-        if row and row[0] and row[1]:
-            defaults["amzn_pct_change"] = float((row[1] - row[0]) / row[0] * 100)
+        for symbol, key in [("AMZN", "amzn_pct_change"),
+                            ("JPM", "jpm_pct_change"),
+                            ("^DJI", "dji_pct_change")]:
+            cur.execute("""
+                SELECT
+                    (SELECT close FROM yf.stock_prices WHERE symbol=%s ORDER BY date ASC LIMIT 1),
+                    (SELECT close FROM yf.stock_prices WHERE symbol=%s ORDER BY date DESC LIMIT 1)
+            """, (symbol, symbol))
+            row = cur.fetchone()
+            if row and row[0] and row[1]:
+                defaults[key] = float((row[1] - row[0]) / row[0] * 100)
 
         cur.close()
         conn.close()
@@ -155,9 +159,29 @@ def check_pptx(workspace):
               all_texts[6][:100])
 
     # Check key numbers appear somewhere (dynamically computed)
-    amzn_pct_str = str(int(round(EXPECTED["amzn_pct_change"])))
-    check(f"Mentions AMZN ~{amzn_pct_str}% change", amzn_pct_str in full_text,
-          f"No {amzn_pct_str}% mention (expected ~{EXPECTED['amzn_pct_change']:.1f}%)")
+    # Accept rounded-to-int OR actual 1-decimal value OR either +/-1 int
+    import re
+    def has_pct_near(text, target_pct, tol=2.0):
+        """Return True if text contains a pct number within tol of target.
+        Strict: requires the number to be immediately followed by % sign."""
+        for m in re.finditer(r"(-?\d+\.?\d*)\s*%", text):
+            try:
+                v = float(m.group(1))
+                if abs(v - target_pct) <= tol:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    check(f"Mentions AMZN ~{EXPECTED['amzn_pct_change']:.1f}% change",
+          has_pct_near(full_text, EXPECTED["amzn_pct_change"]),
+          f"No percent near {EXPECTED['amzn_pct_change']:.1f}%")
+    check(f"Mentions JPM ~{EXPECTED['jpm_pct_change']:.1f}% change",
+          has_pct_near(full_text, EXPECTED["jpm_pct_change"]),
+          f"No percent near {EXPECTED['jpm_pct_change']:.1f}%")
+    check(f"Mentions DJI ~{EXPECTED['dji_pct_change']:.1f}% change",
+          has_pct_near(full_text, EXPECTED["dji_pct_change"]),
+          f"No percent near {EXPECTED['dji_pct_change']:.1f}%")
     check(f"Mentions {EXPECTED['top_category'].title()} as top category",
           EXPECTED["top_category"] in full_text,
           f"No {EXPECTED['top_category']} mention")
@@ -223,11 +247,13 @@ def check_notion():
             pages = cur.fetchall()
             check("Has 5 initiative entries", len(pages) == 5, f"Found {len(pages)}")
 
-            # Check specific entries
+            # Aggregate all page property texts for content validation
             page_titles = []
+            all_page_props_text = []
             for pid, props in pages:
                 if isinstance(props, str):
                     props = json.loads(props)
+                all_page_props_text.append(json.dumps(props).lower())
                 for k, v in (props or {}).items():
                     if isinstance(v, dict) and "title" in v:
                         title_items = v.get("title", [])
@@ -236,12 +262,51 @@ def check_notion():
                                 if isinstance(item, dict):
                                     page_titles.append(item.get("text", {}).get("content", ""))
             all_titles = " ".join(page_titles).lower()
+            combined_props = " ".join(all_page_props_text)
+
             check("Has TV & Home Theater initiative",
                   "tv" in all_titles or "home theater" in all_titles, f"Titles: {page_titles}")
             check("Has Electronics initiative",
                   "electronics" in all_titles, f"Titles: {page_titles}")
             check("Has Audio initiative",
                   "audio" in all_titles, f"Titles: {page_titles}")
+
+            # Verify Expected_Impact values appear (task.md specifies 5000/3000/2500/1500/2000)
+            expected_impacts = ["5000", "3000", "2500", "1500", "2000"]
+            matched = sum(1 for v in expected_impacts if v in combined_props)
+            check("Notion entries include ALL 5 expected impact values",
+                  matched == 5, f"Only {matched}/5 impact values found")
+
+            # Verify expected categories (Pricing/Marketing/Expansion/Inventory/Cost Management)
+            expected_cats = ["pricing", "marketing", "expansion", "inventory", "cost"]
+            cat_matched = sum(1 for c in expected_cats if c in combined_props)
+            check("Notion entries include ALL 5 expected categories",
+                  cat_matched == 5, f"Only {cat_matched}/5 categories found")
+
+            # Verify Timeline dates (per task.md: 2026-04-15, 2026-04-01, 2026-05-01, 2026-04-10, 2026-05-15)
+            expected_timelines = ["2026-04-15", "2026-04-01", "2026-05-01", "2026-04-10", "2026-05-15"]
+            tl_matched = sum(1 for tl in expected_timelines if tl in combined_props)
+            check("Notion entries include ALL 5 expected timeline dates",
+                  tl_matched == 5, f"Only {tl_matched}/5 timeline dates found")
+
+            # Verify exact per-entry mapping (Initiative -> Category -> Impact -> Timeline)
+            # Per task.md: initiative title -> (category, impact, timeline)
+            expected_entries = [
+                ("tv", "pricing", "5000", "2026-04-15"),
+                ("electronics promotion", "marketing", "3000", "2026-04-01"),
+                ("audio", "expansion", "2500", "2026-05-01"),
+                ("camera", "inventory", "1500", "2026-04-10"),
+                ("home appliances", "cost", "2000", "2026-05-15"),
+            ]
+            for title_kw, cat_kw, impact_val, tl_val in expected_entries:
+                matched_entry = False
+                for entry_text in all_page_props_text:
+                    if title_kw in entry_text and cat_kw in entry_text and impact_val in entry_text and tl_val in entry_text:
+                        matched_entry = True
+                        break
+                check(f"Notion entry '{title_kw}' has matching category/impact/timeline",
+                      matched_entry,
+                      f"Expected {title_kw}+{cat_kw}+{impact_val}+{tl_val}")
     except Exception as e:
         check("Notion check", False, str(e))
     finally:
@@ -391,10 +456,59 @@ def check_scripts(workspace):
             check("market_correlation.json has recommendation",
                   "recommendation" in data or "strategy" in str(data).lower(),
                   f"Keys: {list(data.keys()) if isinstance(data, dict) else 'not dict'}")
-            # Check correlation values exist
             data_str = json.dumps(data).lower()
             check("market_correlation.json mentions AMZN correlation",
                   "amzn" in data_str, f"Content: {data_str[:200]}")
+            check("market_correlation.json mentions JPM correlation",
+                  "jpm" in data_str, f"Content: {data_str[:200]}")
+            check("market_correlation.json mentions DJI correlation",
+                  "dji" in data_str, f"Content: {data_str[:200]}")
+            # Validate recommendation matches correlation rules
+            import re
+            reco_txt = str(data.get('recommendation', '')).lower() if isinstance(data, dict) else data_str
+            has_valid_rule_usage = any(term in reco_txt for term in [
+                'market-aligned', 'aligned', 'counter-cyclical', 'counter', 'independent'])
+            check("market_correlation.json recommendation uses rule terminology",
+                  has_valid_rule_usage, f"reco: {reco_txt[:150]}")
+            # Recommendation consistency check: parse AMZN correlation and verify rule
+            amzn_corr = None
+            if isinstance(data, dict):
+                # Search nested structure for AMZN correlation
+                def find_amzn_corr(obj):
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            if "amzn" in str(k).lower() and isinstance(v, (int, float)):
+                                return float(v)
+                            if isinstance(v, dict) and "amzn" in str(k).lower():
+                                # look for 'correlation' or 'coefficient' key inside
+                                for subk, subv in v.items():
+                                    if isinstance(subv, (int, float)):
+                                        return float(subv)
+                            found = find_amzn_corr(v)
+                            if found is not None:
+                                return found
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            found = find_amzn_corr(item)
+                            if found is not None:
+                                return found
+                    return None
+                amzn_corr = find_amzn_corr(data)
+            if amzn_corr is not None:
+                abs_corr = abs(amzn_corr)
+                # Per task.md rules:
+                #  abs(AMZN) > 0.5 -> "market-aligned pricing"
+                #  AMZN < -0.3 -> "counter-cyclical promotions"
+                #  else -> "independent pricing strategy"
+                if abs_corr > 0.5:
+                    expected_rule = "aligned"
+                elif amzn_corr < -0.3:
+                    expected_rule = "counter"
+                else:
+                    expected_rule = "independent"
+                check(f"Recommendation consistent with AMZN corr={amzn_corr:.3f} (expect '{expected_rule}')",
+                      expected_rule in reco_txt,
+                      f"reco: {reco_txt[:150]}")
         except Exception as e:
             check("market_correlation.json valid JSON", False, str(e))
     else:
@@ -443,7 +557,10 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    # Tightened: require all checks to pass. Strict per-entry notion + pct
+    # checks are defanged by 70% threshold — bad cases produce 5-9 failures
+    # and still pass at ~85-92% accuracy.
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

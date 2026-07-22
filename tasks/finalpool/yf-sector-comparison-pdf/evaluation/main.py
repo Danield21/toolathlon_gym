@@ -81,15 +81,15 @@ def main():
                 if not str_match(a_row[1], g_row[1]):
                     all_errors.append(f"{key}.Sector: {a_row[1]} vs {g_row[1]}")
 
-            # Col 2: Latest_Close (numeric, tol=2.0)
+            # Col 2: Latest_Close (numeric, tol=1.0 - was 2.0)
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 2.0):
-                    all_errors.append(f"{key}.Latest_Close: {a_row[2]} vs {g_row[2]} (tol=2.0)")
+                if not num_close(a_row[2], g_row[2], 1.0):
+                    all_errors.append(f"{key}.Latest_Close: {a_row[2]} vs {g_row[2]} (tol=1.0)")
 
-            # Col 3: YTD_Return_Pct (numeric, tol=1.0)
+            # Col 3: YTD_Return_Pct (numeric, tol=0.5 - was 1.0)
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 1.0):
-                    all_errors.append(f"{key}.YTD_Return_Pct: {a_row[3]} vs {g_row[3]} (tol=1.0)")
+                if not num_close(a_row[3], g_row[3], 0.5):
+                    all_errors.append(f"{key}.YTD_Return_Pct: {a_row[3]} vs {g_row[3]} (tol=0.5)")
         if not all_errors:
             print("    PASS")
         else:

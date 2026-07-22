@@ -134,6 +134,35 @@ def check_excel(workspace):
     if len(data_rows2) < 3:
         return False, f"Recommendation: expected at least 3 data rows, got {len(data_rows2)}"
 
+    # Build a lookup from Recipe Overview for cross-formula-validation
+    overview_by_name_lower = {}
+    for row in data_rows:
+        rn = str(row[idx["recipe_name"]] or "").strip().lower()
+        if rn:
+            overview_by_name_lower[rn] = {
+                "protein": str(row[idx["protein_level"]] or "").strip().lower(),
+                "fiber": str(row[idx["fiber_level"]] or "").strip().lower(),
+                "calories": row[idx["estimated_calories"]],
+            }
+
+    # Level points per nutrition_guide.md formula
+    LEVEL_POINTS = {"high": 3, "medium": 2, "low": 1}
+
+    def expected_health_score(rn_lower):
+        """Compute Health_Score per formula: (protein_pts + fiber_pts) * 10 - calories/100"""
+        ov = overview_by_name_lower.get(rn_lower)
+        if not ov:
+            return None
+        p_pts = LEVEL_POINTS.get(ov["protein"])
+        f_pts = LEVEL_POINTS.get(ov["fiber"])
+        try:
+            cal = float(ov["calories"])
+        except (TypeError, ValueError):
+            return None
+        if p_pts is None or f_pts is None:
+            return None
+        return (p_pts + f_pts) * 10 - cal / 100
+
     rec_recipe_names = []
     prev_score = None
     for i, row in enumerate(data_rows2):
@@ -168,6 +197,16 @@ def check_excel(workspace):
         if not reason_val:
             return False, f"Recommendation row {i+1} ({recipe_name}): Reason is empty"
 
+        # Validate Health_Score against formula (tol 2.0 for small rounding variance)
+        expected = expected_health_score(recipe_name.lower())
+        if expected is not None:
+            if abs(score_float - expected) > 2.0:
+                return False, (
+                    f"Recommendation row {i+1} ({recipe_name}): Health_Score {score_float} "
+                    f"doesn't match formula (expected ~{expected:.2f} from (P+F)*10 - Cal/100 "
+                    f"based on Recipe Overview)"
+                )
+
     # Check that recommended recipes appear in overview
     overview_names_lower = [n.lower() for n in recipe_names_overview]
     for rn in rec_recipe_names:
@@ -190,8 +229,8 @@ def check_pptx(workspace, rec_recipe_names=None):
     prs = Presentation(str(pptx_path))
     slides = list(prs.slides)
 
-    if len(slides) < 5:
-        return False, f"Expected at least 5 slides, got {len(slides)}"
+    if len(slides) < 7:
+        return False, f"Expected at least 7 slides (title + 5 recipe + summary), got {len(slides)}"
     print(f"  Slide count: {len(slides)}")
 
     # Collect all text from all slides
@@ -213,15 +252,34 @@ def check_pptx(workspace, rec_recipe_names=None):
         return False, f"Title slide does not contain healthy eating keywords. Text: {all_text[0][:200]}"
     print("  [PASS] Title slide contains healthy eating keywords")
 
-    # Check that at least 3 recipe names from recommendation appear in the PPT
+    # Each recommended recipe must appear as its own slide title (not just anywhere)
     if rec_recipe_names:
-        found_count = 0
+        # Get per-slide title text (first shape or first line)
+        slide_titles = []
+        for i, slide in enumerate(slides):
+            title_text = ""
+            # Try placeholder 0 first (standard title)
+            for shape in slide.shapes:
+                if shape.has_text_frame and shape.text_frame.paragraphs:
+                    first_para = shape.text_frame.paragraphs[0].text
+                    if first_para.strip():
+                        title_text = first_para.strip()
+                        break
+            slide_titles.append(title_text.lower())
+
+        missing_as_title = []
         for rn in rec_recipe_names:
-            if rn.lower() in full_text:
-                found_count += 1
-        if found_count < 3:
-            return False, f"Only {found_count} of {len(rec_recipe_names)} recommended recipe names found in PPT (need at least 3)"
-        print(f"  [PASS] {found_count} recommended recipe names found in presentation")
+            rn_low = rn.lower()
+            found = any(rn_low in st for st in slide_titles) or any(
+                any(word in st for word in rn_low.split() if len(word) > 3) for st in slide_titles
+            )
+            # Stricter: require the full recipe name substring in at least one slide title
+            strict_found = any(rn_low in st for st in slide_titles)
+            if not strict_found:
+                missing_as_title.append(rn)
+        if missing_as_title:
+            return False, f"Recommended recipes missing as slide titles: {missing_as_title}"
+        print(f"  [PASS] All {len(rec_recipe_names)} recommended recipes appear as slide titles")
     else:
         print("  [SKIP] No recipe names to cross-check with PPT")
 

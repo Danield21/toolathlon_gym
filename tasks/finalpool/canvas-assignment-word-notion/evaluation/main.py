@@ -86,6 +86,44 @@ def check_word_doc(agent_workspace):
     check("Table has 10 assignment rows", len(data_rows) == EXPECTED_ASSIGNMENT_COUNT,
           f"Got {len(data_rows)} rows")
 
+    # Validate 4-column structure (Assignment Name, Due Date, Points, Status)
+    if len(table.rows) > 0:
+        ncols = len(table.rows[0].cells)
+        check("Table has 4 columns", ncols == 4, f"Got {ncols} columns")
+
+    # Validate sort order: due_date ascending, no-due-date entries last,
+    # ties broken by assignment id ascending.
+    def _sort_key(r):
+        # r is list of cell strings; due-date is index 1
+        date_str = r[1] if len(r) > 1 else ""
+        no_date = "no due date" in date_str.lower()
+        # extract id: assignment names are "TYPE NNNNN" - use trailing number
+        name = r[0] if r else ""
+        try:
+            asg_id = int("".join(c for c in name.split()[-1] if c.isdigit()) or "0")
+        except Exception:
+            asg_id = 0
+        return (1 if no_date else 0, date_str if not no_date else "", asg_id)
+
+    expected_order = sorted(data_rows, key=_sort_key)
+    sort_ok = data_rows == expected_order
+    check(
+        "Table rows sorted by due_date asc (no-due-date last, ties by id asc)",
+        sort_ok,
+        f"Actual: {[r[0] for r in data_rows]} | Expected: {[r[0] for r in expected_order]}",
+    )
+
+    # Validate Status column contains expected values
+    if len(table.rows) > 0 and len(table.rows[0].cells) >= 4:
+        status_vals = [r[3].strip().lower() for r in data_rows if len(r) > 3]
+        valid_statuses = {"past due", "no due date"}
+        all_valid = all(s in valid_statuses for s in status_vals)
+        check(
+            "Status column contains only 'Past Due' / 'No due date'",
+            all_valid,
+            f"Statuses: {status_vals}",
+        )
+
     # Check assignment names appear
     found_names = 0
     row_texts = " ".join(str(cell) for row in data_rows for cell in row)
@@ -106,45 +144,84 @@ def check_word_doc(agent_workspace):
           "10" in full_text and "total assignments" in full_text.lower(),
           "Expected 'Total Assignments: 10'")
 
-    check("Document mentions total points",
-          "300" in full_text and "total points" in full_text.lower(),
+    check("Document mentions total points (300.0)",
+          "300.0" in full_text and "total points" in full_text.lower(),
           "Expected 'Total Points: 300.0'")
 
     return True
 
 
 def check_notion():
-    """Check Notion page - NON-BLOCKING."""
-    print("\n=== Checking Notion (non-blocking) ===")
+    """Check Notion page - BLOCKING. Page titled 'CCC-2014J Assignment Overview' required."""
+    print("\n=== Checking Notion ===")
 
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
 
-        cur.execute("SELECT id, properties FROM notion.pages")
+        cur.execute(
+            "SELECT id, properties FROM notion.pages "
+            "WHERE (archived IS NULL OR archived = false) "
+            "  AND (in_trash IS NULL OR in_trash = false)"
+        )
         pages = cur.fetchall()
+
+        # Find page whose title contains both 'CCC-2014J' and 'Assignment Overview'
+        target = None
+        for page_id, props in pages:
+            props_str = json.dumps(props) if isinstance(props, dict) else str(props)
+            low = props_str.lower()
+            if "ccc-2014j" in low and "assignment overview" in low:
+                target = (page_id, props_str)
+                break
+        check(
+            "Notion page 'CCC-2014J Assignment Overview' exists",
+            target is not None,
+            f"{len(pages)} pages scanned",
+        )
+
+        if target is None:
+            cur.close()
+            conn.close()
+            return
+
+        page_id, _props_str = target
+        # Verify page body text mentions course name, assignment count, total points.
+        # Notion blocks store text inside JSONB block_data, addressable via parent_id.
+        cur.execute(
+            "SELECT block_data FROM notion.blocks "
+            "WHERE parent_id = %s",
+            (page_id,),
+        )
+        rows = cur.fetchall()
+        body_parts = []
+        for (bd,) in rows:
+            if bd is None:
+                continue
+            body_parts.append(json.dumps(bd) if isinstance(bd, dict) else str(bd))
+        body = (" ".join(body_parts) + " " + _props_str).lower()
+
+        check(
+            "Notion page mentions course name 'Creative Computing'",
+            "creative computing" in body,
+            f"Body excerpt: {body[:200]}",
+        )
+        check(
+            "Notion page mentions number of assignments (10)",
+            "10" in body,
+            f"Body excerpt: {body[:200]}",
+        )
+        check(
+            "Notion page mentions total points (300)",
+            "300" in body,
+            f"Body excerpt: {body[:200]}",
+        )
+
         cur.close()
         conn.close()
 
-        if len(pages) == 0:
-            print("  [WARN] No Notion pages found (non-blocking)")
-            return
-
-        found = False
-        for page_id, props in pages:
-            props_str = json.dumps(props) if isinstance(props, dict) else str(props)
-            if "CCC-2014J" in props_str or "assignment" in props_str.lower():
-                found = True
-                print(f"  [INFO] Found relevant Notion page: {page_id}")
-                break
-
-        if found:
-            print("  [INFO] Notion page with assignment overview exists")
-        else:
-            print("  [WARN] No matching Notion page found (non-blocking)")
-
     except Exception as e:
-        print(f"  [WARN] Notion check error (non-blocking): {e}")
+        check("Notion check completed", False, f"Error: {e}")
 
 
 def main():

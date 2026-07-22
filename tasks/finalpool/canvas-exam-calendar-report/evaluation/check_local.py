@@ -3,7 +3,11 @@ Check the agent's exam_review_plan.xlsx against the groundtruth.
 """
 
 import os
+import re
 import openpyxl
+
+SESSION_RE = re.compile(r"^(N/A|\d{4}-\d{2}-\d{2} \d{2}:\d{2})$")
+DATE_RE = re.compile(r"^(TBD|\d{4}-\d{2}-\d{2})$")
 
 
 def str_match(a, b):
@@ -97,6 +101,26 @@ def check_local(agent_workspace, groundtruth_workspace):
 
             if col == "Points_Possible":
                 if not num_close(ag_val, gt_val, 0.5):
+                    row_diffs.append(
+                        f"{col}: expected '{gt_val}', got '{ag_val}'"
+                    )
+            elif col == "Exam_Date":
+                ag_str = str(ag_val).strip() if ag_val is not None else ""
+                if not DATE_RE.match(ag_str):
+                    row_diffs.append(
+                        f"{col}: format expected YYYY-MM-DD or TBD, got '{ag_str}'"
+                    )
+                elif not str_match(ag_val, gt_val):
+                    row_diffs.append(
+                        f"{col}: expected '{gt_val}', got '{ag_val}'"
+                    )
+            elif col in ("Study_Session_1", "Study_Session_2"):
+                ag_str = str(ag_val).strip() if ag_val is not None else ""
+                if not SESSION_RE.match(ag_str):
+                    row_diffs.append(
+                        f"{col}: format expected YYYY-MM-DD HH:MM or N/A, got '{ag_str}'"
+                    )
+                elif not str_match(ag_val, gt_val):
                     row_diffs.append(
                         f"{col}: expected '{gt_val}', got '{ag_val}'"
                     )

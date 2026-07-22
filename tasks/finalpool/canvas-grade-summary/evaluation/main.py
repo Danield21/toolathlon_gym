@@ -4,6 +4,19 @@ import os
 import sys
 import openpyxl
 
+try:
+    import psycopg2
+    DB = {
+        "host": os.environ.get("PGHOST", "localhost"),
+        "port": int(os.environ.get("PGPORT", "5432")),
+        "dbname": "toolathlon_gym",
+        "user": "eigent",
+        "password": "camel",
+    }
+except Exception:
+    psycopg2 = None
+    DB = None
+
 
 def num_close(a, b, tol=1.0):
     if a is None and b is None:
@@ -27,6 +40,55 @@ def load_sheet_rows(wb, sheet_name):
         if name.strip().lower() == sheet_name.strip().lower():
             return [[cell.value for cell in row] for row in wb[name].iter_rows()]
     return None
+
+
+def check_gsheet(errors_list):
+    """Verify a Google Sheet titled 'Grade Summary Report' was created with summary data."""
+    print("  Checking Google Sheet 'Grade Summary Report'...")
+    if psycopg2 is None or DB is None:
+        errors_list.append("psycopg2 unavailable; cannot verify Google Sheet")
+        return
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        cur.execute("SELECT id, title FROM gsheet.spreadsheets")
+        sheets = cur.fetchall()
+        target_id = None
+        target_name = None
+        for sid, title in sheets:
+            if title and "grade summary report" in title.strip().lower():
+                target_id = sid
+                target_name = title
+                break
+        if target_id is None:
+            errors_list.append(
+                f"Google Sheet 'Grade Summary Report' not found (got {[n for _,n in sheets]})"
+            )
+            cur.close(); conn.close()
+            return
+
+        # Verify there is sufficient content and required metric labels
+        cur.execute("SELECT COUNT(*) FROM gsheet.cells WHERE spreadsheet_id = %s", (target_id,))
+        cell_count = cur.fetchone()[0]
+        if cell_count < 6:  # Total_Courses, Highest_Avg_Course, Overall_Avg_Score plus headers => >= 6
+            errors_list.append(
+                f"Google Sheet '{target_name}' has only {cell_count} cells; expected >= 6"
+            )
+        # Pull all cell values (lower-cased) and require Total_Courses, Highest_Avg_Course, Overall_Avg_Score labels
+        cur.execute("SELECT value FROM gsheet.cells WHERE spreadsheet_id = %s", (target_id,))
+        all_vals = [str(r[0] or "").strip().lower() for r in cur.fetchall()]
+        joined = " | ".join(all_vals)
+        for required in ["total_courses", "highest_avg_course", "overall_avg_score"]:
+            # Allow either snake_case or space-separated label variants
+            label_alt = required.replace("_", " ")
+            if required not in joined and label_alt not in joined:
+                errors_list.append(
+                    f"Google Sheet '{target_name}' missing required label: {required}"
+                )
+        cur.close(); conn.close()
+        print(f"    Found GSheet '{target_name}' with {cell_count} cells")
+    except Exception as e:
+        errors_list.append(f"Google Sheet check raised: {e}")
 
 
 def main():
@@ -83,20 +145,20 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 2):
-                    errors.append(f"{key}.Students_Submitted: {a_row[1]} vs {g_row[1]} (tol=2)")
+                if not num_close(a_row[1], g_row[1], 1):
+                    errors.append(f"{key}.Students_Submitted: {a_row[1]} vs {g_row[1]} (tol=1)")
 
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 2.0):
-                    errors.append(f"{key}.Avg_Score: {a_row[2]} vs {g_row[2]} (tol=2.0)")
+                if not num_close(a_row[2], g_row[2], 0.5):
+                    errors.append(f"{key}.Avg_Score: {a_row[2]} vs {g_row[2]} (tol=0.5)")
 
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 2.0):
-                    errors.append(f"{key}.Max_Score: {a_row[3]} vs {g_row[3]} (tol=2.0)")
+                if not num_close(a_row[3], g_row[3], 0.5):
+                    errors.append(f"{key}.Max_Score: {a_row[3]} vs {g_row[3]} (tol=0.5)")
 
             if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 2.0):
-                    errors.append(f"{key}.Min_Score: {a_row[4]} vs {g_row[4]} (tol=2.0)")
+                if not num_close(a_row[4], g_row[4], 0.5):
+                    errors.append(f"{key}.Min_Score: {a_row[4]} vs {g_row[4]} (tol=0.5)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -134,8 +196,19 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 5.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=5.0)")
+                gt_v = g_row[1]
+                if isinstance(gt_v, (int, float)):
+                    if not num_close(a_row[1], gt_v, 1.0):
+                        errors.append(f"{key}.Value: {a_row[1]} vs {gt_v} (tol=1.0)")
+                else:
+                    # String value: accept exact match OR (for course names) prefix
+                    a_str = str(a_row[1] or "").strip()
+                    g_str = str(gt_v or "").strip()
+                    if a_str.lower() != g_str.lower():
+                        # For course name fields, accept agent's value if it starts with GT prefix
+                        # (which would happen if the GT was truncated) or vice versa
+                        if not (a_str.lower().startswith(g_str.lower()) or g_str.lower().startswith(a_str.lower())):
+                            errors.append(f"{key}.Value: '{a_row[1]}' vs '{gt_v}'")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -144,7 +217,10 @@ def main():
         else:
             print(f"    PASS")
 
-    
+
+
+    # Check Google Sheet 'Grade Summary Report'
+    check_gsheet(all_errors)
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

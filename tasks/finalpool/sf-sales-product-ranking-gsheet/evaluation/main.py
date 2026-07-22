@@ -107,15 +107,15 @@ def check_excel(agent_workspace, groundtruth_workspace):
             if not ok_cat:
                 all_ok = False
 
-            # Units_Sold (col 3)
-            ok_units = num_close(a_row[3], gt_row[3], 5)
+            # Units_Sold (col 3) - exact
+            ok_units = num_close(a_row[3], gt_row[3], 0)
             record(f"'{short_name}...' Units_Sold", ok_units,
                    f"Expected {gt_row[3]}, got {a_row[3]}")
             if not ok_units:
                 all_ok = False
 
-            # Revenue (col 4)
-            ok_rev = num_close(a_row[4], gt_row[4], 50.0)
+            # Revenue (col 4) - tighter tolerance for 2-decimal rounding
+            ok_rev = num_close(a_row[4], gt_row[4], 0.5)
             record(f"'{short_name}...' Revenue", ok_rev,
                    f"Expected {gt_row[4]}, got {a_row[4]}")
             if not ok_rev:
@@ -158,36 +158,49 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 all_ok = False
                 continue
 
-            # Total_Products_Sold (col 1)
-            ok_total = num_close(a_row[1], gt_row[1], 50)
+            # Total_Products_Sold (col 1) - exact
+            ok_total = num_close(a_row[1], gt_row[1], 0)
             record(f"'{gt_row[0]}' Total_Products_Sold", ok_total,
                    f"Expected {gt_row[1]}, got {a_row[1]}")
             if not ok_total:
                 all_ok = False
 
             # Total_Revenue (col 2)
-            ok_rev = num_close(a_row[2], gt_row[2], 500.0)
+            ok_rev = num_close(a_row[2], gt_row[2], 0.5)
             record(f"'{gt_row[0]}' Total_Revenue", ok_rev,
                    f"Expected {gt_row[2]}, got {a_row[2]}")
             if not ok_rev:
                 all_ok = False
 
+            # Top_Product (col 3) - string match
+            if len(gt_row) > 3 and len(a_row) > 3:
+                ok_top = str_match(a_row[3], gt_row[3])
+                record(f"'{gt_row[0]}' Top_Product", ok_top,
+                       f"Expected {gt_row[3]}, got {a_row[3]}")
+                if not ok_top:
+                    all_ok = False
+
     return all_ok
 
 
-def check_gsheet():
-    """Check Google Sheet exists with Rankings data."""
+def check_gsheet(groundtruth_workspace):
+    """Check Google Sheet exists with Rankings data matching groundtruth row count."""
     print("\n=== Checking Google Sheet ===")
 
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
 
-    cur.execute("SELECT id FROM gsheet.spreadsheets WHERE LOWER(title) LIKE '%product%ranking%'")
+    # Exact title match required per task: "Product Rankings Dashboard"
+    cur.execute("""
+        SELECT id FROM gsheet.spreadsheets
+        WHERE LOWER(title) = LOWER('Product Rankings Dashboard')
+           OR LOWER(title) LIKE '%product rankings dashboard%'
+    """)
     sheets = cur.fetchall()
 
     if not sheets:
         record("Google Sheet 'Product Rankings Dashboard' exists", False,
-               "No spreadsheet with 'product ranking' in title found")
+               "No matching spreadsheet found")
         cur.close()
         conn.close()
         return False
@@ -195,18 +208,14 @@ def check_gsheet():
     record("Google Sheet 'Product Rankings Dashboard' exists", True)
     sheet_id = sheets[0][0]
 
-    # Find the sheet (tab) within the spreadsheet
     cur.execute("SELECT id, title FROM gsheet.sheets WHERE spreadsheet_id = %s", (sheet_id,))
     tabs = cur.fetchall()
     record("Spreadsheet has at least 1 sheet tab", len(tabs) >= 1,
            f"Found {len(tabs)} tabs")
-
     if not tabs:
-        cur.close()
-        conn.close()
+        cur.close(); conn.close()
         return False
 
-    # Use the first available sheet tab
     tab_id = tabs[0][0]
 
     cur.execute("""
@@ -215,30 +224,40 @@ def check_gsheet():
     """, (tab_id,))
     cells = cur.fetchall()
 
-    # Build grid
     grid = {}
     for row_idx, col_idx, value in cells:
         if row_idx not in grid:
             grid[row_idx] = {}
         grid[row_idx][col_idx] = value
 
-    # Skip the header row (could be row 0 or row 1 depending on MCP server)
     if grid:
         min_row = min(grid.keys())
         data_rows = {k: v for k, v in grid.items() if k > min_row}
     else:
         data_rows = {}
-    record("Google Sheet has data rows", len(data_rows) >= 1,
-           f"Found {len(data_rows)} data rows")
 
-    # Check that at least one product name appears
-    all_values = " ".join(str(v) for row in grid.values() for v in row.values())
-    record("Google Sheet contains product data",
-           "samsung" in all_values.lower() or "oneplus" in all_values.lower(),
-           "Expected product names not found")
+    # Compare row count to GT Rankings sheet
+    gt_path = os.path.join(groundtruth_workspace, "Product_Rankings.xlsx")
+    expected_rows = 0
+    if os.path.exists(gt_path):
+        try:
+            gt_wb = openpyxl.load_workbook(gt_path, data_only=True)
+            gt_ws = get_sheet(gt_wb, "Rankings")
+            if gt_ws:
+                expected_rows = sum(1 for r in gt_ws.iter_rows(min_row=2, values_only=True)
+                                    if r and any(c is not None for c in r))
+        except Exception:
+            pass
 
-    cur.close()
-    conn.close()
+    if expected_rows > 0:
+        record(f"Google Sheet has {expected_rows} data rows (matches GT Rankings)",
+               len(data_rows) == expected_rows,
+               f"got {len(data_rows)}")
+    else:
+        record("Google Sheet has data rows", len(data_rows) >= 1,
+               f"got {len(data_rows)}")
+
+    cur.close(); conn.close()
     return len(data_rows) >= 1
 
 
@@ -254,17 +273,13 @@ def main():
     gt_dir = args.groundtruth_workspace or os.path.join(task_root, "groundtruth_workspace")
 
     excel_ok = check_excel(args.agent_workspace, gt_dir)
-
-    db_fail_before = FAIL_COUNT
-    gsheet_ok = check_gsheet()
-    db_failures = FAIL_COUNT - db_fail_before
+    gsheet_ok = check_gsheet(gt_dir)
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")
     print(f"  Failed: {FAIL_COUNT}")
-    if db_failures > 0 and excel_ok:
-        print(f"  WARNING: {db_failures} DB checks failed (not blocking)")
-    overall = excel_ok
+
+    overall = FAIL_COUNT == 0
     print(f"  Overall: {'PASS' if overall else 'FAIL'}")
 
     sys.exit(0 if overall else 1)

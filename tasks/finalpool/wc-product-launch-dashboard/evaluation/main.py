@@ -27,6 +27,39 @@ MARKET_DATA = {
 }
 
 
+def load_q1_targets():
+    """Load Revenue_Target values from Q1_targets.xlsx (in initial_workspace).
+    Returns dict category -> revenue_target, or empty on error."""
+    task_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    target_path = os.path.join(task_root, "initial_workspace", "Q1_targets.xlsx")
+    targets = {}
+    if not os.path.isfile(target_path):
+        return targets
+    try:
+        wb = openpyxl.load_workbook(target_path, data_only=True)
+        for sn in wb.sheetnames:
+            ws = wb[sn]
+            rows = list(ws.iter_rows(values_only=True))
+            if not rows:
+                continue
+            header = [str(c or "").strip().lower() for c in rows[0]]
+            try:
+                cat_idx = next(i for i, h in enumerate(header) if "categ" in h)
+                rev_idx = next(i for i, h in enumerate(header) if "revenue" in h and "target" in h)
+            except StopIteration:
+                continue
+            for row in rows[1:]:
+                if row and row[cat_idx] is not None:
+                    try:
+                        targets[str(row[cat_idx]).strip()] = float(row[rev_idx])
+                    except (TypeError, ValueError):
+                        pass
+            break
+    except Exception:
+        pass
+    return targets
+
+
 def record(name, passed, detail=""):
     global PASS_COUNT, FAIL_COUNT
     if passed:
@@ -129,10 +162,20 @@ def check_excel(agent_workspace):
         record("Has Revenue column", any("revenue" in h for h in headers))
         record("Has Units_Sold column", any("unit" in h for h in headers))
         record("Has Avg_Rating column", any("rating" in h for h in headers))
+        record("Has Revenue_Target column", any("target" in h for h in headers))
 
         rows = list(cp_sheet.iter_rows(min_row=2, values_only=True))
         record("Category Performance has 6 rows", len(rows) >= 6,
                f"Got {len(rows)} rows")
+
+        q1_targets = load_q1_targets()
+        # Determine which column holds Revenue_Target
+        hdr_raw = [safe_str(cp_sheet.cell(1, c).value).lower() for c in range(1, 8)]
+        target_col = None
+        for ci, h in enumerate(hdr_raw):
+            if "target" in h:
+                target_col = ci
+                break
 
         for cat, exp in expected.items():
             found = False
@@ -147,6 +190,15 @@ def check_excel(agent_workspace):
                     record(f"{cat} Units ~{exp['units']}", ok_units, f"Got {r[2]}")
                     if not ok_units:
                         all_ok = False
+                    # Revenue_Target from Q1_targets.xlsx (exact match)
+                    if target_col is not None and cat in q1_targets:
+                        expected_target = q1_targets[cat]
+                        got_target = r[target_col] if target_col < len(r) else None
+                        ok_target = num_close(got_target, expected_target, 0.5)
+                        record(f"{cat} Revenue_Target={expected_target}", ok_target,
+                               f"Got {got_target}")
+                        if not ok_target:
+                            all_ok = False
                     break
             if not found:
                 record(f"{cat} found in Category Performance", False)
@@ -210,15 +262,24 @@ def check_excel(agent_workspace):
                 break
 
         if score_col is not None and opp_rows:
-            # Check top opportunity (should be Audio)
+            # Dynamically compute expected top opportunity = argmax(growth * avg_rating)
+            scored_cats = []
+            for cat, mdata in MARKET_DATA.items():
+                rating = expected.get(cat, {}).get("avg_rating", 0)
+                if rating > 0:
+                    scored_cats.append((cat, mdata["growth"] * rating))
+            scored_cats.sort(key=lambda x: -x[1])
+            top_expected_cat = scored_cats[0][0] if scored_cats else "Audio"
+            top_expected_score = round(scored_cats[0][1], 2) if scored_cats else 69.01
+
+            # Check top opportunity matches expected
             top_cat = safe_str(opp_rows[0][0])
-            record("Top opportunity is Audio",
-                   "audio" in top_cat.lower(),
-                   f"Got {top_cat}")
-            # Check score for Audio
-            exp_audio_score = round(15.2 * expected.get("Audio", {}).get("avg_rating", 4.54), 2)
-            ok = num_close(opp_rows[0][score_col], exp_audio_score, 2.0)
-            record(f"Audio Opportunity_Score ~{exp_audio_score}", ok,
+            record(f"Top opportunity is {top_expected_cat}",
+                   top_expected_cat.lower() in top_cat.lower(),
+                   f"Got {top_cat}, expected {top_expected_cat}")
+            # Check score for top category
+            ok = num_close(opp_rows[0][score_col], top_expected_score, 2.0)
+            record(f"{top_expected_cat} Opportunity_Score ~{top_expected_score}", ok,
                    f"Got {opp_rows[0][score_col]}")
             if not ok:
                 all_ok = False
@@ -277,7 +338,8 @@ def main():
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")
     print(f"  Failed: {FAIL_COUNT}")
-    overall = excel_ok and pptx_ok
+    # Any individual recorded FAIL must also flip the overall result.
+    overall = excel_ok and pptx_ok and FAIL_COUNT == 0
     print(f"  Overall: {'PASS' if overall else 'FAIL'}")
     sys.exit(0 if overall else 1)
 

@@ -3,12 +3,14 @@ Evaluation script for sf-sales-forecast-notion task.
 
 Checks:
 1. Notion page "Sales Performance Dashboard" exists
-2. Notion databases "Monthly Revenue" and "Regional Performance" exist with data
-3. Excel file Sales_Dashboard_Backup.xlsx with correct data
+2. Notion databases "Monthly Revenue" and "Regional Performance" exist with
+   correct entry counts and per-row values
+3. Excel file Sales_Dashboard_Backup.xlsx with correct data per month/region
 """
 import argparse
 import json
 import os
+import re
 import sys
 
 import psycopg2
@@ -29,6 +31,7 @@ def load_expected():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
+    # All months present:
     cur.execute("""
         SELECT TO_CHAR("ORDER_DATE"::timestamp, 'YYYY-MM') as month,
                COUNT(*) as orders,
@@ -37,7 +40,22 @@ def load_expected():
         GROUP BY TO_CHAR("ORDER_DATE"::timestamp, 'YYYY-MM')
         ORDER BY month
     """)
-    monthly = [(m, int(o), float(r)) for m, o, r in cur.fetchall() if int(o) >= 500]
+    rows_all = [(m, int(o), float(r)) for m, o, r in cur.fetchall()]
+    # "Complete-data" rule: classify each month into 3 buckets to tolerate
+    # different reasonable agent thresholds (e.g., 30%, 50%, 70% of median):
+    # - must_include: order_count >= 50% of median (definitely complete)
+    # - must_exclude: order_count < 25% of median (definitely partial)
+    # - borderline:   25%-50% of median (agent may include or exclude)
+    if rows_all:
+        order_counts = sorted(r[1] for r in rows_all)
+        median = order_counts[len(order_counts) // 2]
+        complete = [r for r in rows_all if r[1] >= median * 0.5]
+        partial = [r for r in rows_all if r[1] < median * 0.25]
+        borderline = [r for r in rows_all if median * 0.25 <= r[1] < median * 0.5]
+    else:
+        complete = []
+        partial = []
+        borderline = []
 
     cur.execute("""
         SELECT c."REGION",
@@ -52,7 +70,7 @@ def load_expected():
 
     cur.close()
     conn.close()
-    return monthly, regions
+    return complete, partial, regions, borderline
 
 
 def check(name, condition, detail=""):
@@ -66,18 +84,58 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}{detail_str}")
 
 
-def number_in_text(value, text):
-    text = str(text)
-    val_str = str(value)
-    if val_str in text:
-        return True
+def num_close(a, b, tol):
     try:
-        f2 = f"{float(value):.2f}"
-        if f2 in text:
-            return True
-    except (ValueError, TypeError):
-        pass
-    return False
+        return abs(float(a) - float(b)) <= tol
+    except Exception:
+        return False
+
+
+def _extract_text(json_obj):
+    if json_obj is None:
+        return ""
+    if isinstance(json_obj, str):
+        return json_obj
+    if isinstance(json_obj, list):
+        out = []
+        for item in json_obj:
+            if isinstance(item, dict):
+                t = item.get("plain_text") or (item.get("text") or {}).get("content") or ""
+                out.append(t)
+        return "".join(out)
+    if isinstance(json_obj, dict):
+        for k in ("title", "rich_text", "plain_text"):
+            if k in json_obj:
+                return _extract_text(json_obj[k])
+    return ""
+
+
+def _normalize(s):
+    return re.sub(r"\s+", " ", str(s or "").strip().lower())
+
+
+def _page_title_text(props):
+    if not props:
+        return ""
+    for pname, pval in (props.items() if isinstance(props, dict) else []):
+        if isinstance(pval, dict) and pval.get("type") == "title":
+            return _extract_text(pval.get("title", []))
+    return ""
+
+
+def _page_number_field(props, candidates):
+    if not props:
+        return None
+    for pname, pval in (props.items() if isinstance(props, dict) else []):
+        if not isinstance(pval, dict):
+            continue
+        if pval.get("type") != "number":
+            continue
+        if _normalize(pname) in [c.lower() for c in candidates] or any(
+            c.lower().replace(" ", "_") == _normalize(pname).replace(" ", "_") for c in candidates
+        ):
+            return pval.get("number")
+    return None
 
 
 def check_notion():
@@ -85,79 +143,108 @@ def check_notion():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
-    # Check dashboard page
-    cur.execute("""
-        SELECT id, properties FROM notion.pages
-        WHERE archived = false
-    """)
+    # Dashboard page (exact title)
+    cur.execute("SELECT id, properties FROM notion.pages WHERE archived = false")
     pages = cur.fetchall()
-    dashboard_found = False
+    dashboard_page_id = None
     for pid, props in pages:
-        props_str = json.dumps(props).lower() if props else ""
-        if "sales" in props_str and "dashboard" in props_str:
-            dashboard_found = True
+        title = _normalize(_page_title_text(props))
+        if title == "sales performance dashboard":
+            dashboard_page_id = pid
             break
-    check("Notion 'Sales Performance Dashboard' page exists", dashboard_found,
-          f"Found {len(pages)} pages")
+    check("Notion 'Sales Performance Dashboard' page exists",
+          dashboard_page_id is not None,
+          f"Pages count={len(pages)}")
 
-    # Check databases
-    cur.execute("""
-        SELECT id, title, properties FROM notion.databases
-        WHERE archived = false
-    """)
+    cur.execute("SELECT id, title, properties FROM notion.databases WHERE archived = false")
     dbs = cur.fetchall()
 
     monthly_db = None
     regional_db = None
     for did, title, props in dbs:
-        title_str = json.dumps(title).lower() if title else ""
-        if "monthly" in title_str and "revenue" in title_str:
+        title_text = _normalize(_extract_text(title))
+        if title_text == "monthly revenue":
             monthly_db = did
-        if "regional" in title_str and "performance" in title_str:
+        elif title_text == "regional performance":
             regional_db = did
 
-    check("Notion 'Monthly Revenue' database exists", monthly_db is not None,
-          f"Found databases: {[json.dumps(t) for _, t, _ in dbs]}")
-    check("Notion 'Regional Performance' database exists", regional_db is not None,
-          f"Found databases: {[json.dumps(t) for _, t, _ in dbs]}")
+    check("Notion 'Monthly Revenue' database exists with exact title",
+          monthly_db is not None,
+          f"Found: {[_extract_text(t) for _, t, _ in dbs]}")
+    check("Notion 'Regional Performance' database exists with exact title",
+          regional_db is not None,
+          f"Found: {[_extract_text(t) for _, t, _ in dbs]}")
 
-    expected_monthly, expected_regions = load_expected()
+    expected_monthly, partial_months, expected_regions, borderline_months = load_expected()
 
-    # Check monthly database has entries
+    # Monthly entries
     if monthly_db:
-        cur.execute("""
-            SELECT properties FROM notion.pages
-            WHERE parent::text LIKE %s AND archived = false
-        """, (f'%{monthly_db}%',))
+        cur.execute("""SELECT properties FROM notion.pages
+                       WHERE parent->>'database_id' = %s AND archived=false""",
+                    (monthly_db,))
         monthly_pages = cur.fetchall()
-        check(f"Monthly Revenue has entries (expected ~{len(expected_monthly)})",
-              len(monthly_pages) >= len(expected_monthly) - 2,
-              f"Found {len(monthly_pages)} entries")
+        # Count is between len(expected_monthly) and len(expected_monthly)+len(borderline)
+        # — agent free to include or exclude borderline months.
+        min_count = len(expected_monthly)
+        max_count = len(expected_monthly) + len(borderline_months)
+        check(f"Monthly Revenue entry count in [{min_count}, {max_count}]",
+              min_count <= len(monthly_pages) <= max_count,
+              f"Found {len(monthly_pages)}, expected {min_count}-{max_count}")
 
-        # Check some months exist in properties
-        all_props_text = " ".join(json.dumps(p[0]) for p in monthly_pages if p[0])
-        sample_months = [m[0] for m in expected_monthly[:3]]
-        for month in sample_months:
-            check(f"Monthly Revenue contains '{month}'",
-                  month in all_props_text,
-                  f"Not found in properties")
+        # Build lookup by month string
+        actual_months = {}
+        for (props,) in monthly_pages:
+            tname = _normalize(_page_title_text(props))
+            order_count = _page_number_field(props, ["Order Count", "Order_Count", "OrderCount", "Orders"])
+            revenue = _page_number_field(props, ["Revenue", "Total Revenue", "Total_Revenue"])
+            actual_months[tname] = (order_count, revenue)
 
-    # Check regional database has entries
+        for m, oc, rev in expected_monthly:
+            actual = actual_months.get(m.lower())
+            check(f"Monthly Revenue '{m}' entry exists", actual is not None,
+                  f"Months found: {list(actual_months.keys())}")
+            if actual is not None:
+                check(f"Monthly Revenue '{m}' Order Count correct",
+                      actual[0] is not None and num_close(actual[0], oc, 1),
+                      f"Got {actual[0]}, expected {oc}")
+                check(f"Monthly Revenue '{m}' Revenue correct",
+                      actual[1] is not None and num_close(actual[1], rev, 1.0),
+                      f"Got {actual[1]}, expected {rev}")
+
+        # Partial months (definitely partial: <25% of median) must be excluded
+        for m, _, _ in partial_months:
+            check(f"Partial month '{m}' excluded from Monthly Revenue",
+                  m.lower() not in actual_months,
+                  f"Should not appear; found in titles {list(actual_months.keys())}")
+
+    # Regional entries
     if regional_db:
-        cur.execute("""
-            SELECT properties FROM notion.pages
-            WHERE parent::text LIKE %s AND archived = false
-        """, (f'%{regional_db}%',))
+        cur.execute("""SELECT properties FROM notion.pages
+                       WHERE parent->>'database_id' = %s AND archived=false""",
+                    (regional_db,))
         regional_pages = cur.fetchall()
-        check(f"Regional Performance has {len(expected_regions)} entries",
-              len(regional_pages) >= len(expected_regions),
-              f"Found {len(regional_pages)} entries")
+        check(f"Regional Performance has exactly {len(expected_regions)} entries",
+              len(regional_pages) == len(expected_regions),
+              f"Found {len(regional_pages)}")
 
-        all_props_text = " ".join(json.dumps(p[0]) for p in regional_pages if p[0])
-        for region, _, _ in expected_regions:
-            check(f"Regional Performance contains '{region}'",
-                  region.lower() in all_props_text.lower(),
-                  f"Not found in properties")
+        actual_regions = {}
+        for (props,) in regional_pages:
+            tname = _normalize(_page_title_text(props))
+            order_count = _page_number_field(props, ["Order Count", "Order_Count", "Orders"])
+            revenue = _page_number_field(props, ["Revenue", "Total Revenue"])
+            actual_regions[tname] = (order_count, revenue)
+
+        for region, oc, rev in expected_regions:
+            actual = actual_regions.get(_normalize(region))
+            check(f"Regional Performance '{region}' entry exists", actual is not None,
+                  f"Regions found: {list(actual_regions.keys())}")
+            if actual is not None:
+                check(f"Regional '{region}' Order Count correct",
+                      actual[0] is not None and num_close(actual[0], oc, 1),
+                      f"Got {actual[0]}, expected {oc}")
+                check(f"Regional '{region}' Revenue correct",
+                      actual[1] is not None and num_close(actual[1], rev, 1.0),
+                      f"Got {actual[1]}, expected {rev}")
 
     cur.close()
     conn.close()
@@ -173,52 +260,117 @@ def check_excel(agent_workspace):
         return
 
     try:
-        wb = load_workbook(xlsx_path)
+        wb = load_workbook(xlsx_path, data_only=True)
     except Exception as e:
         check("Excel file readable", False, str(e))
         return
 
-    expected_monthly, expected_regions = load_expected()
+    expected_monthly, partial_months, expected_regions, borderline_months = load_expected()
 
-    def find_sheet(keywords):
+    def find_sheet(name_norm):
         for s in wb.sheetnames:
-            sl = s.lower()
-            if all(k in sl for k in keywords):
+            if _normalize(s).replace("_", " ") == name_norm:
                 return wb[s]
         return None
 
-    def sheet_text(ws):
-        txt = ""
-        for row in ws.iter_rows(values_only=True):
-            txt += " ".join(str(c) for c in row if c is not None) + " "
-        return txt
-
     # Monthly Revenue sheet
-    ws_m = find_sheet(["monthly"])
-    if not ws_m:
-        ws_m = find_sheet(["revenue"])
-    check("Monthly Revenue sheet exists", ws_m is not None, f"Sheets: {wb.sheetnames}")
-    if ws_m:
-        txt = sheet_text(ws_m)
-        check("Monthly sheet contains '2024-04'", "2024-04" in txt)
-        check("Monthly sheet contains '2025-12'", "2025-12" in txt)
-        # Check that partial month 2026-03 is excluded
-        check("Monthly sheet excludes partial month 2026-03",
-              "2026-03" not in txt or "14590" not in txt,
-              "Partial month included")
+    ws_m = find_sheet("monthly revenue")
+    check("'Monthly Revenue' sheet exists", ws_m is not None, f"Sheets: {wb.sheetnames}")
+    if ws_m is not None:
+        rows = list(ws_m.iter_rows(values_only=True))
+        if not rows:
+            check("Monthly Revenue sheet has rows", False, "Empty")
+        else:
+            header = rows[0]
+            data = [r for r in rows[1:] if any(v is not None for v in r)]
+
+            def find_col(names):
+                for i, c in enumerate(header):
+                    if _normalize(c).replace("_", " ") in [n.lower() for n in names]:
+                        return i
+                return None
+
+            month_col = find_col(["month"])
+            order_col = find_col(["order count"])
+            rev_col = find_col(["revenue"])
+
+            check("Monthly Revenue has Month/Order Count/Revenue columns",
+                  None not in (month_col, order_col, rev_col),
+                  f"header={header}")
+            min_count = len(expected_monthly)
+            max_count = len(expected_monthly) + len(borderline_months)
+            check(f"Monthly Revenue row count in [{min_count}, {max_count}]",
+                  min_count <= len(data) <= max_count,
+                  f"Got {len(data)}")
+
+            if month_col is not None:
+                actual_lookup = {}
+                for r in data:
+                    if month_col < len(r) and r[month_col] is not None:
+                        m = _normalize(r[month_col])
+                        actual_lookup[m] = r
+                for m, oc, rev in expected_monthly:
+                    a = actual_lookup.get(m.lower())
+                    check(f"Excel monthly '{m}' present", a is not None, f"Months: {list(actual_lookup.keys())}")
+                    if a is not None:
+                        if order_col is not None and order_col < len(a):
+                            check(f"Excel monthly '{m}' Order Count",
+                                  num_close(a[order_col], oc, 1),
+                                  f"Got {a[order_col]}, expected {oc}")
+                        if rev_col is not None and rev_col < len(a):
+                            check(f"Excel monthly '{m}' Revenue",
+                                  num_close(a[rev_col], rev, 1.0),
+                                  f"Got {a[rev_col]}, expected {rev}")
+
+                # Partial month must be excluded
+                for m, _, _ in partial_months:
+                    check(f"Excel excludes partial month '{m}'",
+                          m.lower() not in actual_lookup,
+                          f"Found in: {list(actual_lookup.keys())}")
 
     # Regional Performance sheet
-    ws_r = find_sheet(["regional"])
-    if not ws_r:
-        ws_r = find_sheet(["region"])
-    check("Regional Performance sheet exists", ws_r is not None, f"Sheets: {wb.sheetnames}")
-    if ws_r:
-        txt = sheet_text(ws_r)
-        for region, orders, revenue in expected_regions:
-            check(f"Regional sheet contains '{region}'",
-                  region.lower() in txt.lower())
-            check(f"Regional sheet contains revenue {revenue} for {region}",
-                  number_in_text(revenue, txt))
+    ws_r = find_sheet("regional performance")
+    check("'Regional Performance' sheet exists", ws_r is not None, f"Sheets: {wb.sheetnames}")
+    if ws_r is not None:
+        rows = list(ws_r.iter_rows(values_only=True))
+        if rows:
+            header = rows[0]
+            data = [r for r in rows[1:] if any(v is not None for v in r)]
+
+            def find_col(names):
+                for i, c in enumerate(header):
+                    if _normalize(c).replace("_", " ") in [n.lower() for n in names]:
+                        return i
+                return None
+
+            region_col = find_col(["region"])
+            order_col = find_col(["order count"])
+            rev_col = find_col(["revenue"])
+            check("Regional has Region/Order Count/Revenue columns",
+                  None not in (region_col, order_col, rev_col),
+                  f"header={header}")
+            check(f"Regional row count == {len(expected_regions)}",
+                  len(data) == len(expected_regions),
+                  f"Got {len(data)}")
+
+            if region_col is not None:
+                actual_lookup = {}
+                for r in data:
+                    if region_col < len(r) and r[region_col] is not None:
+                        actual_lookup[_normalize(r[region_col])] = r
+                for region, oc, rev in expected_regions:
+                    a = actual_lookup.get(_normalize(region))
+                    check(f"Excel region '{region}' present", a is not None,
+                          f"Found: {list(actual_lookup.keys())}")
+                    if a is not None:
+                        if order_col is not None and order_col < len(a):
+                            check(f"Excel region '{region}' Order Count",
+                                  num_close(a[order_col], oc, 1),
+                                  f"Got {a[order_col]}, expected {oc}")
+                        if rev_col is not None and rev_col < len(a):
+                            check(f"Excel region '{region}' Revenue",
+                                  num_close(a[rev_col], rev, 1.0),
+                                  f"Got {a[rev_col]}, expected {rev}")
 
 
 def main():

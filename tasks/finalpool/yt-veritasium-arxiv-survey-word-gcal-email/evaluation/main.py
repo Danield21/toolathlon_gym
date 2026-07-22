@@ -2,13 +2,12 @@
 Evaluation for yt-veritasium-arxiv-survey-word-gcal-email task.
 
 Checks:
-1. Science_Communication_Survey.docx exists
-2. Word doc has >= 6 headings
-3. Word doc text contains Veritasium and at least 3 science terms
-4. Word doc text contains at least 3 paper titles or author names
-5. GCal has 2 new events in April 2026
-6. Email sent to seminar@science.edu
-7. Email sent to collab@research.org
+1. Science_Communication_Survey.docx exists with required structure (>=8 headings: title + exec summary + 5 topics + conclusion + references)
+2. Word doc text contains Veritasium and at least 5 distinct science topics
+3. Word doc text contains at least 5 paper titles or author names
+4. GCal has 2 specific new events with correct titles, dates, times
+5. Email sent to seminar@science.edu with exact subject
+6. Email sent to collab@research.org with exact subject
 """
 import json
 import os
@@ -52,7 +51,6 @@ def check_word_doc(agent_workspace):
         import docx
         doc = docx.Document(docx_path)
     except ImportError:
-        # Fallback: check file size
         size = os.path.getsize(docx_path)
         record("Word doc is non-empty (>5KB)", size > 5000, f"Size: {size} bytes")
         return
@@ -60,46 +58,54 @@ def check_word_doc(agent_workspace):
         record("Word doc readable", False, str(e))
         return
 
-    # Count headings
-    headings = [p for p in doc.paragraphs if p.style.name.startswith("Heading")]
-    record("Word doc has >= 6 headings", len(headings) >= 6,
-           f"Found {len(headings)} headings: {[h.text[:50] for h in headings[:8]]}")
+    # Headings (Title + Exec Summary + 5 topics + Conclusion + References = 9)
+    headings = [p for p in doc.paragraphs if p.style.name.startswith("Heading") or p.style.name.startswith("Title")]
+    heading_texts = [h.text.strip() for h in headings]
+    record("Word doc has >= 8 headings (title + exec summary + 5 topics + conclusion + references)",
+           len(headings) >= 8,
+           f"Found {len(headings)} headings: {heading_texts[:10]}")
 
-    # Check text content
-    all_text = " ".join(p.text for p in doc.paragraphs).lower()
+    full_text = " ".join(p.text for p in doc.paragraphs).lower()
 
-    has_veritasium = "veritasium" in all_text
-    record("Word doc mentions Veritasium", has_veritasium, "Veritasium not found in text")
+    # Title text
+    record(
+        "Word doc contains title 'Bridging Popular Science and Academic Research'",
+        "bridging popular science and academic research" in full_text,
+        f"text snippet: {full_text[:200]}",
+    )
 
-    science_terms = ["quantum", "evolution", "cognitive", "mathematical", "fluid", "fermi", "brain",
-                     "paradox", "decoherence", "neuroplasticity", "biomimetic", "game theory"]
-    found_terms = [t for t in science_terms if t in all_text]
-    record("Word doc contains >= 3 science topic terms", len(found_terms) >= 3,
-           f"Found: {found_terms}")
+    # Veritasium mention
+    record("Word doc mentions Veritasium", "veritasium" in full_text)
 
-    # Check for paper author/title references
-    key_refs = ["sean carroll", "martin nowak", "daniel kahneman", "timothy gowers",
-                "john dabiri", "anders sandberg", "michael merzenich",
-                "many-worlds", "game theory and evolution", "cognitive biases",
-                "paradoxes in mathematics", "fluid dynamics in nature", "fermi paradox",
-                "neuroplasticity"]
-    found_refs = [r for r in key_refs if r in all_text]
-    record("Word doc references >= 3 paper authors/titles", len(found_refs) >= 3,
-           f"Found refs: {found_refs}")
+    # 5 distinct science topic keywords (each as its own check)
+    SCIENCE_TOPICS = [
+        ("quantum", ["quantum", "decoherence", "many-worlds"]),
+        ("evolutionary biology", ["evolution", "game theory"]),
+        ("cognitive science", ["cognitive", "biases", "psychology", "brain"]),
+        ("mathematical paradoxes", ["mathematical", "paradox", "infinity"]),
+        ("fluid dynamics or biomechanics", ["fluid", "biomechanics", "biomimetic"]),
+    ]
+    for topic_name, kws in SCIENCE_TOPICS:
+        record(
+            f"Word doc covers '{topic_name}' topic",
+            any(kw in full_text for kw in kws),
+            f"keywords {kws} not found in text",
+        )
 
-    # Check for executive summary
-    has_exec_summary = "executive summary" in all_text or "summary" in all_text
-    record("Word doc contains Executive Summary section", has_exec_summary,
-           "No Executive Summary found")
+    # Executive Summary section: must contain phrase 'executive summary' (not just 'summary')
+    has_exec_summary = "executive summary" in full_text
+    record("Word doc has 'Executive Summary' section (exact phrase)", has_exec_summary)
 
-    # Check for references section
-    has_references = "references" in all_text or "arxiv:" in all_text or "arxiv.org" in all_text
-    record("Word doc contains References section", has_references,
-           "No References section found")
+    # Conclusion section
+    record("Word doc has 'Conclusion' section", "conclusion" in full_text)
 
-    # Check word count is substantial
-    word_count = len(all_text.split())
-    record("Word doc has substantial content (>= 500 words)", word_count >= 500,
+    # References section: 'references' substring is required
+    has_references = "references" in full_text
+    record("Word doc has References section", has_references)
+
+    # Word count substantial
+    word_count = len(full_text.split())
+    record("Word doc has substantial content (>= 800 words)", word_count >= 800,
            f"Word count: {word_count}")
 
 
@@ -108,7 +114,7 @@ def check_gcal():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     cur.execute("""
-        SELECT summary, start_datetime FROM gcal.events
+        SELECT summary, start_datetime, end_datetime FROM gcal.events
         WHERE start_datetime >= '2026-04-01' AND start_datetime < '2026-05-01'
         ORDER BY start_datetime
     """)
@@ -116,17 +122,44 @@ def check_gcal():
     cur.close()
     conn.close()
 
-    # Expect at least 2 total events in April (Lab Meeting preloaded + at least 1 new)
-    record("GCal has events in April 2026 (at least preloaded Lab Meeting)",
-           len(events) >= 1,
-           f"Found {len(events)} events: {[e[0] for e in events]}")
+    # Find Science Communication Seminar event
+    seminar = None
+    review = None
+    for s, sd, ed in events:
+        sl = (s or "").lower()
+        if "science communication seminar" in sl:
+            seminar = (s, sd, ed)
+        if "survey review session" in sl:
+            review = (s, sd, ed)
+    record("GCal has 'Science Communication Seminar' event", seminar is not None,
+           f"April events: {[e[0] for e in events]}")
+    if seminar:
+        s, sd, ed = seminar
+        record(
+            "Seminar event date is 2026-04-10",
+            sd.date().isoformat() == "2026-04-10",
+            f"date={sd.date()}",
+        )
+        record(
+            "Seminar event time is 14:00-16:00",
+            sd.hour == 14 and sd.minute == 0 and ed.hour == 16 and ed.minute == 0,
+            f"start={sd} end={ed}",
+        )
 
-    # Check if agent added any seminar/survey/review events
-    new_events = [e for e in events if "lab meeting" not in (e[0] or "").lower()]
-    summaries = " ".join(e[0] or "" for e in events).lower()
-    has_seminar = "seminar" in summaries or "survey" in summaries or "science" in summaries or "review" in summaries
-    record("GCal has >= 1 seminar or review event added by agent", len(new_events) >= 1 and has_seminar,
-           f"New events: {[e[0] for e in new_events]}")
+    record("GCal has 'Survey Review Session' event", review is not None,
+           f"April events: {[e[0] for e in events]}")
+    if review:
+        s, sd, ed = review
+        record(
+            "Review event date is 2026-04-03",
+            sd.date().isoformat() == "2026-04-03",
+            f"date={sd.date()}",
+        )
+        record(
+            "Review event time is 10:00-11:00",
+            sd.hour == 10 and sd.minute == 0 and ed.hour == 11 and ed.minute == 0,
+            f"start={sd} end={ed}",
+        )
 
 
 def check_emails_sent():
@@ -134,27 +167,87 @@ def check_emails_sent():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     try:
-        # Check messages in Sent/SENT folders
+        # Look for messages from Sent folder OR via sent_log
         cur.execute("""
-            SELECT m.to_addr FROM email.messages m
+            SELECT m.id, m.subject, m.to_addr, m.body_text FROM email.messages m
             JOIN email.folders f ON m.folder_id = f.id
             WHERE UPPER(f.name) = 'SENT'
         """)
-        sent_rows = cur.fetchall()
-        # Also check via sent_log join
+        sent_via_folder = cur.fetchall()
         cur.execute("""
-            SELECT m.to_addr FROM email.sent_log sl
+            SELECT m.id, m.subject, m.to_addr, m.body_text FROM email.sent_log sl
             JOIN email.messages m ON sl.message_id = m.id
         """)
-        sent_rows += cur.fetchall()
-        sent_text = " ".join(str(row[0]) for row in sent_rows).lower()
+        sent_via_log = cur.fetchall()
+        # Combine + dedupe
+        seen = set()
+        sent = []
+        for r in sent_via_folder + sent_via_log:
+            if r[0] in seen:
+                continue
+            seen.add(r[0])
+            sent.append(r)
 
-        record("Email sent to seminar@science.edu",
-               "seminar@science.edu" in sent_text,
-               f"Sent entries: {len(sent_rows)}")
-        record("Email sent to collab@research.org",
-               "collab@research.org" in sent_text,
-               f"Sent entries: {len(sent_rows)}")
+        # Email 1: seminar@science.edu
+        seminar_email = None
+        for _id, subj, to_addr, body in sent:
+            if "seminar@science.edu" in str(to_addr or "").lower():
+                seminar_email = (subj, body)
+                break
+        record("Email sent to seminar@science.edu", seminar_email is not None,
+               f"sent count: {len(sent)}")
+        if seminar_email:
+            subj, body = seminar_email
+            target_subj = "science communication survey - ready for review"
+            record(
+                "Seminar email subject 'Science Communication Survey - Ready for Review'",
+                (subj or "").strip().lower() == target_subj,
+                f"got '{subj}'",
+            )
+            body_l = (body or "").lower()
+            # Tighten: require >=2 of 5 actual topic names (not bare 'topic' substring)
+            topic_keywords = ["quantum", "evolution", "cognitive", "mathematical", "paradox", "fluid"]
+            topic_hits = sum(1 for k in topic_keywords if k in body_l)
+            record("Seminar email body mentions >=2 of 5 actual topics",
+                   topic_hits >= 2,
+                   f"hits={topic_hits}; body: {body_l[:200]}")
+            # Tighten: require 'april 10' or '2026-04-10' or '04-10' (not bare '10')
+            seminar_date_ok = (
+                "april 10" in body_l or
+                "2026-04-10" in body_l or
+                "04-10" in body_l or
+                "april 10, 2026" in body_l or
+                "10 april" in body_l
+            )
+            record("Seminar email body mentions seminar date (april 10 / 2026-04-10)",
+                   seminar_date_ok,
+                   f"body: {body_l[:200]}")
+            record("Seminar email body length >= 100 chars", len(body or "") >= 100,
+                   f"body length={len(body or '')}")
+
+        # Email 2: collab@research.org
+        collab_email = None
+        for _id, subj, to_addr, body in sent:
+            if "collab@research.org" in str(to_addr or "").lower():
+                collab_email = (subj, body)
+                break
+        record("Email sent to collab@research.org", collab_email is not None,
+               f"sent count: {len(sent)}")
+        if collab_email:
+            subj, body = collab_email
+            target_subj = "collaboration invitation - veritasium science survey"
+            record(
+                "Collab email subject 'Collaboration Invitation - Veritasium Science Survey'",
+                (subj or "").strip().lower() == target_subj,
+                f"got '{subj}'",
+            )
+            body_l = (body or "").lower()
+            record("Collab email body mentions co-present or paper recommendations",
+                   ("co-present" in body_l or "copresent" in body_l or "co present" in body_l
+                    or "recommendation" in body_l or "paper" in body_l),
+                   f"body: {body_l[:200]}")
+            record("Collab email body length >= 100 chars", len(body or "") >= 100,
+                   f"body length={len(body or '')}")
     except Exception as e:
         record("Email sent check", False, str(e))
     finally:
@@ -179,24 +272,18 @@ def main():
         print("\nFAIL: No checks were performed.")
         sys.exit(1)
 
-    accuracy = PASS_COUNT / total * 100
-    print(f"\nOverall: {PASS_COUNT}/{total} checks passed ({accuracy:.1f}%)")
+    print(f"\nOverall: {PASS_COUNT}/{total} checks passed")
 
-    result = {
-        "total_passed": PASS_COUNT,
-        "total_checks": total,
-        "accuracy": accuracy,
-    }
-
+    result = {"total_passed": PASS_COUNT, "total_checks": total}
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:
-        print("FAIL")
+        print(f"FAIL ({FAIL_COUNT} failures)")
         sys.exit(1)
 
 

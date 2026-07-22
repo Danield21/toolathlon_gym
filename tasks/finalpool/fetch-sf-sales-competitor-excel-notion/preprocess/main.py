@@ -4,7 +4,7 @@ import argparse, json, os, sys, shutil, tarfile, subprocess, time
 from datetime import datetime, timedelta
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -61,8 +61,28 @@ def setup_mock_server(port=30335):
         with tarfile.open(tar_path, "r:gz") as tar:
             tar.extractall(path=tmp_dir)
 
-    # Start HTTP server
+    # CRITICAL FIX: Replace HR-flavored mock data with region-flavored benchmarks
+    # so the agent has the external Market_Size_M data it needs to compute
+    # Market_Penetration_Pct against internal sf_data SALES_DW.CUSTOMERS regions.
     mock_dir = os.path.join(tmp_dir, "mock_pages")
+    api_dir = os.path.join(mock_dir, "api")
+    os.makedirs(api_dir, exist_ok=True)
+    region_data = {
+        "benchmarks": [
+            {"region": "Asia Pacific", "market_size_m": 439},
+            {"region": "Europe", "market_size_m": 339},
+            {"region": "Latin America", "market_size_m": 453},
+            {"region": "Middle East", "market_size_m": 421},
+            {"region": "North America", "market_size_m": 463},
+        ],
+        "source": "Sales Region Benchmarks API",
+        "date": "2026-03-01",
+        "notes": "Market_Size_M is regional addressable market in millions USD.",
+    }
+    with open(os.path.join(api_dir, "data.json"), "w") as f:
+        json.dump(region_data, f, indent=2)
+
+    # Start HTTP server
     if os.path.exists(mock_dir):
         log_path = os.path.join(mock_dir, "server.log")
         subprocess.Popen(

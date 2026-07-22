@@ -69,6 +69,19 @@ def main():
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
         
+        # Header check
+        if a_rows and a_rows[0]:
+            ah = [str(h or "").strip().lower().replace(" ", "_") for h in a_rows[0]]
+            expected = ["code", "discount_type", "amount", "usage_count", "usage_limit", "utilization_pct"]
+            for i, eh in enumerate(expected):
+                got = ah[i] if i < len(ah) else "MISSING"
+                if got != eh:
+                    errors.append(f"Coupon Analysis header[{i}]: expected '{eh}' got '{got}'")
+
+        # Row count check
+        if len(a_data) != len(g_data):
+            errors.append(f"Coupon Analysis row count: {len(a_data)} vs {len(g_data)}")
+
         a_lookup = {}
         for row in a_data:
             if row and row[0] is not None:
@@ -81,14 +94,44 @@ def main():
             if a_row is None:
                 errors.append(f"Missing row: {g_row[0]}")
                 continue
-            
+            # Discount_Type (col 1)
+            if len(a_row) > 1 and len(g_row) > 1:
+                if not str_match(a_row[1], g_row[1]):
+                    errors.append(f"{key}.Discount_Type: '{a_row[1]}' vs '{g_row[1]}'")
+            # Amount (col 2) tol 0
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 1.0):
-                    errors.append(f"{key}.Amount: {a_row[2]} vs {g_row[2]} (tol=1.0)")
-
+                if not num_close(a_row[2], g_row[2], 0.1):
+                    errors.append(f"{key}.Amount: {a_row[2]} vs {g_row[2]}")
+            # Usage_Count (col 3) tol 0 (deterministic count)
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 1):
-                    errors.append(f"{key}.Usage_Count: {a_row[3]} vs {g_row[3]} (tol=1)")
+                if not num_close(a_row[3], g_row[3], 0):
+                    errors.append(f"{key}.Usage_Count: {a_row[3]} vs {g_row[3]}")
+            # Usage_Limit (col 4) — None or specific number
+            if len(a_row) > 4 and len(g_row) > 4:
+                if g_row[4] is None:
+                    if a_row[4] is not None and str(a_row[4]).strip() != "":
+                        # Allow "None"/"-"/"" for "no limit"
+                        try:
+                            if float(a_row[4]) != 0:
+                                errors.append(f"{key}.Usage_Limit: {a_row[4]} vs None (no limit)")
+                        except (TypeError, ValueError):
+                            pass  # accept string variants like "-", "None"
+                else:
+                    if not num_close(a_row[4], g_row[4], 0):
+                        errors.append(f"{key}.Usage_Limit: {a_row[4]} vs {g_row[4]}")
+            # Utilization_Pct (col 5) tol 0.2
+            if len(a_row) > 5 and len(g_row) > 5:
+                if not num_close(a_row[5], g_row[5], 0.2):
+                    errors.append(f"{key}.Utilization_Pct: {a_row[5]} vs {g_row[5]}")
+
+        # Sort: descending by Usage_Count
+        try:
+            counts = [int(r[3]) if r[3] is not None else 0 for r in a_data]
+            if counts != sorted(counts, reverse=True):
+                errors.append(f"Coupon Analysis not sorted descending by Usage_Count: {counts}")
+        except (TypeError, ValueError):
+            pass
+
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -126,8 +169,19 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 5.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=5.0)")
+                # Tighter tolerances per metric type
+                if key in ("total_coupons", "total_usage"):
+                    if not num_close(a_row[1], g_row[1], 0):
+                        errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]}")
+                elif key == "avg_utilization":
+                    if not num_close(a_row[1], g_row[1], 0.2):
+                        errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]}")
+                elif key == "most_used_code":
+                    if not str_match(a_row[1], g_row[1]):
+                        errors.append(f"{key}.Value: '{a_row[1]}' vs '{g_row[1]}'")
+                else:
+                    if not num_close(a_row[1], g_row[1], 0.5):
+                        errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]}")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -144,16 +198,22 @@ def main():
         try:
             from docx import Document as _DocCheck
             _doc = _DocCheck(docx_path)
-            _text = " ".join(p.text for p in _doc.paragraphs).lower()
-            _headings = " ".join(p.text for p in _doc.paragraphs if p.style.name.startswith("Heading")).lower()
-            if len(_text.strip()) < 50:
-                all_errors.append("Coupon_Strategy.docx has too little text content (< 50 chars)")
-            _kws = ["coupon", "strategy"]
-            _missing = [k for k in _kws if k not in _text and k not in _headings]
-            if len(_missing) == len(_kws):
-                all_errors.append(f"Coupon_Strategy.docx missing expected keywords: {_missing}")
+            _text = " ".join(p.text for p in _doc.paragraphs)
+            _text_lower = _text.lower()
+            if len(_text.strip()) < 200:
+                all_errors.append(f"Coupon_Strategy.docx has too little text ({len(_text)} chars, need >=200)")
+            # Both 'coupon' AND 'strategy'/'recommendation' required
+            for kw in ["coupon"]:
+                if kw not in _text_lower:
+                    all_errors.append(f"Coupon_Strategy.docx missing keyword '{kw}'")
+            if not any(k in _text_lower for k in ["strategy", "recommendation", "recommend"]):
+                all_errors.append("Coupon_Strategy.docx missing strategy/recommendation content")
+            # At least one specific coupon code mentioned (e.g. HOLIDAY30, VIP20)
+            specific_codes_found = sum(1 for code in ["HOLIDAY30", "VIP20", "SAVE20", "WELCOME10", "BULK10", "ELECTRONICS15", "FREESHIP", "SUMMER25", "FLASH50", "NEWUSER5"] if code in _text)
+            if specific_codes_found < 1:
+                all_errors.append("Coupon_Strategy.docx mentions no specific coupon codes")
         except ImportError:
-            if os.path.getsize(docx_path) < 100:
+            if os.path.getsize(docx_path) < 200:
                 all_errors.append("Coupon_Strategy.docx too small")
         except Exception as _e:
             all_errors.append(f"Error reading Coupon_Strategy.docx: {_e}")

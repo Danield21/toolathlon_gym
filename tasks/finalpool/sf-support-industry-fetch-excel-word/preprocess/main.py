@@ -4,7 +4,7 @@ import argparse, json, os, sys, shutil, subprocess, time
 from datetime import datetime, timedelta
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -16,19 +16,57 @@ def get_conn():
     return psycopg2.connect(**DB_CONFIG)
 
 def clear_writable_schemas():
+    """Actually clear writable schemas to prevent stale-data carryover between runs."""
     conn = get_conn()
     cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM email.sent_log")
+    except Exception:
+        pass
+    try:
+        cur.execute("DELETE FROM email.attachments")
+    except Exception:
+        pass
+    try:
+        cur.execute("DELETE FROM email.drafts")
+    except Exception:
+        pass
+    try:
+        cur.execute("DELETE FROM email.messages")
+    except Exception:
+        pass
+    try:
+        cur.execute("DELETE FROM gcal.events")
+    except Exception:
+        pass
+    try:
+        cur.execute("DELETE FROM gsheet.cells")
+        cur.execute("DELETE FROM gsheet.sheets")
+        cur.execute("DELETE FROM gsheet.spreadsheets")
+        cur.execute("DELETE FROM gsheet.folders")
+    except Exception:
+        pass
+    try:
+        cur.execute("DELETE FROM gform.responses")
+        cur.execute("DELETE FROM gform.questions")
+        cur.execute("DELETE FROM gform.forms")
+    except Exception:
+        pass
+    try:
+        cur.execute("DELETE FROM notion.comments")
+        cur.execute("DELETE FROM notion.blocks")
+        cur.execute("DELETE FROM notion.pages")
+        cur.execute("DELETE FROM notion.databases")
+    except Exception:
+        pass
     conn.commit()
     cur.close()
     conn.close()
+    print("[preprocess] Writable schemas cleared.")
 
 def inject_data(launch_time):
-    conn = get_conn()
-    cur = conn.cursor()
-    launch_dt = datetime.strptime(launch_time, "%Y-%m-%d %H:%M:%S")
-    conn.commit()
-    cur.close()
-    conn.close()
+    """No injectable data needed (Snowflake is read-only); kept as no-op for symmetry."""
+    pass
 
 def setup_mock_server(port=30340):
     files_dir = os.path.join(TASK_ROOT, "files")

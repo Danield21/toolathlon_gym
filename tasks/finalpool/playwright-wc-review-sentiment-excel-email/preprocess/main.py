@@ -20,7 +20,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -49,7 +49,10 @@ def inject_noise_email(cur):
     cur.execute("SELECT id FROM email.folders WHERE name = 'INBOX' LIMIT 1")
     row = cur.fetchone()
     if not row:
-        return
+        # Ensure INBOX folder exists so subsequent inserts / agent writes work
+        cur.execute("INSERT INTO email.folders(name) VALUES ('INBOX') RETURNING id")
+        row = cur.fetchone()
+        print("[preprocess] Created missing INBOX folder.")
     folder_id = row[0]
     cur.execute(
         """INSERT INTO email.messages

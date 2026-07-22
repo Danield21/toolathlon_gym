@@ -26,6 +26,7 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+_AGENT_DISH_NAMES = []
 
 
 def record(name, passed, detail=""):
@@ -86,6 +87,7 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
                 dc_sheet = name
                 break
 
+    agent_dish_names_lower = set()
     if not dc_sheet:
         record("Dish Costs sheet exists", False, f"Sheets: {wb.sheetnames}")
     else:
@@ -96,12 +98,51 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         record("Dish Costs has 5 data rows", len(data_rows) >= 5,
                f"Found {len(data_rows)} data rows")
 
-        # Check that some expected dish names appear
-        all_text = " ".join(str(c) for r in data_rows for c in r if c is not None)
-        has_dishes = sum(1 for d in ["可乐鸡翅", "水煮鱼", "金针菇", "年糕", "蘑菇汤"]
-                        if d in all_text)
-        record("Dish Costs contains expected dish names", has_dishes >= 3,
-               f"Found {has_dishes}/5 expected dish keywords")
+        # NOTE: Task.md allows agent to "select 5 dishes from different categories",
+        # so we do NOT hardcode specific dish names. Validate distinct dish names.
+        dish_names = set()
+        for r in data_rows:
+            if r and r[0] is not None:
+                dish_names.add(str(r[0]).strip())
+                agent_dish_names_lower.add(str(r[0]).strip().lower())
+        record("Dish Costs has >=5 distinct dish names",
+               len(dish_names) >= 5,
+               f"Found {len(dish_names)} distinct names")
+
+        # Determine column indices via headers
+        if rows:
+            headers = [str(c).strip().lower() if c else "" for c in rows[0]]
+            total_idx = next((i for i, h in enumerate(headers) if "total" in h or ("estimated" in h and "cost" in h and "serving" not in h)), None)
+            cps_idx = next((i for i, h in enumerate(headers) if "per_serving" in h or "per serving" in h), None)
+
+            # Verify Cost_Per_Serving numeric in >=4 rows
+            if cps_idx is not None:
+                cps_count = 0
+                for r in data_rows:
+                    if r and len(r) > cps_idx:
+                        try:
+                            float(r[cps_idx])
+                            cps_count += 1
+                        except (TypeError, ValueError):
+                            pass
+                record("Dish Costs has numeric Cost_Per_Serving in >=4 rows",
+                       cps_count >= 4, f"numeric count={cps_count}")
+
+            # Self-consistency: Cost_Per_Serving == round(Total/4, 2) within tol
+            if total_idx is not None and cps_idx is not None:
+                consistent_rows = 0
+                for r in data_rows:
+                    if r and len(r) > max(total_idx, cps_idx):
+                        try:
+                            tot = float(r[total_idx])
+                            cps = float(r[cps_idx])
+                            if abs(round(tot / 4, 2) - cps) <= 0.05:
+                                consistent_rows += 1
+                        except (TypeError, ValueError):
+                            pass
+                record("Dish Costs self-consistency Cost_Per_Serving == Total/4 in >=4 rows",
+                       consistent_rows >= 4,
+                       f"consistent_rows={consistent_rows}")
 
     # Find Ingredient Prices sheet
     ip_sheet = None
@@ -121,37 +162,69 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         record("Ingredient Prices has >= 10 rows", len(data_rows) >= 10,
                f"Found {len(data_rows)} data rows")
 
-    # --- Groundtruth XLSX comparison ---
+    # --- Budget Summary self-consistency ---
+    bs_sheet = None
+    for name in wb.sheetnames:
+        if "budget" in name.lower() or "summary" in name.lower():
+            bs_sheet = name
+            break
+    if bs_sheet:
+        ws = wb[bs_sheet]
+        bs_rows = list(ws.iter_rows(values_only=True))
+        bs_data = [r for r in bs_rows[1:] if r and any(c is not None for c in r)]
+        bs_lookup = {}
+        total_cost_val = None
+        for r in bs_data:
+            if r and r[0]:
+                key = str(r[0]).strip().lower()
+                bs_lookup[key] = r[1] if len(r) > 1 else None
+        # Required metrics
+        for req in ["total_cost", "average_cost_per_dish", "cheapest_dish", "most_expensive_dish"]:
+            present = req in bs_lookup or req.replace("_", " ") in bs_lookup
+            # also accept variants without underscore
+            if not present:
+                for k in bs_lookup:
+                    if k.replace("_", " ").replace("  ", " ") == req.replace("_", " "):
+                        present = True
+                        break
+            record(f"Budget Summary contains '{req}'", present,
+                   f"keys: {list(bs_lookup)}")
+        # Self-consistency: Average_Cost_Per_Dish == Total_Cost / 5 (within 0.05)
+        try:
+            tot = float(bs_lookup.get("total_cost"))
+            avg = float(bs_lookup.get("average_cost_per_dish"))
+            if abs(round(tot / 5, 2) - avg) <= 0.05:
+                record("Budget Summary Average_Cost_Per_Dish == Total_Cost/5", True)
+            else:
+                record("Budget Summary Average_Cost_Per_Dish == Total_Cost/5", False,
+                       f"total={tot}, avg={avg}, expected={round(tot/5, 2)}")
+        except (TypeError, ValueError):
+            record("Budget Summary Average_Cost_Per_Dish numeric and consistent",
+                   False, "Could not parse Total_Cost or Average_Cost_Per_Dish")
+        # Cheapest != Most expensive
+        cheap = str(bs_lookup.get("cheapest_dish") or "").strip()
+        expensive = str(bs_lookup.get("most_expensive_dish") or "").strip()
+        if cheap and expensive:
+            record("Cheapest_Dish != Most_Expensive_Dish",
+                   cheap.lower() != expensive.lower(),
+                   f"cheap={cheap}, expensive={expensive}")
+            # Both should be in the agent's Dish Costs dish names
+            if agent_dish_names_lower:
+                record("Cheapest_Dish appears in Dish Costs",
+                       cheap.lower() in agent_dish_names_lower,
+                       f"cheap={cheap}")
+                record("Most_Expensive_Dish appears in Dish Costs",
+                       expensive.lower() in agent_dish_names_lower,
+                       f"expensive={expensive}")
+
+    # GT existence-only check (free dish choice, so per-row comparison disabled)
     gt_path = os.path.join(groundtruth_workspace, "Recipe_Cost_Analysis.xlsx")
     if os.path.isfile(gt_path):
-        gt_wb = openpyxl.load_workbook(gt_path, data_only=True)
-        for gt_sname in gt_wb.sheetnames:
-            gt_ws = gt_wb[gt_sname]
-            a_ws = None
-            for asn in wb.sheetnames:
-                if asn.strip().lower() == gt_sname.strip().lower():
-                    a_ws = wb[asn]; break
-            if a_ws is None:
-                record(f"GT sheet '{gt_sname}' exists in agent xlsx", False, f"Available: {wb.sheetnames}")
-                continue
-            gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-            a_rows = [r for r in a_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-            record(f"GT '{gt_sname}' row count", len(a_rows) == len(gt_rows),
-                   f"Expected {len(gt_rows)}, got {len(a_rows)}")
-            for ri in range(min(3, len(gt_rows))):
-                if ri >= len(a_rows): break
-                ok = True
-                for ci in range(min(len(gt_rows[ri]), len(a_rows[ri]) if ri < len(a_rows) else 0)):
-                    gv, av = gt_rows[ri][ci], a_rows[ri][ci]
-                    if gv is None: continue
-                    if isinstance(gv, (int, float)):
-                        if not num_close(av, gv, max(abs(gv)*0.1, 1.0)): ok = False; break
-                    else:
-                        if not str_match(av, gv): ok = False; break
-                record(f"GT '{gt_sname}' row {ri+1} values", ok,
-                       f"gt={gt_rows[ri][:4]}, agent={a_rows[ri][:4] if ri < len(a_rows) else 'missing'}")
-        gt_wb.close()
+        record("GT file present (existence only - free dish choice)", True)
 
+    # Stash agent dish names for GSheet check
+    global _AGENT_DISH_NAMES
+    _AGENT_DISH_NAMES = list(agent_dish_names_lower)
     wb.close()
 
 
@@ -174,20 +247,24 @@ def check_gsheet():
 
         record("Google Sheet exists", True)
 
-        # Find one with "cost" or "recipe" in title
+        # Find sheet with title 'Cafeteria Menu Cost Analysis' (per task.md)
         target_ss = None
         for ss_id, ss_title in spreadsheets:
             title_lower = (ss_title or "").lower()
-            if "cost" in title_lower or "recipe" in title_lower:
+            # Tightened: require ('cafeteria' AND 'cost') OR ('menu' AND 'cost' AND 'analysis')
+            if ("cafeteria" in title_lower and "cost" in title_lower) \
+                    or ("menu" in title_lower and "cost" in title_lower
+                        and "analysis" in title_lower):
                 target_ss = (ss_id, ss_title)
                 break
 
-        if not target_ss:
-            target_ss = (spreadsheets[0][0], spreadsheets[0][1])
-
-        record("Google Sheet title contains 'cost' or 'recipe'",
-               "cost" in (target_ss[1] or "").lower() or "recipe" in (target_ss[1] or "").lower(),
-               f"Title: {target_ss[1]}")
+        record("'Cafeteria Menu Cost Analysis' Google Sheet exists",
+               target_ss is not None,
+               f"All titles: {[s[1] for s in spreadsheets]}")
+        if target_ss is None:
+            cur.close()
+            conn.close()
+            return
 
         # Check cells exist
         cur.execute("""
@@ -201,6 +278,14 @@ def check_gsheet():
 
         record("Google Sheet has data", len(cells) >= 5,
                f"Found {len(cells)} cells")
+
+        # Tightened: GSheet should contain at least 4 of the agent's 5 dish names
+        cell_text = " | ".join(str(v or "").strip().lower() for _, _, v in cells)
+        if _AGENT_DISH_NAMES:
+            mentioned = [d for d in _AGENT_DISH_NAMES if d and d in cell_text]
+            record("GSheet contains >=4 of agent's 5 dish names",
+                   len(mentioned) >= 4,
+                   f"mentioned={len(mentioned)} of {len(_AGENT_DISH_NAMES)}: {mentioned[:5]}")
 
         cur.close()
         conn.close()

@@ -1,6 +1,6 @@
 Hi there, the Fall 2014 semester just wrapped up and I need to prepare a summary for the department. Could you pull together an overview of all the courses from that term?
 
-Please look up all courses that ran in Fall 2014 and gather the following for each: the course name, course code, total number of students, enrollment count, number of assignments, and the average points possible across all assignments (rounded to 1 decimal).
+Please look up all courses that ran in Fall 2014 and gather the following for each: the course name, course code, total number of students, enrollment count, number of assignments, and the average points possible across all assignments (rounded to 1 decimal). If a course has no assignments, record Avg Points Possible as 0.0. If an individual assignment has a null or zero points_possible, include it in the count but treat its points as 0 when computing the average.
 
 Create an Excel file called Semester_Summary.xlsx in the workspace with two sheets.
 
@@ -16,4 +16,4 @@ An overview slide showing the summary statistics (total courses, total students,
 
 One slide for each course showing the course name as title and its details (course code, total students, enrollments, assignments, average points possible).
 
-A final "Key Takeaways" slide identifying the largest course by student count, the smallest course by student count, and the course with the most assignments.
+A final "Key Takeaways" slide identifying the largest course by student count, the smallest course by student count, and the course with the most assignments. For each, include both the course name and the specific numeric value (e.g. "Largest: CCC-2014J with 2498 students").

@@ -3,6 +3,14 @@ import argparse
 import os
 import sys
 import openpyxl
+import psycopg2
+
+DB = {
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5432")),
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": "eigent", "password": "camel",
+}
 
 
 def num_close(a, b, tol=1.0):
@@ -14,6 +22,47 @@ def num_close(a, b, tol=1.0):
         return abs(float(a) - float(b)) <= tol
     except (TypeError, ValueError):
         return str(a).strip().lower() == str(b).strip().lower()
+
+
+def is_numeric(val):
+    if val is None:
+        return False
+    try:
+        float(str(val).replace(",", "").replace("$", "").strip())
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def check_email(errors):
+    """Verify email to marketing@company.com with subject 'Customer Loyalty Analysis'."""
+    try:
+        conn = psycopg2.connect(**DB); cur = conn.cursor()
+        cur.execute("""
+            SELECT subject, to_addr, COALESCE(body_text, body_html, '')
+            FROM email.messages
+        """)
+        rows = cur.fetchall(); cur.close(); conn.close()
+    except Exception as e:
+        errors.append(f"Email check error: {e}"); return
+    target_subj = "customer loyalty analysis"
+    target_to = "marketing@company.com"
+    matched = None
+    for subj, to_addr, body in rows:
+        subj_l = (subj or "").strip().lower()
+        to_str = str(to_addr or "").lower()
+        if target_subj in subj_l and target_to in to_str:
+            matched = (subj, to_addr, body)
+            break
+    if not matched:
+        errors.append(f"Email '{target_subj}' to {target_to} not found (checked {len(rows)} emails)")
+        return
+    body_l = (matched[2] or "").lower()
+    # Body should highlight highest-value segment-region(s)
+    must = ["segment", "region"]
+    missing = [m for m in must if m not in body_l]
+    if missing:
+        errors.append(f"Email body missing terms: {missing}")
 
 
 def str_match(a, b):
@@ -83,16 +132,25 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 5):
-                    errors.append(f"{key}.Customers: {a_row[1]} vs {g_row[1]} (tol=5)")
+                if not num_close(a_row[1], g_row[1], 0):
+                    errors.append(f"{key}.Customers: {a_row[1]} vs {g_row[1]} (exact)")
 
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 50.0):
-                    errors.append(f"{key}.Avg_LTV: {a_row[2]} vs {g_row[2]} (tol=50.0)")
+                if not num_close(a_row[2], g_row[2], 0.5):
+                    errors.append(f"{key}.Avg_LTV: {a_row[2]} vs {g_row[2]} (tol=0.5)")
 
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 10):
-                    errors.append(f"{key}.Total_Orders: {a_row[3]} vs {g_row[3]} (tol=10)")
+                if not num_close(a_row[3], g_row[3], 0):
+                    errors.append(f"{key}.Total_Orders: {a_row[3]} vs {g_row[3]} (exact)")
+
+        # Sort order: alphabetical by Segment, then Avg_LTV desc within segment
+        a_keys_present = [str(r[0]).strip() for r in a_data if r and r[0]]
+        if len(a_keys_present) >= 2:
+            # Build expected order from groundtruth (already sorted)
+            g_keys = [str(r[0]).strip() for r in g_data if r and r[0]]
+            if a_keys_present[:len(g_keys)] != g_keys:
+                errors.append(f"Customer Loyalty rows not in expected sort order; "
+                              f"expected first 3: {g_keys[:3]}, got: {a_keys_present[:3]}")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -130,8 +188,14 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 50.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=50.0)")
+                if is_numeric(g_row[1]):
+                    # numeric comparison; tighter tol for counts vs averages
+                    tol = 1.0 if "avg" in key or "ltv" in key else 0
+                    if not num_close(a_row[1], g_row[1], tol):
+                        errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol={tol})")
+                else:
+                    if str(a_row[1]).strip().lower() != str(g_row[1]).strip().lower():
+                        errors.append(f"{key}.Value: '{a_row[1]}' vs '{g_row[1]}' (string)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -141,6 +205,17 @@ def main():
             print(f"    PASS")
 
     
+
+    # Email check
+    print(f"  Checking email...")
+    email_errors = []
+    check_email(email_errors)
+    all_errors.extend(email_errors)
+    if email_errors:
+        for e in email_errors:
+            print(f"    {e}")
+    else:
+        print("    PASS")
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

@@ -47,7 +47,11 @@ def num_close(a, b, tol=2.0):
 
 
 def get_groundtruth_tiers():
-    """Compute expected tier values from Canvas DB."""
+    """Compute expected tier values from Canvas DB.
+
+    Defense-in-depth: if DB query fails, use last-known-good baked values
+    AND record a check failure so the evaluator does not silently pretend.
+    """
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
@@ -82,8 +86,13 @@ def get_groundtruth_tiers():
             }
         cur.close()
         conn.close()
+        if not tiers:
+            raise RuntimeError("DB returned 0 tier rows")
         return tiers
-    except Exception:
+    except Exception as e:
+        # Record failure so 70%+ accuracy gate cannot silently pass
+        check("Canvas DB query for groundtruth tiers", False,
+              f"DB query failed: {e}")
         return {
             "High": {"student_count": 1152, "avg_score": 82.9, "late_rate": 0.0},
             "Medium": {"student_count": 252, "avg_score": 80.5, "late_rate": 0.25},
@@ -129,15 +138,22 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 check(f"Tier '{tier_name}' present", False, "Missing")
                 continue
             check(
-                f"'{tier_name}' Student_Count",
-                num_close(r[1], expected["student_count"], 5),
+                f"'{tier_name}' Student_Count exact",
+                num_close(r[1], expected["student_count"], 0),
                 f"Expected {expected['student_count']}, got {r[1]}",
             )
             check(
                 f"'{tier_name}' Avg_Score",
-                num_close(r[2], expected["avg_score"], 2.0),
+                num_close(r[2], expected["avg_score"], 0.5),
                 f"Expected {expected['avg_score']}, got {r[2]}",
             )
+            # Late_Submission_Rate validation (col index 3)
+            if len(r) > 3 and r[3] is not None:
+                check(
+                    f"'{tier_name}' Late_Submission_Rate",
+                    num_close(r[3], expected["late_rate"], 0.05),
+                    f"Expected {expected['late_rate']}, got {r[3]}",
+                )
 
     # Sheet 2: Meal_Plans
     print("  -- Meal_Plans sheet --")
@@ -154,10 +170,10 @@ def check_excel(agent_workspace, groundtruth_workspace):
         for r in rows:
             if r and r[0]:
                 tier_lookup[str(r[0]).strip()] = r
-        for tier_name, expected_type in [
-            ("High", "Control"),
-            ("Medium", "Partial"),
-            ("Low", "Full Meal Plan"),
+        for tier_name, expected_type, expected_meals_substr, expected_cost in [
+            ("High", "Control", "none", 0),
+            ("Medium", "Partial", "breakfast", None),
+            ("Low", "Full Meal Plan", "lunch", None),
         ]:
             r = tier_lookup.get(tier_name)
             if r is None:
@@ -168,6 +184,33 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 str(r[1]).strip().lower() == expected_type.lower(),
                 f"Expected '{expected_type}', got '{r[1]}'",
             )
+            # Recommended_Meals (col 2)
+            if len(r) > 2:
+                meals_str = str(r[2] or "").lower()
+                check(
+                    f"'{tier_name}' Recommended_Meals contains '{expected_meals_substr}'",
+                    expected_meals_substr in meals_str,
+                    f"Got: '{r[2]}'",
+                )
+            # Estimated_Daily_Cost (col 3)
+            if len(r) > 3 and r[3] is not None:
+                if expected_cost == 0:
+                    check(
+                        f"'{tier_name}' Estimated_Daily_Cost is 0",
+                        num_close(r[3], 0, 0.01),
+                        f"Got {r[3]}",
+                    )
+                else:
+                    # Just require positive
+                    try:
+                        check(
+                            f"'{tier_name}' Estimated_Daily_Cost is positive",
+                            float(r[3]) > 0,
+                            f"Got {r[3]}",
+                        )
+                    except (TypeError, ValueError):
+                        check(f"'{tier_name}' Estimated_Daily_Cost numeric",
+                              False, f"Got {r[3]}")
 
 
 def check_json_files(agent_workspace):
@@ -219,8 +262,17 @@ def check_json_files(agent_workspace):
         with open(summary_path) as f:
             text = f.read().lower()
         check("Summary has substantial content", len(text) > 200, f"Length: {len(text)}")
-        check("Summary mentions engagement tiers", "high" in text and "low" in text and "medium" in text)
-        check("Summary mentions meal plan", "meal" in text and "plan" in text)
+        check("Summary mentions all 3 engagement tiers",
+              "high" in text and "low" in text and "medium" in text)
+        check("Summary mentions meal AND plan", "meal" in text and "plan" in text)
+        # Validate counts present
+        import re
+        for tier_name, expected in gt_tiers.items():
+            count_str = str(expected["student_count"])
+            pat = r'(?<!\d)' + re.escape(count_str) + r'(?!\d)'
+            check(f"Summary mentions {tier_name} count {count_str}",
+                  bool(re.search(pat, text)),
+                  f"Expected {count_str}")
 
 
 def check_gsheet():
@@ -281,6 +333,20 @@ def check_gsheet():
                 len(data_rows) >= 4,
                 f"Got {len(data_rows)} rows",
             )
+            # Validate cell content matches expected tiers
+            blob = " ".join(str(v) for row in data_rows.values() for v in row.values()).lower()
+            gt_tiers = get_groundtruth_tiers()
+            for tier_name, expected in gt_tiers.items():
+                check(f"GSheet engagement has tier '{tier_name}'",
+                      tier_name.lower() in blob,
+                      f"Tier missing from gsheet")
+                # Numeric token check
+                import re
+                count_str = str(expected["student_count"])
+                pat = r'(?<!\d)' + re.escape(count_str) + r'(?!\d)'
+                check(f"GSheet engagement has {tier_name} count {count_str}",
+                      bool(re.search(pat, blob)),
+                      f"Expected count {count_str}")
 
         cur.close()
         conn.close()
@@ -311,14 +377,32 @@ def check_notion():
             (f"%{db_id}%",),
         )
         pages = cur.fetchall()
-        check("Has 3 Notion pages", len(pages) == 3, f"Found {len(pages)}")
+        check("Has exactly 3 Notion pages", len(pages) == 3, f"Found {len(pages)}")
 
         # Check page content
         if pages:
             all_props_text = " ".join(str(p[1]) for p in pages).lower()
-            check("Has High/Control group", "control" in all_props_text)
+            check("Has Control group", "control" in all_props_text)
             check("Has Partial group", "partial" in all_props_text)
-            check("Has Full Meal Plan group", "full" in all_props_text.replace("full meal plan", "full"))
+            check("Has Full Meal Plan group", "full meal plan" in all_props_text)
+            # Start_Date 2026-04-01
+            check("Has Start_Date 2026-04-01",
+                  "2026-04-01" in all_props_text,
+                  f"Start_Date 2026-04-01 not found")
+            # Status 'Planning'
+            check("Has Status 'Planning'",
+                  "planning" in all_props_text,
+                  f"'Planning' not found")
+            # Enrollment numbers per tier - validate against gt_tiers
+            tiers_for_notion = get_groundtruth_tiers()
+            for tier_name, expected in tiers_for_notion.items():
+                count_str = str(expected["student_count"])
+                # Boundary-safe substring check (avoid 1152 matching '11520')
+                import re
+                pat = r'(?<!\d)' + re.escape(count_str) + r'(?!\d)'
+                check(f"Notion mentions {tier_name} enrollment count {count_str}",
+                      bool(re.search(pat, all_props_text)),
+                      f"Expected {count_str}")
 
         cur.close()
         conn.close()
@@ -332,34 +416,43 @@ def check_emails():
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
 
-        # Check email to student_affairs
+        # Check email to student_affairs - require correct subject
         cur.execute(
-            "SELECT subject, body_text, to_addr FROM email.messages WHERE to_addr::text LIKE '%student_affairs%'"
+            """SELECT subject, body_text, to_addr FROM email.messages
+            WHERE to_addr::text LIKE '%student_affairs@university.edu%'
+              AND LOWER(subject) LIKE '%nutrition-academic performance study%pilot proposal%'"""
         )
         sa_emails = cur.fetchall()
         check(
-            "Email to student_affairs@university.edu sent",
+            "Email to student_affairs with subject 'Nutrition-Academic Performance Study: Pilot Proposal'",
             len(sa_emails) >= 1,
             f"Found {len(sa_emails)}",
         )
         if sa_emails:
             body = (sa_emails[0][1] or "").lower()
-            check("SA email mentions pilot/study", "pilot" in body or "study" in body)
-            check("SA email mentions tiers", "high" in body or "tier" in body or "engagement" in body)
+            check("SA email mentions pilot AND study", "pilot" in body and "study" in body)
+            check("SA email mentions all 3 tiers",
+                  "high" in body and "medium" in body and "low" in body)
+            check("SA email mentions april 2026",
+                  "april" in body or "2026-04" in body or "april 2026" in body)
 
-        # Check email to dining_services
+        # Check email to dining_services - require correct subject
         cur.execute(
-            "SELECT subject, body_text, to_addr FROM email.messages WHERE to_addr::text LIKE '%dining_services%'"
+            """SELECT subject, body_text, to_addr FROM email.messages
+            WHERE to_addr::text LIKE '%dining_services@university.edu%'
+              AND LOWER(subject) LIKE '%meal plan recommendations%wellness pilot%'"""
         )
         ds_emails = cur.fetchall()
         check(
-            "Email to dining_services@university.edu sent",
+            "Email to dining_services with subject 'Meal Plan Recommendations for Wellness Pilot'",
             len(ds_emails) >= 1,
             f"Found {len(ds_emails)}",
         )
         if ds_emails:
             body = (ds_emails[0][1] or "").lower()
-            check("DS email mentions meal plan", "meal" in body and "plan" in body)
+            check("DS email mentions meal AND plan", "meal" in body and "plan" in body)
+            check("DS email mentions breakfast and lunch",
+                  "breakfast" in body and "lunch" in body)
 
         cur.close()
         conn.close()
@@ -408,12 +501,14 @@ def main():
     accuracy = PASS_COUNT / total * 100 if total > 0 else 0
     print(f"\nOverall: {PASS_COUNT}/{total} ({accuracy:.1f}%)")
 
-    result = {"total_passed": PASS_COUNT, "total_checks": total, "accuracy": accuracy}
+    result = {"total_passed": PASS_COUNT, "total_checks": total,
+              "total_failed": FAIL_COUNT, "accuracy": accuracy}
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    sys.exit(0 if accuracy >= 70 else 1)
+    # Strict gate: ALL checks must pass (no FP via threshold)
+    sys.exit(0 if FAIL_COUNT == 0 else 1)
 
 
 if __name__ == "__main__":

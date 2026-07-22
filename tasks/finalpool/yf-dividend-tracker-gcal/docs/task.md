@@ -12,6 +12,6 @@ The first sheet should be named "Dividend Stocks" and contain columns: Ticker, C
 
 The second sheet should be named "Summary" with the following rows of information: Total_Dividend_Stocks (count of stocks with dividends), Avg_Yield (average dividend yield across dividend stocks), Highest_Yield_Ticker (the ticker with the highest dividend yield).
 
-Next, create a Google Calendar event for each dividend-paying stock to remind the investor of the ex-dividend date. Each event should have the summary "Ex-Dividend: [TICKER]" (replacing [TICKER] with the actual ticker symbol), and the description should mention the dividend rate. Schedule each event as an all-day event on the ex-dividend date.
+Next, create a calendar event for each dividend-paying stock to remind the investor of the ex-dividend date. Each event should have the summary "Ex-Dividend: [TICKER]" (replacing [TICKER] with the actual ticker symbol), and the description should mention the dividend rate. Schedule each event as an all-day event on the ex-dividend date.
 
-Finally, create a Google Sheet titled "Dividend Watch List" with a sheet named "Overview" that contains the same columns and data as the "Dividend Stocks" sheet in the Excel file.
+Finally, create a cloud spreadsheet titled "Dividend Watch List" with a sheet named "Overview" that contains the same columns and data as the "Dividend Stocks" sheet in the Excel file.

@@ -3,6 +3,20 @@ import os
 import argparse, json, os, sys
 import openpyxl
 
+# --- verify_v2 smart primitives ---
+_EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
+_PACK_ROOT = os.path.abspath(os.path.join(_EVAL_DIR, "..", "..", "..", ".."))
+if _PACK_ROOT not in sys.path:
+    sys.path.insert(0, _PACK_ROOT)
+try:
+    from utils.verify_v2 import smart_column_exists
+    from utils.verify_v2.eval_helpers import get_sheet_rows_as_dicts, get_gt_column_values
+    _HAS_VERIFY_V2 = True
+except Exception:
+    _HAS_VERIFY_V2 = False
+
+TASK_NAME = "fetch-canvas-sf-training-excel-email"
+
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
@@ -48,49 +62,85 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         gt_path = os.path.join(groundtruth_workspace, "Sf_Training_Report.xlsx")
         gt_wb = openpyxl.load_workbook(gt_path) if os.path.exists(gt_path) else None
 
+        def check_columns(sheet_name, expected_cols, min_rows):
+            """Verify sheet exists, >= min_rows, contains required columns.
+            Uses LLM semantic mapping via verify_v2, falls back to strict
+            header match."""
+            check(f"{sheet_name} sheet exists", sheet_name in wb.sheetnames)
+            if sheet_name not in wb.sheetnames:
+                return
+            _ws = wb[sheet_name]
+            _data_rows = list(_ws.iter_rows(min_row=2, values_only=True))
+            check(f"{sheet_name} has >= {min_rows} rows",
+                  len(_data_rows) >= min_rows, f"got {len(_data_rows)}")
+            if _HAS_VERIFY_V2 and gt_wb is not None:
+                _raw_headers, _agent_rows = get_sheet_rows_as_dicts(wb, sheet_name)
+                for _exp in expected_cols:
+                    _gt_vals = get_gt_column_values(gt_wb, sheet_name, _exp)
+                    _ok, _matched, _reason = smart_column_exists(
+                        expected_col=_exp, agent_headers=_raw_headers,
+                        gt_samples=_gt_vals[:3], agent_rows=_agent_rows,
+                        task_name=TASK_NAME,
+                    )
+                    _detail = _reason
+                    if _ok and _matched and _matched.lower() != _exp.lower():
+                        _detail = f"LLM-mapped to {_matched!r}"
+                    check(f"{sheet_name} has {_exp} column", _ok, _detail)
+            else:
+                _headers = [str(c.value).strip().lower() if c.value else "" for c in _ws[1]]
+                for _exp in expected_cols:
+                    check(f"{sheet_name} has {_exp} column",
+                          _exp.lower() in _headers, f"headers: {_headers[:8]}")
+
         check("Data_Analysis sheet exists", "Data_Analysis" in wb.sheetnames)
         if "Data_Analysis" in wb.sheetnames:
             ws = wb["Data_Analysis"]
             data_rows = list(ws.iter_rows(min_row=2, values_only=True))
             check("Data_Analysis has >= 6 rows", len(data_rows) >= 6, f"got {len(data_rows)}")
 
-            # Check headers
-            headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-            for expected_col in ['Course', 'Code', 'Enrollment', 'Avg_Score', 'Pass_Rate']:
-                check(f"Data_Analysis has {expected_col} column",
-                      expected_col.lower() in headers, f"headers: {headers[:8]}")
+            check_columns('Data_Analysis', ['Course', 'Code', 'Enrollment', 'Avg_Score', 'Pass_Rate'], 6)
 
+            # Value-level: at least 3 of GT codes must appear in agent rows
+            if gt_wb is not None and "Data_Analysis" in gt_wb.sheetnames:
+                try:
+                    gt_ws = gt_wb["Data_Analysis"]
+                    gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
+                    gt_codes = {str(r[1]).strip().upper() for r in gt_rows if r and len(r) > 1 and r[1]}
+                    agent_codes = set()
+                    for r in data_rows:
+                        if r and len(r) > 1 and r[1]:
+                            agent_codes.add(str(r[1]).strip().upper())
+                    overlap = gt_codes & agent_codes
+                    check("Data_Analysis Code values match GT (>=3)",
+                          len(overlap) >= 3, f"overlap={overlap}, gt={gt_codes}")
+                except Exception as _e:
+                    check("Data_Analysis Code value-check", False, str(_e))
         check("Metrics sheet exists", "Metrics" in wb.sheetnames)
         if "Metrics" in wb.sheetnames:
             ws = wb["Metrics"]
             data_rows = list(ws.iter_rows(min_row=2, values_only=True))
             check("Metrics has >= 4 rows", len(data_rows) >= 4, f"got {len(data_rows)}")
 
-            # Check headers
-            headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-            for expected_col in ['Metric', 'Value']:
-                check(f"Metrics has {expected_col} column",
-                      expected_col.lower() in headers, f"headers: {headers[:8]}")
-
+            check_columns('Metrics', ['Metric', 'Value'], 4)
         check("Recommendations sheet exists", "Recommendations" in wb.sheetnames)
         if "Recommendations" in wb.sheetnames:
             ws = wb["Recommendations"]
             data_rows = list(ws.iter_rows(min_row=2, values_only=True))
             check("Recommendations has >= 2 rows", len(data_rows) >= 2, f"got {len(data_rows)}")
 
-            # Check headers
-            headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
-            for expected_col in ['Priority', 'Action', 'Course']:
-                check(f"Recommendations has {expected_col} column",
-                      expected_col.lower() in headers, f"headers: {headers[:8]}")
-
+            check_columns('Recommendations', ['Priority', 'Action', 'Course'], 2)
         try:
             conn = get_conn()
             cur = conn.cursor()
-            cur.execute("SELECT subject FROM email.messages WHERE subject ILIKE %s OR subject ILIKE %s",
-                        ('%report%', '%analysis%'))
+            # Tightened: require recipient team-lead@company.com
+            cur.execute(
+                """SELECT subject, to_addr FROM email.messages
+                   WHERE (to_addr::text ILIKE %s)
+                     AND subject ILIKE %s""",
+                ('%team-lead@company.com%', '%analysis report complete%'))
             emails = cur.fetchall()
-            check("Analysis email sent", len(emails) >= 1, f"found {len(emails)} matching emails")
+            check("Email subject 'Analysis Report Complete' to team-lead@company.com",
+                  len(emails) >= 1, f"found {len(emails)} matching emails")
             conn.close()
         except Exception as e:
             check("Email check", False, str(e))

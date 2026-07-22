@@ -1,0 +1,6 @@
+{
+  "students": [
+    {"student_id": 1001, "course_name": "Applied Analytics", "avg_score": 35, "assignments_submitted": 5, "late_submissions": 3},
+    {"student_id": 1002, "course_name": "Biochemistry", "avg_score": 42, "assignments_submitted": 4, "late_submissions": 2}
+  ]
+}

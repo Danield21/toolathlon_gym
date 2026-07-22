@@ -111,8 +111,12 @@ def check_word(agent_workspace):
             errors.append("Word doc missing expected title content")
         if "zero stock" not in full_text and "critical" not in full_text and "0 stock" not in full_text:
             errors.append("Word doc missing inventory status discussion")
-        if "15,940" not in full_text and "15940" not in full_text and "total" not in full_text:
-            errors.append("Word doc missing total procurement cost")
+        import re
+        # Look for total cost keyword + any dollar amount (e.g. $15,940, $12000.00, etc.)
+        has_total_keyword = "total" in full_text
+        has_dollar_amount = bool(re.search(r"\$?\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?\b|\$\d{4,}", full_text))
+        if not (has_total_keyword and has_dollar_amount):
+            errors.append("Word doc missing total procurement cost (no 'total' keyword + currency amount)")
     except Exception as e:
         errors.append(f"Error reading Word: {e}")
     return errors
@@ -124,9 +128,10 @@ def check_gcal():
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
         cur.execute("""
-            SELECT summary, start_datetime::date FROM gcal.events
+            SELECT summary, start_datetime AS s_dt, end_datetime, start_datetime::date AS s_date
+            FROM gcal.events
             WHERE start_datetime >= '2026-04-01' AND start_datetime < '2026-05-01'
-            ORDER BY start_datetime
+            ORDER BY s_dt
         """)
         rows = cur.fetchall()
         cur.close()
@@ -141,6 +146,10 @@ def check_gcal():
                 errors.append("No 'High Priority' supplier meeting found")
             if not any("medium" in s for s in summaries):
                 errors.append("No 'Medium Priority' supplier meeting found")
+            # Unique dates: meetings should be on distinct dates
+            unique_dates = set(r[3] for r in rows if r[3] is not None)
+            if len(unique_dates) < 3:
+                errors.append(f"Meetings on only {len(unique_dates)} distinct dates; expected 3 distinct dates")
     except Exception as e:
         errors.append(f"Error checking GCal: {e}")
     return errors

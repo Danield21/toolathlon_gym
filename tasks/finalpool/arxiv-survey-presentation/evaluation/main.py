@@ -79,6 +79,54 @@ def check_excel(workspace):
         dataset_col = find_col(pc_rows[0], ["Dataset", "dataset", "Dataset_Used"])
         record("Dataset column exists", dataset_col is not None, f"Header: {pc_rows[0]}")
 
+        # Content check: Method column should cover known NLP methods (stronger: 3+ distinct)
+        if method_col is not None:
+            methods_text = " ".join(str(r[method_col]).lower() for r in data if method_col < len(r) and r[method_col])
+            method_keywords = ["chain", "instruction", "retrieval", "self-consistency", "multimodal", "cot", "prompt"]
+            matches = sum(1 for kw in method_keywords if kw in methods_text)
+            record("Method column has >=3 NLP method keywords", matches >= 3, f"Matched {matches}, text: {methods_text[:200]}")
+
+        # NEW: Per-paper Method / Dataset specific checks
+        if method_col is not None and id_col is not None:
+            expected_method = {
+                "2404.00001": ["chain", "cot"],
+                "2404.00002": ["instruction"],
+                "2404.00003": ["retrieval"],
+                "2404.00004": ["self-consistency", "consistency"],
+                "2404.00005": ["multimodal", "visual"],
+            }
+            for row in data:
+                pid = str(row[id_col]).strip() if id_col < len(row) and row[id_col] else ""
+                if pid in expected_method:
+                    actual = str(row[method_col] or "").lower() if method_col < len(row) else ""
+                    ok = any(kw in actual for kw in expected_method[pid])
+                    record(f"Method for {pid} mentions {expected_method[pid][0]}", ok,
+                           f"Got '{actual[:80]}'")
+
+        # Content check: Dataset column should cover known datasets (stronger: 3+ distinct)
+        if dataset_col is not None:
+            ds_text = " ".join(str(r[dataset_col]).lower() for r in data if dataset_col < len(r) and r[dataset_col])
+            ds_keywords = ["gsm8k", "mmlu", "hotpotqa", "coco", "imagenet", "flan", "truthfulqa", "squad", "big-bench", "wmt", "natural questions", "vqa"]
+            ds_matches = sum(1 for kw in ds_keywords if kw in ds_text)
+            record("Dataset column has >=3 known datasets", ds_matches >= 3, f"Matched {ds_matches}, text: {ds_text[:200]}")
+
+        # NEW: Per-paper Dataset check
+        if dataset_col is not None and id_col is not None:
+            expected_dataset = {
+                "2404.00001": ["gsm8k"],
+                "2404.00002": ["mmlu"],
+                "2404.00003": ["natural questions", "hotpotqa"],
+                "2404.00004": ["gsm8k"],
+                "2404.00005": ["vqa"],
+            }
+            for row in data:
+                pid = str(row[id_col]).strip() if id_col < len(row) and row[id_col] else ""
+                if pid in expected_dataset:
+                    actual = str(row[dataset_col] or "").lower() if dataset_col < len(row) else ""
+                    ok = any(kw in actual for kw in expected_dataset[pid])
+                    record(f"Dataset for {pid} mentions {expected_dataset[pid][0]}", ok,
+                           f"Got '{actual[:80]}'")
+
     # Taxonomy
     tax_rows = load_sheet_rows(wb, "Taxonomy")
     if tax_rows is None:
@@ -87,6 +135,14 @@ def check_excel(workspace):
         record("Sheet 'Taxonomy' exists", True)
         data = tax_rows[1:]
         record("Taxonomy has >= 2 categories", len(data) >= 2, f"Found {len(data)}")
+        # Check that Category column exists
+        cat_col = find_col(tax_rows[0], ["Category", "category", "Topic"])
+        record("Taxonomy has Category column", cat_col is not None, f"Header: {tax_rows[0]}")
+        if cat_col is not None:
+            cats_text = " ".join(str(r[cat_col]).lower() for r in data if cat_col < len(r) and r[cat_col])
+            record("Taxonomy references NLP topic keywords",
+                   any(kw in cats_text for kw in ["reasoning", "prompt", "tuning", "retrieval", "multimodal", "generation", "training", "architecture", "framework"]),
+                   f"Got: {cats_text[:200]}")
 
     # Summary Statistics
     ss_rows = load_sheet_rows(wb, "Summary Statistics") or load_sheet_rows(wb, "Summary_Statistics")
@@ -105,6 +161,32 @@ def check_excel(workspace):
                 record("Total_Papers = 5", abs(float(metrics[tp_key]) - 5) < 1, f"Got {metrics[tp_key]}")
             except (TypeError, ValueError):
                 record("Total_Papers is numeric", False, f"Got {metrics[tp_key]}")
+
+        # Average_Sections check — tighter: must equal 4.0 within ±0.2
+        avg_sec_key = next((k for k in metrics if "average" in k and "section" in k), None)
+        if avg_sec_key is None:
+            avg_sec_key = next((k for k in metrics if "avg" in k and "section" in k), None)
+        if avg_sec_key:
+            try:
+                ok = abs(float(metrics[avg_sec_key]) - 4.0) <= 0.2
+                record("Average_Sections == 4.0 (±0.2)", ok, f"Got {metrics[avg_sec_key]}")
+            except (TypeError, ValueError):
+                record("Average_Sections is numeric", False, f"Got {metrics[avg_sec_key]}")
+        else:
+            record("Average_Sections metric exists", False, f"Keys: {list(metrics.keys())}")
+
+        # Year_Range check — tighter: must mention 2024
+        yr_key = next((k for k in metrics if "year" in k and "range" in k), None)
+        if yr_key:
+            yr_val = str(metrics[yr_key]).strip() if metrics[yr_key] else ""
+            ok = "2024" in yr_val
+            record("Year_Range contains 2024", ok, f"Got '{yr_val}'")
+
+        # Most_Common_Category check
+        mc_key = next((k for k in metrics if "common" in k or "most" in k), None)
+        if mc_key:
+            mc_val = str(metrics[mc_key]).strip() if metrics[mc_key] else ""
+            record("Most_Common_Category non-empty", len(mc_val) > 0, f"Got {mc_val}")
 
     return True
 
@@ -141,8 +223,12 @@ def check_pptx(workspace):
         record("Title slide has survey keywords", has_title, f"First slide: {first[:200]}")
 
         # Content checks
-        has_papers = any(kw in full for kw in ["chain-of-thought", "instruction tuning", "retrieval", "self-consistency", "multimodal"])
+        paper_methods = ["chain-of-thought", "instruction tuning", "retrieval", "self-consistency", "multimodal"]
+        has_papers = any(kw in full for kw in paper_methods)
         record("Mentions paper methods", has_papers)
+        # Stronger: require at least 3 distinct methods
+        matched = sum(1 for kw in paper_methods if kw in full)
+        record("PPT mentions >=3 distinct paper methods", matched >= 3, f"Matched {matched} methods")
 
         # Summary/conclusion slide
         last = all_text[-1] if all_text else ""

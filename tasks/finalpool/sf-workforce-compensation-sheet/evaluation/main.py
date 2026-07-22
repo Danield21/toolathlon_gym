@@ -77,29 +77,29 @@ def main():
                 all_errors.append(f"Missing department: {g_row[0]}")
                 continue
 
-            # Headcount (col 1)
+            # Headcount (col 1) - exact integer
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 5):
+                if not num_close(a_row[1], g_row[1], 0):
                     all_errors.append(f"{key}.Headcount: {a_row[1]} vs {g_row[1]}")
 
-            # Avg_Salary (col 2)
+            # Avg_Salary (col 2) - 2 decimal precision
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 100.0):
+                if not num_close(a_row[2], g_row[2], 1.0):
                     all_errors.append(f"{key}.Avg_Salary: {a_row[2]} vs {g_row[2]}")
 
-            # Min_Salary (col 3)
+            # Min_Salary (col 3) - tight since rounded to 2 decimals
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 500.0):
+                if not num_close(a_row[3], g_row[3], 1.0):
                     all_errors.append(f"{key}.Min_Salary: {a_row[3]} vs {g_row[3]}")
 
-            # Max_Salary (col 4)
+            # Max_Salary (col 4) - tight since rounded to 2 decimals
             if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 5000.0):
+                if not num_close(a_row[4], g_row[4], 1.0):
                     all_errors.append(f"{key}.Max_Salary: {a_row[4]} vs {g_row[4]}")
 
-            # Total_Payroll (col 5)
+            # Total_Payroll (col 5) - large value, allow small rounding tolerance
             if len(a_row) > 5 and len(g_row) > 5:
-                if not num_close(a_row[5], g_row[5], 100000.0):
+                if not num_close(a_row[5], g_row[5], 1.0):
                     all_errors.append(f"{key}.Total_Payroll: {a_row[5]} vs {g_row[5]}")
 
         if not [e for e in all_errors if "Department" in e or "Missing" in e]:
@@ -136,8 +136,16 @@ def main():
 
             try:
                 float(a_val); float(g_val)
-                if not num_close(a_val, g_val, 100000.0):
-                    all_errors.append(f"Summary.{key}: {a_val} vs {g_val}")
+                # Tight tolerance: 1 for counts/integers, 1.0 for rounded money
+                key_lower = str(key).lower()
+                if "employee" in key_lower or "count" in key_lower:
+                    # exact integer
+                    if not num_close(a_val, g_val, 0):
+                        all_errors.append(f"Summary.{key}: {a_val} vs {g_val}")
+                else:
+                    # Money metric - tight
+                    if not num_close(a_val, g_val, 1.0):
+                        all_errors.append(f"Summary.{key}: {a_val} vs {g_val}")
             except (TypeError, ValueError):
                 if not str_match(a_val, g_val):
                     all_errors.append(f"Summary.{key}: {a_val} vs {g_val}")
@@ -145,8 +153,11 @@ def main():
         if not [e for e in all_errors if "Summary" in e]:
             print("    PASS")
 
-    # --- Check Google Sheet ---
+    local_errors = list(all_errors)  # Excel errors only so far
+
+    # --- Check Google Sheet (runtime dependency) ---
     print("  Checking Google Sheet...")
+    runtime_errors = []
     try:
         import psycopg2
         conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
@@ -155,19 +166,34 @@ def main():
         cur.execute("SELECT id, title FROM gsheet.spreadsheets WHERE LOWER(title) LIKE '%compensation%' OR LOWER(title) LIKE '%workforce%'")
         sheets = cur.fetchall()
         if not sheets:
-            all_errors.append("No Google Sheet with 'Compensation' or 'Workforce' in title found")
+            runtime_errors.append("No Google Sheet with 'Compensation' or 'Workforce' in title found")
         else:
             sid = sheets[0][0]
-            cur.execute("SELECT COUNT(*) FROM gsheet.cells WHERE spreadsheet_id = %s", (sid,))
-            cell_count = cur.fetchone()[0]
-            if cell_count < 20:
-                all_errors.append(f"Google Sheet has too few cells: {cell_count}")
+            # Get sheet title
+            cur.execute("SELECT id, title FROM gsheet.sheets WHERE spreadsheet_id=%s ORDER BY index LIMIT 1", (sid,))
+            sheet_row = cur.fetchone()
+            if sheet_row:
+                cur.execute("SELECT COUNT(*) FROM gsheet.cells WHERE spreadsheet_id=%s AND sheet_id=%s", (sid, sheet_row[0]))
+                cell_count = cur.fetchone()[0]
+                # Need at least 7 depts * 6 cols + header = 48 cells
+                if cell_count < 40:
+                    runtime_errors.append(f"Google Sheet has too few cells: {cell_count} (expected ~48)")
+                else:
+                    # Check Engineering headcount 7096 appears
+                    cur.execute("SELECT value FROM gsheet.cells WHERE spreadsheet_id=%s AND sheet_id=%s", (sid, sheet_row[0]))
+                    all_cells = [str(r[0]) for r in cur.fetchall() if r[0] is not None]
+                    if "7096" not in all_cells:
+                        runtime_errors.append("Google Sheet missing Engineering headcount 7096")
+                    else:
+                        print("    PASS")
             else:
-                print("    PASS")
+                runtime_errors.append("Google Sheet has no sheets")
         cur.close()
         conn.close()
     except Exception as e:
-        all_errors.append(f"Google Sheet check error: {e}")
+        runtime_errors.append(f"Google Sheet check error: {e}")
+
+    all_errors.extend(runtime_errors)
 
     # --- Final result ---
     if all_errors:

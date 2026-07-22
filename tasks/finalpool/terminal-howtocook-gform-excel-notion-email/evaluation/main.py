@@ -22,19 +22,25 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+LOCAL_FAIL_COUNT = 0
+CURRENT_CATEGORY = "runtime"
 
 
 def check(name, condition, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+    global PASS_COUNT, FAIL_COUNT, LOCAL_FAIL_COUNT
     if condition:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if CURRENT_CATEGORY == "local":
+            LOCAL_FAIL_COUNT += 1
         print(f"  [FAIL] {name}: {str(detail)[:200]}")
 
 
 def check_excel(workspace):
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "local"
     print("\n=== Check 1: Meal_Program_Plan.xlsx ===")
     path = os.path.join(workspace, "Meal_Program_Plan.xlsx")
     if not os.path.exists(path):
@@ -74,11 +80,25 @@ def check_excel(workspace):
 
     # Weekly_Menu
     wm_idx = next((i for i, s in enumerate(sheets_lower) if "weekly" in s or "menu" in s), 2)
+    recipe_to_cat = {}
+    recipe_to_diff = {}
+    if rs_idx < len(sheets):
+        ws2 = wb[sheets[rs_idx]]
+        rows2 = list(ws2.iter_rows(values_only=True))
+        if rows2:
+            for r in rows2[1:]:
+                if r and r[0]:
+                    try:
+                        recipe_to_cat[str(r[0]).strip().lower()] = str(r[1]).strip().lower() if r[1] else ""
+                        recipe_to_diff[str(r[0]).strip().lower()] = int(r[2]) if r[2] else None
+                    except Exception:
+                        pass
+
     if wm_idx < len(sheets):
         ws3 = wb[sheets[wm_idx]]
         rows3 = list(ws3.iter_rows(values_only=True))
         data3 = [r for r in rows3[1:] if any(c for c in r)]
-        check("Weekly_Menu has 5 days", len(data3) >= 5, f"Found {len(data3)}")
+        check("Weekly_Menu has exactly 5 days", len(data3) == 5, f"Found {len(data3)}")
         all_text3 = " ".join(str(c) for r in rows3 for c in r if c).lower()
         check("Menu includes Monday", "monday" in all_text3)
         check("Menu includes Friday", "friday" in all_text3)
@@ -86,9 +106,44 @@ def check_excel(workspace):
         if rows3:
             headers3 = [str(c).lower() if c else "" for c in rows3[0]]
             cost_idx = next((i for i, h in enumerate(headers3) if "cost" in h), -1)
+            recipe_idx = next((i for i, h in enumerate(headers3) if "recipe" in h or "lunch" in h), 1)
             if cost_idx >= 0 and data3:
                 costs = [r[cost_idx] for r in data3 if r[cost_idx] is not None]
-                check("Cost values present", len(costs) >= 3, f"Found {len(costs)} costs")
+                check("Cost values present for all 5 days", len(costs) == 5, f"Found {len(costs)} costs")
+                # Validate cost formula: 8 meat/seafood, 5 veg, 6 staple, 4 soup
+                cost_map = {"meat": 8, "seafood": 8, "vegetable": 5, "staple": 6, "soup": 4}
+                cost_errs = 0
+                cat_sequence = []
+                diff_errs = 0
+                for r in data3:
+                    rname = str(r[recipe_idx]).strip().lower() if r[recipe_idx] else ""
+                    cat = recipe_to_cat.get(rname, "")
+                    cat_sequence.append(cat)
+                    expected_cost = None
+                    for k, v in cost_map.items():
+                        if k in cat:
+                            expected_cost = v
+                            break
+                    if expected_cost is not None:
+                        try:
+                            if abs(float(r[cost_idx]) - expected_cost) > 0.01:
+                                cost_errs += 1
+                        except Exception:
+                            cost_errs += 1
+                    diff_val = recipe_to_diff.get(rname)
+                    if diff_val is not None and diff_val > 4:
+                        diff_errs += 1
+                check("All 5 recipe costs follow 8/5/6/4 formula", cost_errs == 0,
+                      f"{cost_errs} cost mismatches")
+                check("All menu recipes have difficulty <= 4", diff_errs == 0,
+                      f"{diff_errs} recipes exceed difficulty 4")
+                # No two consecutive same-category
+                consec_err = 0
+                for i in range(1, len(cat_sequence)):
+                    if cat_sequence[i] and cat_sequence[i] == cat_sequence[i-1]:
+                        consec_err += 1
+                check("No two consecutive same-category days", consec_err == 0,
+                      f"{consec_err} consecutive same-category pairs")
 
     # Program_Summary
     ps_idx = next((i for i, s in enumerate(sheets_lower) if "program" in s or "summary" in s), 3)
@@ -102,6 +157,8 @@ def check_excel(workspace):
 
 
 def check_gform():
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "runtime"
     print("\n=== Check 2: Google Form Survey ===")
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
@@ -134,6 +191,8 @@ def check_gform():
 
 
 def check_notion():
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "runtime"
     print("\n=== Check 3: Notion Recipe Knowledge Base ===")
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
@@ -177,6 +236,8 @@ def check_notion():
 
 
 def check_email():
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "runtime"
     print("\n=== Check 4: Email to All Staff ===")
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
@@ -212,9 +273,17 @@ def check_email():
 
 
 def check_script(workspace):
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "runtime"
     print("\n=== Check 5: menu_planner.py ===")
     path = os.path.join(workspace, "menu_planner.py")
     check("menu_planner.py exists", os.path.exists(path))
+
+
+def check_reverse_validation_wrapper(workspace):
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "local"
+    check_reverse_validation(workspace)
 
 
 def check_reverse_validation(workspace):
@@ -265,7 +334,7 @@ def main():
     check_notion()
     check_email()
     check_script(args.agent_workspace)
-    check_reverse_validation(args.agent_workspace)
+    check_reverse_validation_wrapper(args.agent_workspace)
 
     total = PASS_COUNT + FAIL_COUNT
     if total == 0:
@@ -280,7 +349,9 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    # Require no local-file failures; runtime (gform/notion/email/script) may fail in GT-only mode
+    print(f"Local FAIL_COUNT: {LOCAL_FAIL_COUNT}, Total FAIL_COUNT: {FAIL_COUNT}")
+    if LOCAL_FAIL_COUNT == 0 and accuracy >= 70:
         print("PASS")
         sys.exit(0)
     else:

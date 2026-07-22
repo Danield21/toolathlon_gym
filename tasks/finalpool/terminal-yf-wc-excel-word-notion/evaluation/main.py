@@ -1,13 +1,14 @@
 """Evaluation for terminal-yf-wc-excel-word-notion.
 Checks:
-1. Commodity_Impact_Analysis.xlsx with 4 sheets
-2. Pricing_Strategy_Memo.docx
+1. Commodity_Impact_Analysis.xlsx with 4 sheets and correct numeric values
+2. Pricing_Strategy_Memo.docx with required sections
 3. Notion "Market Research Dashboard" database with 2 entries
 4. correlation_analysis.py script exists
 """
 import argparse
 import json
 import os
+import re
 import sys
 
 import openpyxl
@@ -34,65 +35,205 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}: {str(detail)[:200]}")
 
 
+def num_close(a, b, tol):
+    try:
+        return abs(float(a) - float(b)) <= tol
+    except (TypeError, ValueError):
+        return False
+
+
+def _fetch_yf_expected():
+    """Fetch expected YF stock stats from DB."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        out = {}
+        for sym in ("GC=F", "AMZN"):
+            cur.execute("""
+                SELECT AVG(close)::float, STDDEV(close)::float,
+                       (SELECT close::float FROM yf.stock_prices WHERE symbol=%s ORDER BY date ASC LIMIT 1),
+                       (SELECT close::float FROM yf.stock_prices WHERE symbol=%s ORDER BY date DESC LIMIT 1)
+                FROM yf.stock_prices WHERE symbol=%s
+            """, (sym, sym, sym))
+            avg, stddev, first, last = cur.fetchone()
+            pct = (last - first) / first * 100 if first else 0
+            out[sym] = {"avg_price": avg, "volatility": stddev, "pct_change": pct}
+        cur.close()
+        conn.close()
+        return out
+    except Exception as e:
+        print(f"[fallback] YF DB fetch error: {e}")
+        return None
+
+
+YF_FALLBACK = {
+    "GC=F": {"avg_price": 3163.01, "volatility": 796.12, "pct_change": 138.73},
+    "AMZN": {"avg_price": 206.45, "volatility": 21.87, "pct_change": 26.18},
+}
+
+
 def check_excel(workspace):
     print("\n=== Check 1: Commodity_Impact_Analysis.xlsx ===")
     path = os.path.join(workspace, "Commodity_Impact_Analysis.xlsx")
     if not os.path.exists(path):
         check("Excel file exists", False, f"Not found at {path}")
+        # Subordinate failures
+        for label in ["Stock_Trends sheet present", "Product_Margins sheet present",
+                      "Correlation_Analysis sheet present", "Strategic_Recommendations sheet present",
+                      "Stock_Trends has GC=F row with correct stats",
+                      "Stock_Trends has AMZN row with correct stats",
+                      "Product_Margins has >=5 categories",
+                      "Correlation_Analysis has 2 entries",
+                      "Strategic_Recommendations has rows for each category"]:
+            check(label, False, "Excel missing")
         return
     check("Excel file exists", True)
 
-    wb = openpyxl.load_workbook(path, data_only=True)
-    sheets = wb.sheetnames
-    check("Has at least 4 sheets", len(sheets) >= 4, f"Found {len(sheets)}: {sheets}")
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True)
+    except Exception as e:
+        check("Excel readable", False, str(e))
+        return
 
-    sheets_lower = [s.lower().replace(" ", "_") for s in sheets]
+    sheets = wb.sheetnames
+
+    def _norm(s): return re.sub(r'[^a-z0-9]', '', s.lower())
+
+    sheets_norm = {_norm(s): s for s in sheets}
+    st_name = next((sheets_norm[k] for k in sheets_norm if "stocktrends" in k), None)
+    pm_name = next((sheets_norm[k] for k in sheets_norm if "productmargins" in k), None)
+    ca_name = next((sheets_norm[k] for k in sheets_norm if "correlationanalysis" in k), None)
+    sr_name = next((sheets_norm[k] for k in sheets_norm if "strategicrecommendations" in k), None)
+
+    check("Stock_Trends sheet present", st_name is not None, f"Sheets: {sheets}")
+    check("Product_Margins sheet present", pm_name is not None, f"Sheets: {sheets}")
+    check("Correlation_Analysis sheet present", ca_name is not None, f"Sheets: {sheets}")
+    check("Strategic_Recommendations sheet present", sr_name is not None, f"Sheets: {sheets}")
+
+    yf_expected = _fetch_yf_expected() or YF_FALLBACK
 
     # Stock_Trends
-    st_idx = next((i for i, s in enumerate(sheets_lower) if "stock" in s or "trend" in s), 0)
-    ws1 = wb[sheets[st_idx]]
-    rows1 = list(ws1.iter_rows(values_only=True))
-    data1 = [r for r in rows1[1:] if any(c for c in r)]
-    check("Stock_Trends has 2 rows", len(data1) >= 2, f"Found {len(data1)}")
-    all_text1 = " ".join(str(c) for r in rows1 for c in r if c).lower()
-    check("Contains GC=F", "gc=f" in all_text1 or "gold" in all_text1, f"Text: {all_text1[:100]}")
-    check("Contains AMZN", "amzn" in all_text1 or "amazon" in all_text1, f"Text: {all_text1[:100]}")
+    if st_name:
+        ws = wb[st_name]
+        rows = list(ws.iter_rows(values_only=True))
+        if rows:
+            headers = [str(c).lower().strip() if c is not None else "" for c in rows[0]]
+            data = [r for r in rows[1:] if any(c is not None and str(c).strip() != "" for c in r)]
 
-    if rows1:
-        headers = [str(c).lower() if c else "" for c in rows1[0]]
-        check("Has volatility column", any("volatil" in h for h in headers) or any("std" in h for h in headers),
-              f"Headers: {rows1[0]}")
+            def _get_col(names):
+                for nm in names:
+                    nm_l = nm.lower()
+                    for i, h in enumerate(headers):
+                        if h == nm_l or nm_l in h:
+                            return i
+                return None
+
+            sym_idx = _get_col(["symbol"])
+            avg_idx = _get_col(["avg_price", "avg price", "avg"])
+            pct_idx = _get_col(["price_change", "change_pct", "pct"])
+            vol_idx = _get_col(["volatility", "stddev", "std"])
+
+            for ticker, label in [("GC=F", "GC=F"), ("AMZN", "AMZN")]:
+                expected = yf_expected.get(ticker, {})
+                row = next((r for r in data
+                            if sym_idx is not None and r[sym_idx]
+                            and ticker.lower() in str(r[sym_idx]).lower()), None)
+                if not row:
+                    check(f"Stock_Trends has {label} row with correct stats",
+                          False, f"No row for {label}")
+                    continue
+                ok_avg = avg_idx is not None and num_close(row[avg_idx], expected.get("avg_price"), max(1.0, abs(expected.get("avg_price", 0)) * 0.02))
+                ok_vol = vol_idx is not None and num_close(row[vol_idx], expected.get("volatility"), max(1.0, abs(expected.get("volatility", 0)) * 0.05))
+                ok_pct = pct_idx is not None and num_close(row[pct_idx], expected.get("pct_change"), 5.0)
+                check(f"Stock_Trends has {label} row with correct stats",
+                      ok_avg and ok_vol and ok_pct,
+                      f"row={row}, expected={expected}, ok_avg={ok_avg}, ok_vol={ok_vol}, ok_pct={ok_pct}")
+        else:
+            check("Stock_Trends has GC=F row with correct stats", False, "Empty sheet")
+            check("Stock_Trends has AMZN row with correct stats", False, "Empty sheet")
+    else:
+        check("Stock_Trends has GC=F row with correct stats", False, "Sheet missing")
+        check("Stock_Trends has AMZN row with correct stats", False, "Sheet missing")
 
     # Product_Margins
-    pm_idx = next((i for i, s in enumerate(sheets_lower) if "product" in s or "margin" in s), 1)
-    if pm_idx < len(sheets):
-        ws2 = wb[sheets[pm_idx]]
-        rows2 = list(ws2.iter_rows(values_only=True))
-        data2 = [r for r in rows2[1:] if any(c for c in r)]
-        check("Product_Margins has category rows", len(data2) >= 3, f"Found {len(data2)}")
-        all_text2 = " ".join(str(c) for r in rows2 for c in r if c).lower()
-        check("Has Electronics category", "electronics" in all_text2)
+    if pm_name:
+        ws = wb[pm_name]
+        rows = list(ws.iter_rows(values_only=True))
+        data = [r for r in rows[1:] if any(c is not None and str(c).strip() != "" for c in r)]
+        check("Product_Margins has >=5 categories", len(data) >= 5,
+              f"Found {len(data)} category rows")
+
+        # Check that key categories are present
+        cats_lower = " ".join(str(r[0]).lower() for r in data if r and r[0])
+        check("Product_Margins includes Audio + Cameras + Electronics",
+              "audio" in cats_lower and "camera" in cats_lower and "electronics" in cats_lower,
+              f"Categories: {[r[0] for r in data if r]}")
+
+        # All margin_pct must be 40 (since cost is 60% of price)
+        # Find margin column
+        if rows:
+            headers = [str(c).lower().strip() if c is not None else "" for c in rows[0]]
+            margin_idx = next((i for i, h in enumerate(headers) if "margin" in h), None)
+            if margin_idx is not None:
+                bad = [r for r in data if not num_close(r[margin_idx], 40, 0.5)]
+                check("All Product_Margins rows have margin_pct == 40",
+                      len(bad) == 0,
+                      f"Bad rows: {[(r[0], r[margin_idx]) for r in bad[:3]]}")
+    else:
+        check("Product_Margins has >=5 categories", False, "Sheet missing")
+        check("Product_Margins includes Audio + Cameras + Electronics", False, "Sheet missing")
 
     # Correlation_Analysis
-    ca_idx = next((i for i, s in enumerate(sheets_lower) if "correlation" in s), 2)
-    if ca_idx < len(sheets):
-        ws3 = wb[sheets[ca_idx]]
-        rows3 = list(ws3.iter_rows(values_only=True))
-        data3 = [r for r in rows3[1:] if any(c for c in r)]
-        check("Correlation_Analysis has entries", len(data3) >= 2, f"Found {len(data3)}")
-        all_text3 = " ".join(str(c) for r in rows3 for c in r if c).lower()
-        check("Mentions gold in correlation", "gold" in all_text3, f"Text: {all_text3[:100]}")
+    if ca_name:
+        ws = wb[ca_name]
+        rows = list(ws.iter_rows(values_only=True))
+        data = [r for r in rows[1:] if any(c is not None and str(c).strip() != "" for c in r)]
+        check("Correlation_Analysis has 2 entries", len(data) >= 2,
+              f"Found {len(data)} rows")
+        # Per-row keyword requirements: at least one row mentions gold (GC=F),
+        # at least one row mentions amzn/amazon, and consumer should appear somewhere.
+        all_text = " ".join(str(c) for r in rows for c in r if c is not None).lower()
+        per_row_text = [" ".join(str(c) for c in r if c is not None).lower() for r in data]
+        has_gold_row = any(("gold" in t) or ("gc=f" in t) for t in per_row_text)
+        has_stock_row = any(("amzn" in t) or ("amazon" in t) for t in per_row_text)
+        check("Correlation_Analysis: at least one row references gold/GC=F",
+              has_gold_row,
+              f"Rows: {per_row_text[:3]}")
+        check("Correlation_Analysis: at least one row references AMZN/Amazon",
+              has_stock_row,
+              f"Rows: {per_row_text[:3]}")
+        check("Correlation_Analysis mentions consumer somewhere",
+              "consumer" in all_text,
+              f"Text: {all_text[:200]}")
+    else:
+        check("Correlation_Analysis has 2 entries", False, "Sheet missing")
+        check("Correlation_Analysis: at least one row references gold/GC=F", False, "Sheet missing")
+        check("Correlation_Analysis: at least one row references AMZN/Amazon", False, "Sheet missing")
+        check("Correlation_Analysis mentions consumer somewhere", False, "Sheet missing")
 
     # Strategic_Recommendations
-    sr_idx = next((i for i, s in enumerate(sheets_lower) if "strategic" in s or "recommend" in s), 3)
-    if sr_idx < len(sheets):
-        ws4 = wb[sheets[sr_idx]]
-        rows4 = list(ws4.iter_rows(values_only=True))
-        data4 = [r for r in rows4[1:] if any(c for c in r)]
-        check("Strategic_Recommendations has entries", len(data4) >= 3, f"Found {len(data4)}")
-        all_text4 = " ".join(str(c) for r in rows4 for c in r if c).lower()
-        check("Has margin targets", "35" in all_text4 or "40" in all_text4,
-              f"Text: {all_text4[:100]}")
+    if sr_name:
+        ws = wb[sr_name]
+        rows = list(ws.iter_rows(values_only=True))
+        data = [r for r in rows[1:] if any(c is not None and str(c).strip() != "" for c in r)]
+        check("Strategic_Recommendations has rows for each category",
+              len(data) >= 5,
+              f"Found {len(data)}")
+        if rows:
+            headers = [str(c).lower().strip() if c is not None else "" for c in rows[0]]
+            cur_idx = next((i for i, h in enumerate(headers) if "current" in h and "margin" in h), None)
+            tar_idx = next((i for i, h in enumerate(headers) if "target" in h and "margin" in h), None)
+            if cur_idx is not None and tar_idx is not None:
+                # All current_margin should be 40
+                cur_bad = [r for r in data if not num_close(r[cur_idx], 40, 0.5)]
+                check("All current_margin == 40", len(cur_bad) == 0, f"Bad: {[(r[0], r[cur_idx]) for r in cur_bad[:3]]}")
+                # Gold rose 138% > 50%, so target should be 35
+                tar_bad = [r for r in data if not num_close(r[tar_idx], 35, 0.5)]
+                check("Target margin == 35 (gold rose > 50%)",
+                      len(tar_bad) == 0,
+                      f"Bad: {[(r[0], r[tar_idx]) for r in tar_bad[:3]]}")
+    else:
+        check("Strategic_Recommendations has rows for each category", False, "Sheet missing")
 
 
 def check_word(workspace):
@@ -100,58 +241,104 @@ def check_word(workspace):
     path = os.path.join(workspace, "Pricing_Strategy_Memo.docx")
     if not os.path.exists(path):
         check("Word document exists", False, f"Not found at {path}")
+        for label in ["Word: title section", "Word: market overview section",
+                      "Word: product margin section", "Word: strategic recommendations section",
+                      "Word: contains gold pct number", "Word: substantial content"]:
+            check(label, False, "Word missing")
         return
     check("Word document exists", True)
 
-    doc = Document(path)
-    full_text = " ".join(p.text for p in doc.paragraphs).lower()
-    check("Mentions gold or commodity", "gold" in full_text or "commodity" in full_text)
-    check("Mentions AMZN or Amazon", "amzn" in full_text or "amazon" in full_text)
-    check("Mentions margin", "margin" in full_text)
-    check("Has substantial content", len(full_text) > 200, f"Length: {len(full_text)}")
+    try:
+        doc = Document(path)
+    except Exception as e:
+        check("Word readable", False, str(e))
+        return
+
+    full_text = " ".join(p.text for p in doc.paragraphs)
+    full_lower = full_text.lower()
+
+    # Title check: require literal phrase 'Commodity Impact and Pricing Strategy'
+    # Look in headings/title styles first, fallback to first paragraph
+    headings = [p.text.strip() for p in doc.paragraphs
+                if p.style and (p.style.name.startswith("Heading") or p.style.name == "Title")]
+    headings_lower = [h.lower() for h in headings]
+    first_para = (doc.paragraphs[0].text.strip().lower() if doc.paragraphs else "")
+    expected_title = "commodity impact and pricing strategy"
+    title_match = (
+        any(expected_title in h for h in headings_lower)
+        or expected_title in first_para
+    )
+    check("Word: title 'Commodity Impact and Pricing Strategy' present (heading or first paragraph)",
+          title_match,
+          f"Headings: {headings[:5]}; first para: {first_para[:120]}")
+    check("Word: market overview section",
+          "market overview" in full_lower or "market trends" in full_lower,
+          "")
+    check("Word: product margin section",
+          "margin" in full_lower and ("category" in full_lower or "categories" in full_lower),
+          "")
+    check("Word: strategic recommendations section",
+          "recommendation" in full_lower or "strategic" in full_lower,
+          "")
+    # Specific numbers expected
+    check("Word: contains gold pct number (~138%)",
+          re.search(r'\b13[0-9]\.?\d*%?', full_text) is not None or "138" in full_text,
+          f"Text snippet: {full_text[:300]}")
+    check("Word: substantial content", len(full_text) > 400, f"Length: {len(full_text)}")
 
 
 def check_notion():
     print("\n=== Check 3: Notion Market Research Dashboard ===")
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
     try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
         cur.execute("SELECT id, title FROM notion.databases")
         dbs = cur.fetchall()
-        dashboard_db = None
-        for db_id, title in dbs:
-            title_str = ""
-            if isinstance(title, list):
-                title_str = " ".join(item.get("text", {}).get("content", "") for item in title if isinstance(item, dict))
-            elif isinstance(title, str):
-                try:
-                    parsed = json.loads(title)
-                    if isinstance(parsed, list):
-                        title_str = " ".join(item.get("text", {}).get("content", "") for item in parsed if isinstance(item, dict))
-                    else:
-                        title_str = str(title)
-                except Exception:
-                    title_str = str(title)
-            else:
-                title_str = str(title) if title else ""
-            if "market" in title_str.lower() and ("research" in title_str.lower() or "dashboard" in title_str.lower()):
-                dashboard_db = (db_id, title_str)
-                break
-        check("Market Research Dashboard exists", dashboard_db is not None,
-              f"Databases: {[d[1] for d in dbs]}")
+    except Exception as e:
+        check("Notion DB query OK", False, str(e))
+        return
 
-        if dashboard_db:
+    dashboard_db = None
+    for db_id, title in dbs:
+        title_str = ""
+        if isinstance(title, list):
+            title_str = " ".join(item.get("text", {}).get("content", "") for item in title if isinstance(item, dict))
+        elif isinstance(title, str):
+            try:
+                parsed = json.loads(title)
+                if isinstance(parsed, list):
+                    title_str = " ".join(item.get("text", {}).get("content", "") for item in parsed if isinstance(item, dict))
+                else:
+                    title_str = str(title)
+            except Exception:
+                title_str = str(title)
+        else:
+            title_str = str(title) if title else ""
+        # Stricter: must contain both "market research" and "dashboard"
+        tl = title_str.lower().strip()
+        if "market research dashboard" in tl:
+            dashboard_db = (db_id, title_str)
+            break
+    check("'Market Research Dashboard' database exists",
+          dashboard_db is not None,
+          f"Databases: {[d[1] for d in dbs[:5]]}")
+
+    if dashboard_db:
+        try:
             cur.execute("""
                 SELECT COUNT(*) FROM notion.pages
                 WHERE parent->>'database_id' = %s
             """, (dashboard_db[0],))
             count = cur.fetchone()[0]
-            check("Dashboard has 2 entries", count >= 2, f"Found {count}")
-    except Exception as e:
-        check("Notion check", False, str(e))
-    finally:
+            check("Dashboard has exactly 2 entries", count == 2, f"Found {count}")
+        except Exception as e:
+            check("Dashboard entry count check", False, str(e))
+
+    try:
         cur.close()
         conn.close()
+    except Exception:
+        pass
 
 
 def check_script(workspace):
@@ -165,15 +352,17 @@ def check_reverse_validation(workspace):
     print("\n=== Reverse Validation ===")
     path = os.path.join(workspace, "Commodity_Impact_Analysis.xlsx")
     if os.path.exists(path):
-        wb = openpyxl.load_workbook(path, data_only=True)
-        # No unexpected sheets
-        expected_keywords = {"stock", "trend", "product", "margin", "correlation", "strategic", "recommend"}
-        unexpected = [s for s in wb.sheetnames
-                      if not any(kw in s.lower() for kw in expected_keywords)]
-        check("No unexpected sheets in Excel", len(unexpected) == 0,
-              f"Unexpected: {unexpected}")
+        try:
+            wb = openpyxl.load_workbook(path, data_only=True)
+            expected_keywords = {"stock", "trend", "product", "margin", "correlation",
+                                 "strategic", "recommend"}
+            unexpected = [s for s in wb.sheetnames
+                          if not any(kw in s.lower() for kw in expected_keywords)]
+            check("No unexpected sheets in Excel", len(unexpected) == 0,
+                  f"Unexpected: {unexpected}")
+        except Exception:
+            pass
 
-    # Notion: no duplicate Market Research Dashboard databases
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
@@ -182,10 +371,11 @@ def check_reverse_validation(workspace):
         market_dbs = []
         for db_id, title in dbs:
             title_str = json.dumps(title).lower() if title else ""
-            if "market" in title_str and "research" in title_str:
+            if "market research dashboard" in title_str:
                 market_dbs.append(db_id)
-        check("No duplicate Market Research databases", len(market_dbs) <= 1,
-              f"Found {len(market_dbs)} matching databases")
+        check("No duplicate Market Research Dashboard databases",
+              len(market_dbs) <= 1,
+              f"Found {len(market_dbs)} matching")
         cur.close()
         conn.close()
     except Exception:
@@ -207,19 +397,14 @@ def main():
     check_reverse_validation(args.agent_workspace)
 
     total = PASS_COUNT + FAIL_COUNT
-    if total == 0:
-        print("\nFAIL: No checks performed.")
-        sys.exit(1)
+    print(f"\nOverall: {PASS_COUNT}/{total} checks passed")
 
-    accuracy = PASS_COUNT / total * 100
-    print(f"\nOverall: {PASS_COUNT}/{total} checks passed ({accuracy:.1f}%)")
-
-    result = {"total_passed": PASS_COUNT, "total_checks": total, "accuracy": accuracy}
+    result = {"total_passed": PASS_COUNT, "total_checks": total, "failed": FAIL_COUNT}
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

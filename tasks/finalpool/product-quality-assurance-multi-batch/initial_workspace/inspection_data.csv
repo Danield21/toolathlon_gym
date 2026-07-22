@@ -1,0 +1,7 @@
+Batch_ID,Product,Inspector,Inspection_Date,Sample_Size,Defects_Found,Defect_Rate_Pct
+B-2026-001,Widget A,J.Lee,2026-02-15,100,3,3
+B-2026-002,Widget A,J.Lee,2026-02-22,100,5,5
+B-2026-003,Widget A,P.Singh,2026-03-01,100,8,8
+B-2026-004,Widget A,P.Singh,2026-03-08,100,2,2
+B-2026-005,Widget A,J.Lee,2026-03-15,100,4,4
+B-2026-006,Widget A,J.Lee,2026-03-22,100,12,12

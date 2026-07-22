@@ -233,6 +233,63 @@ def check_excel(agent_workspace):
             record("Citation_Count column found", False, f"Header: {header}")
             all_ok = False
 
+        # NEW: Check Venue and Primary_Category for each paper
+        if venue_col is not None and id_col is not None:
+            for row in data_rows:
+                if id_col < len(row) and row[id_col] is not None:
+                    paper_id = str(row[id_col]).strip()
+                    if paper_id in EXPECTED_PAPERS:
+                        expected_venue = EXPECTED_PAPERS[paper_id]["venue"].lower()
+                        actual_venue = str(row[venue_col] or "").strip().lower() if venue_col < len(row) else ""
+                        ok = expected_venue in actual_venue
+                        record(f"Venue for {paper_id} matches {EXPECTED_PAPERS[paper_id]['venue']}", ok,
+                               f"Got '{actual_venue}', expected '{expected_venue}'")
+                        if not ok:
+                            all_ok = False
+
+        if category_col is not None and id_col is not None:
+            for row in data_rows:
+                if id_col < len(row) and row[id_col] is not None:
+                    paper_id = str(row[id_col]).strip()
+                    if paper_id in EXPECTED_PAPERS:
+                        expected_cat = EXPECTED_PAPERS[paper_id]["primary_category"].lower()
+                        actual_cat = str(row[category_col] or "").strip().lower() if category_col < len(row) else ""
+                        ok = expected_cat in actual_cat
+                        record(f"Primary_Category for {paper_id} matches {EXPECTED_PAPERS[paper_id]['primary_category']}", ok,
+                               f"Got '{actual_cat}', expected '{expected_cat}'")
+                        if not ok:
+                            all_ok = False
+
+        # NEW: Require Key_Contribution column exists and has non-empty content
+        key_contrib_col = find_column_index(header, ["Key_Contribution", "Key Contribution", "Contribution"])
+        if key_contrib_col is None:
+            record("Key_Contribution column found", False, f"Header: {header}")
+            all_ok = False
+        else:
+            record("Key_Contribution column found", True)
+            # At least 4 of 5 rows must have a non-empty contribution
+            contrib_filled = 0
+            for row in data_rows:
+                if key_contrib_col < len(row) and row[key_contrib_col]:
+                    if len(str(row[key_contrib_col]).strip()) >= 10:
+                        contrib_filled += 1
+            record("Key_Contribution filled for >=4 rows", contrib_filled >= 4,
+                   f"Got {contrib_filled}/5 rows with non-empty contribution")
+            if contrib_filled < 4:
+                all_ok = False
+
+        # NEW: Check Paper Comparison sorted by Citation_Count DESC
+        if citation_col is not None:
+            try:
+                cites = [float(r[citation_col]) for r in data_rows if citation_col < len(r) and r[citation_col] is not None]
+                sorted_ok = cites == sorted(cites, reverse=True)
+                record("Paper Comparison sorted by Citation_Count DESC", sorted_ok,
+                       f"Got order: {cites}")
+                if not sorted_ok:
+                    all_ok = False
+            except Exception:
+                pass
+
     # ── Check Statistics sheet ───────────────────────────────────────────────
     stats_rows = load_sheet_rows(wb, "Statistics")
     if stats_rows is None:
@@ -351,14 +408,16 @@ def check_notion():
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
 
-        # Find pages with relevant title
+        # Find pages with the exact title "Efficient Transformers Research Tracker"
         cur.execute("""
             SELECT id, properties
             FROM notion.pages
-            WHERE properties::text ILIKE '%%transformer%%'
-               OR properties::text ILIKE '%%research%%tracker%%'
-               OR properties::text ILIKE '%%efficient%%'
-        """)
+            WHERE properties::text ILIKE %s
+               OR properties::text ILIKE %s
+        """, (
+            '%efficient transformers research tracker%',
+            '%efficient%transformer%research%tracker%',
+        ))
         pages = cur.fetchall()
 
         if not pages:

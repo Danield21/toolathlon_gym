@@ -164,9 +164,9 @@ def check_excel(agent_workspace, gt_dir):
             if len(a_row) > 4 and len(g_row) > 4:
                 if not str_match(a_row[4], g_row[4]):
                     errors.append(f"{key}: Consider_Consolidation '{a_row[4]}' vs '{g_row[4]}'")
-            # Projected_Next (col 5)
+            # Projected_Next (col 5) - whole number from linear regression; allow tol=2
             if len(a_row) > 5 and len(g_row) > 5:
-                if not num_close(a_row[5], g_row[5], 5):
+                if not num_close(a_row[5], g_row[5], 2):
                     errors.append(f"{key}: Projected_Next {a_row[5]} vs {g_row[5]}")
             # Faculty_Needed (col 6)
             if len(a_row) > 6 and len(g_row) > 6:
@@ -205,7 +205,9 @@ def check_excel(agent_workspace, gt_dir):
                 errors.append(f"Missing metric: {g_row[0]}")
                 continue
             if len(a_row) > 1 and len(g_row) > 1:
-                tol = 5 if "projected" in key else 1
+                # Total_Projected_Enrollment may sum 7 per-course rounding errors;
+                # tighten tol from 14 to 7 (1 per course max).
+                tol = 7 if "projected" in key else 1
                 if not num_close(a_row[1], g_row[1], tol):
                     errors.append(f"{key}: {a_row[1]} vs {g_row[1]} (tol={tol})")
         if errors:
@@ -221,20 +223,19 @@ def check_gform():
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
 
-        # Find form with "Course Preference" or "Preference Survey" in title
+        # Match exact title 'Course Preference Survey' (case-insensitive)
         cur.execute("""
             SELECT id, title FROM gform.forms
-            WHERE title ILIKE '%%course preference%%'
-               OR title ILIKE '%%preference survey%%'
+            WHERE LOWER(TRIM(title)) = 'course preference survey'
         """)
         forms = cur.fetchall()
-        check("Course Preference Survey form exists", len(forms) >= 1,
-              f"Found {len(forms)} matching forms")
+        check("Course Preference Survey form exists (exact title)", len(forms) >= 1,
+              f"Found {len(forms)} forms with exact title")
 
         if forms:
             form_id = forms[0][0]
             cur.execute("""
-                SELECT id, title, question_type FROM gform.questions
+                SELECT id, title, question_type, config FROM gform.questions
                 WHERE form_id = %s ORDER BY position
             """, (form_id,))
             questions = cur.fetchall()
@@ -261,6 +262,78 @@ def check_gform():
                 check("Has radio/choice question for schedule", has_radio,
                       f"Types: {types}")
 
+                # Build a list of all choices across questions for content checks
+                def _choices(cfg):
+                    if not cfg:
+                        return []
+                    if isinstance(cfg, str):
+                        try:
+                            cfg = json.loads(cfg)
+                        except (TypeError, ValueError):
+                            return []
+                    if isinstance(cfg, dict):
+                        ch = cfg.get("choices") or cfg.get("options") or []
+                        return [str(c).strip().lower() for c in ch]
+                    return []
+
+                # All 7 base course names should appear as options in some checkbox/MC question
+                base_courses = [
+                    "applied analytics & algorithms",
+                    "biochemistry & bioinformatics",
+                    "creative computing & culture",
+                    "data-driven design",
+                    "environmental economics & ethics",
+                    "foundations of finance",
+                    "global governance & geopolitics",
+                ]
+                # Find checkbox question and inspect its options
+                checkbox_choices = []
+                for q in questions:
+                    qtype = (q[2] or "").upper()
+                    if qtype in ["CHECKBOX", "CHECKBOX_GRID", "CHECK_BOX"]:
+                        checkbox_choices = _choices(q[3])
+                        break
+                # Match by normalised substring/inclusion to handle minor whitespace/punct variation
+                def _norm(s):
+                    return "".join(ch for ch in s.lower() if ch.isalnum())
+                norm_choices = [_norm(c) for c in checkbox_choices]
+                missing_courses = []
+                for course in base_courses:
+                    if not any(_norm(course) in nc or nc in _norm(course)
+                               for nc in norm_choices if nc):
+                        missing_courses.append(course)
+                check("Checkbox question lists all 7 base course names",
+                      len(missing_courses) == 0,
+                      f"Missing: {missing_courses}; got choices: {checkbox_choices}")
+
+                # Radio question must have Morning/Afternoon/Evening options
+                radio_choices = []
+                for q in questions:
+                    qtype = (q[2] or "").upper()
+                    if qtype in ["RADIO", "MULTIPLE_CHOICE", "CHOICE"]:
+                        radio_choices = _choices(q[3])
+                        break
+                radio_norm = [c.strip().lower() for c in radio_choices]
+                has_morning = any("morning" == c or c.startswith("morning") for c in radio_norm)
+                has_afternoon = any("afternoon" == c or c.startswith("afternoon") for c in radio_norm)
+                has_evening = any("evening" == c or c.startswith("evening") for c in radio_norm)
+                check("Schedule radio has Morning option", has_morning,
+                      f"Choices: {radio_choices}")
+                check("Schedule radio has Afternoon option", has_afternoon,
+                      f"Choices: {radio_choices}")
+                check("Schedule radio has Evening option", has_evening,
+                      f"Choices: {radio_choices}")
+
+                # Fourth question: accessibility / accommodations (text)
+                has_accessibility = any(
+                    ("access" in t or "accommod" in t or "special need" in t)
+                    and types[i] in ["TEXT", "SHORT_ANSWER", "PARAGRAPH"]
+                    for i, t in enumerate(titles)
+                )
+                check("Has accessibility/accommodations text question",
+                      has_accessibility,
+                      f"Questions: {list(zip(titles, types))}")
+
         cur.close()
         conn.close()
     except Exception as e:
@@ -273,15 +346,16 @@ def check_emails():
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
 
-        chair_emails = [
-            "analytics_chair@university.edu",
-            "biochem_chair@university.edu",
-            "computing_chair@university.edu",
-            "design_chair@university.edu",
-            "economics_chair@university.edu",
-            "finance_chair@university.edu",
-            "governance_chair@university.edu",
-        ]
+        # Each chair has a department keyword that should appear in subject and body
+        chair_emails = {
+            "analytics_chair@university.edu": ["analytics"],
+            "biochem_chair@university.edu": ["biochem", "biochemistry"],
+            "computing_chair@university.edu": ["computing", "creative"],
+            "design_chair@university.edu": ["design"],
+            "economics_chair@university.edu": ["economics"],
+            "finance_chair@university.edu": ["finance"],
+            "governance_chair@university.edu": ["governance"],
+        }
 
         cur.execute("""
             SELECT id, subject, to_addr, body_text FROM email.messages
@@ -290,36 +364,65 @@ def check_emails():
                OR subject ILIKE '%%projection%%'
         """)
         emails = cur.fetchall()
-        check("At least 7 enrollment-related emails sent", len(emails) >= 7,
+        check("Exactly 7 enrollment-related emails sent (one per chair)", len(emails) == 7,
               f"Found {len(emails)} matching emails")
 
-        # Check each chair got an email
-        found_chairs = set()
+        # Map chair -> emails sent to that chair
+        per_chair = {chair: [] for chair in chair_emails}
         for email_row in emails:
-            to_addr = email_row[2]
+            _, subject, to_addr, body = email_row
             if isinstance(to_addr, str):
                 try:
-                    to_addr = json.loads(to_addr)
+                    to_addr_parsed = json.loads(to_addr)
                 except json.JSONDecodeError:
-                    to_addr = [to_addr]
-            if isinstance(to_addr, list):
-                for addr in to_addr:
-                    addr_lower = str(addr).lower().strip()
-                    for chair in chair_emails:
-                        if chair in addr_lower:
-                            found_chairs.add(chair)
+                    to_addr_parsed = [to_addr]
+            else:
+                to_addr_parsed = to_addr
+            if not isinstance(to_addr_parsed, list):
+                to_addr_parsed = [to_addr_parsed]
+            for addr in to_addr_parsed:
+                addr_lower = str(addr).lower().strip()
+                for chair in chair_emails:
+                    if chair in addr_lower:
+                        per_chair[chair].append((subject or "", body or ""))
 
-        for chair in chair_emails:
-            dept_name = chair.split("_chair")[0].replace("_", " ").title()
-            check(f"Email sent to {chair}",
-                  chair in found_chairs,
-                  f"Found emails to: {found_chairs}")
-
-        # Check emails have body content
-        if emails:
-            has_body = any(email_row[3] and len(str(email_row[3])) > 20 for email_row in emails)
-            check("Emails have meaningful body content", has_body,
-                  f"Body lengths: {[len(str(e[3])) if e[3] else 0 for e in emails[:3]]}")
+        for chair, dept_keys in chair_emails.items():
+            mails = per_chair[chair]
+            check(f"Email sent to {chair}", len(mails) >= 1,
+                  f"Found {len(mails)} email(s)")
+            if not mails:
+                continue
+            # Each chair email subject should contain "Enrollment Forecast" + dept keyword
+            ok_subj = False
+            ok_dept_in_subj = False
+            ok_body_content = False
+            for subj, body in mails:
+                sl = subj.lower()
+                bl = body.lower()
+                if "enrollment forecast" in sl or ("enrollment" in sl and "forecast" in sl):
+                    ok_subj = True
+                if any(k in sl for k in dept_keys):
+                    ok_dept_in_subj = True
+                # Body should mention projection (number) AND faculty / staff need.
+                # Require a digit within +/-100 chars of a 'project' occurrence.
+                has_proj = "project" in bl
+                has_fac = "facult" in bl or "staff" in bl or "instructor" in bl or "teacher" in bl
+                # Scoped digit-near-projection check
+                import re as _re_pj
+                digit_near_proj = False
+                for m in _re_pj.finditer(r"project", bl):
+                    window = bl[max(0, m.start() - 100): m.end() + 100]
+                    if any(ch.isdigit() for ch in window):
+                        digit_near_proj = True
+                        break
+                if has_proj and has_fac and digit_near_proj:
+                    ok_body_content = True
+            check(f"  Subject 'Enrollment Forecast' for {chair}", ok_subj,
+                  f"Subjects: {[m[0] for m in mails]}")
+            check(f"  Subject mentions department for {chair}", ok_dept_in_subj,
+                  f"Subjects: {[m[0] for m in mails]}; expected dept keys: {dept_keys}")
+            check(f"  Body has projection & faculty info for {chair}", ok_body_content,
+                  f"Bodies (first 200 chars): {[m[1][:200] for m in mails]}")
 
         cur.close()
         conn.close()

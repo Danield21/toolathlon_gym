@@ -4,7 +4,7 @@ import argparse, json, os, sys, shutil, tarfile, subprocess, time
 from datetime import datetime, timedelta
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -57,9 +57,32 @@ def setup_mock_server(port=30312):
         with tarfile.open(tar_path, "r:gz") as tar:
             tar.extractall(path=tmp_dir)
 
-    # Start HTTP server
     mock_dir = os.path.join(tmp_dir, "mock_pages")
+    # Overwrite mock JSON to expose course-level benchmarks matching GT codes
     if os.path.exists(mock_dir):
+        api_dir = os.path.join(mock_dir, "api")
+        os.makedirs(api_dir, exist_ok=True)
+        data_json_path = os.path.join(api_dir, "data.json")
+        mock_data = {
+            "academic_benchmarks": [
+                {"course_code": "AAA-2013J", "course_name": "Applied Analytics & Algorithms (Fall 2013)",
+                 "benchmark_pass_rate": 78.5, "benchmark_avg_score": 80.0, "enrollment": 1993},
+                {"course_code": "AAA-2014J", "course_name": "Applied Analytics & Algorithms (Fall 2014)",
+                 "benchmark_pass_rate": 71.2, "benchmark_avg_score": 75.0, "enrollment": 542},
+                {"course_code": "BBB-2013J", "course_name": "Biochemistry & Bioinformatics (Fall 2013)",
+                 "benchmark_pass_rate": 75.0, "benchmark_avg_score": 80.0, "enrollment": 725},
+                {"course_code": "BBB-2014J", "course_name": "Biochemistry & Bioinformatics (Fall 2014)",
+                 "benchmark_pass_rate": 70.0, "benchmark_avg_score": 72.0, "enrollment": 2024},
+                {"course_code": "BBB-2013B", "course_name": "Biochemistry & Bioinformatics (Spring 2013)",
+                 "benchmark_pass_rate": 68.0, "benchmark_avg_score": 70.0, "enrollment": 1920},
+                {"course_code": "BBB-2014B", "course_name": "Biochemistry & Bioinformatics (Spring 2014)",
+                 "benchmark_pass_rate": 73.0, "benchmark_avg_score": 75.0, "enrollment": 1447},
+            ],
+            "source": "Education Analytics API"
+        }
+        with open(data_json_path, "w") as f:
+            json.dump(mock_data, f, indent=2)
+
         log_path = os.path.join(mock_dir, "server.log")
         subprocess.Popen(
             f"nohup python3 -m http.server 30312 --directory {mock_dir} > {log_path} 2>&1 &",

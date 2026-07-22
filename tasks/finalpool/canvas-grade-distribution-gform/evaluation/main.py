@@ -25,26 +25,30 @@ DB_CONFIG = {
 
 def get_expected_course_data():
     """Query actual grade stats from canvas DB."""
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
 
-    cur.execute("""
-        SELECT c.course_code, c.name,
-               AVG(s.score) as avg_grade,
-               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY s.score) as median_grade,
-               COUNT(DISTINCT s.user_id) as total_students
-        FROM canvas.courses c
-        JOIN canvas.assignments a ON a.course_id = c.id
-        JOIN canvas.submissions s ON s.assignment_id = a.id
-        WHERE c.name LIKE '%%Spring 2014%%'
-        AND s.score IS NOT NULL
-        GROUP BY c.course_code, c.name
-        ORDER BY c.name
-    """)
-    course_stats = cur.fetchall()
-    cur.close()
-    conn.close()
-    return course_stats
+        cur.execute("""
+            SELECT c.course_code, c.name,
+                   AVG(s.score) as avg_grade,
+                   PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY s.score) as median_grade,
+                   COUNT(DISTINCT s.user_id) as total_students,
+                   AVG(CASE WHEN s.score >= 60 THEN 1.0 ELSE 0.0 END) * 100.0 as pass_rate
+            FROM canvas.courses c
+            JOIN canvas.assignments a ON a.course_id = c.id
+            JOIN canvas.submissions s ON s.assignment_id = a.id
+            WHERE c.name LIKE '%%Spring 2014%%'
+            AND s.score IS NOT NULL
+            GROUP BY c.course_code, c.name
+            ORDER BY c.name
+        """)
+        course_stats = cur.fetchall()
+        cur.close()
+        conn.close()
+        return course_stats
+    except psycopg2.OperationalError:
+        return []
 
 
 def check_excel(workspace):
@@ -68,7 +72,9 @@ def check_excel(workspace):
         ws = wb[wb.sheetnames[sheet_names_lower.index("course grades")]]
         headers = [str(cell.value).lower().replace(" ", "_") if cell.value else "" for cell in ws[1]]
 
-        for rh in ["course_code", "course_name", "avg_grade", "total_students"]:
+        # Pass_Rate and Median_Grade are required by task
+        for rh in ["course_code", "course_name", "avg_grade", "total_students",
+                   "pass_rate", "median_grade"]:
             if not any(rh in h or rh.replace("_", "") in h.replace("_", "") for h in headers):
                 errors.append(f"Course Grades missing header: {rh}")
 
@@ -76,22 +82,73 @@ def check_excel(workspace):
         if data_rows < len(course_stats):
             errors.append(f"Course Grades has {data_rows} rows, expected at least {len(course_stats)}")
 
-        # Verify course codes are present
-        code_col = None
-        for idx, h in enumerate(headers):
-            if "course_code" in h or "coursecode" in h or "code" in h:
-                code_col = idx
-                break
+        # Locate columns by name
+        def _col_index(*aliases):
+            for idx, h in enumerate(headers):
+                hk = h.replace("_", "")
+                for a in aliases:
+                    if a in h or a.replace("_", "") in hk:
+                        return idx
+            return None
 
+        code_col = _col_index("course_code", "code")
+        avg_col = _col_index("avg_grade")
+        med_col = _col_index("median_grade", "median")
+        pass_col = _col_index("pass_rate")
+        ts_col = _col_index("total_students", "students")
+
+        # Verify course codes are present
         if code_col is not None:
             found_codes = set()
+            row_data = {}
             for row in ws.iter_rows(min_row=2):
                 if row[code_col].value:
-                    found_codes.add(str(row[code_col].value).strip().upper())
+                    code = str(row[code_col].value).strip().upper()
+                    found_codes.add(code)
+                    row_data[code] = row
             expected_codes = set(cs[0].upper() for cs in course_stats)
             missing_codes = expected_codes - found_codes
             if missing_codes:
                 errors.append(f"Missing course codes: {missing_codes}")
+
+            # Per-row value validation when DB groundtruth is available
+            if course_stats:
+                def _num(c):
+                    try:
+                        return float(c.value)
+                    except (TypeError, ValueError):
+                        return None
+                for cs in course_stats:
+                    code, _name, gt_avg, gt_med, gt_ts, gt_pr = cs
+                    code_u = code.upper()
+                    if code_u not in row_data:
+                        continue
+                    row = row_data[code_u]
+                    if avg_col is not None and gt_avg is not None:
+                        v = _num(row[avg_col])
+                        if v is None or abs(v - float(gt_avg)) > 1.0:
+                            errors.append(
+                                f"{code_u}: avg_grade {v} != GT {float(gt_avg):.2f} (tol 1.0)")
+                    if med_col is not None and gt_med is not None:
+                        v = _num(row[med_col])
+                        if v is None or abs(v - float(gt_med)) > 2.0:
+                            errors.append(
+                                f"{code_u}: median_grade {v} != GT {float(gt_med):.2f} (tol 2.0)")
+                    if ts_col is not None and gt_ts is not None:
+                        v = _num(row[ts_col])
+                        if v is None or int(v) != int(gt_ts):
+                            errors.append(
+                                f"{code_u}: total_students {v} != GT {int(gt_ts)}")
+                    if pass_col is not None and gt_pr is not None:
+                        v = _num(row[pass_col])
+                        if v is None:
+                            errors.append(f"{code_u}: pass_rate missing")
+                        else:
+                            # Accept either fraction (0-1) or percent (0-100)
+                            v_pct = v * 100.0 if v <= 1.0 else v
+                            if abs(v_pct - float(gt_pr)) > 5.0:
+                                errors.append(
+                                    f"{code_u}: pass_rate {v_pct:.1f}% != GT {float(gt_pr):.1f}% (tol 5)")
 
     # Check Summary sheet
     if "summary" not in sheet_names_lower:
@@ -119,6 +176,46 @@ def check_excel(workspace):
                 errors.append(f"Cannot parse Total_Courses: {summary_data[total_key]}")
         else:
             errors.append("Summary missing Total_Courses row")
+
+        # Validate Overall_Avg_Grade
+        if course_stats:
+            gt_overall = sum(float(cs[2]) for cs in course_stats) / len(course_stats)
+            overall_key = next(
+                (k for k in summary_data if "overall" in k and "avg" in k), None)
+            if overall_key:
+                try:
+                    val = float(summary_data[overall_key])
+                    if abs(val - gt_overall) > 1.0:
+                        errors.append(
+                            f"Overall_Avg_Grade: got {val}, expected ~{gt_overall:.2f}")
+                except (TypeError, ValueError):
+                    errors.append(
+                        f"Cannot parse Overall_Avg_Grade: {summary_data[overall_key]}")
+            else:
+                errors.append("Summary missing Overall_Avg_Grade row")
+
+            # Validate Highest_Avg_Course / Lowest_Avg_Course
+            sorted_by_avg = sorted(course_stats, key=lambda x: float(x[2]))
+            gt_lowest_name = sorted_by_avg[0][1]
+            gt_highest_name = sorted_by_avg[-1][1]
+            highest_key = next(
+                (k for k in summary_data if "highest" in k), None)
+            lowest_key = next(
+                (k for k in summary_data if "lowest" in k), None)
+            if highest_key:
+                v = str(summary_data[highest_key] or "")
+                if gt_highest_name not in v and gt_highest_name.lower() not in v.lower():
+                    errors.append(
+                        f"Highest_Avg_Course: got '{v}', expected '{gt_highest_name}'")
+            else:
+                errors.append("Summary missing Highest_Avg_Course row")
+            if lowest_key:
+                v = str(summary_data[lowest_key] or "")
+                if gt_lowest_name not in v and gt_lowest_name.lower() not in v.lower():
+                    errors.append(
+                        f"Lowest_Avg_Course: got '{v}', expected '{gt_lowest_name}'")
+            else:
+                errors.append("Summary missing Lowest_Avg_Course row")
 
     return errors
 
@@ -156,7 +253,7 @@ def check_gform(cur):
     form_title = form_row[1]
 
     cur.execute("""
-        SELECT title, question_type, required
+        SELECT id, title, question_type, required, config
         FROM gform.questions
         WHERE form_id = %s
         ORDER BY position ASC
@@ -165,6 +262,50 @@ def check_gform(cur):
 
     if len(questions) < 4:
         errors.append(f"Form has {len(questions)} questions, expected at least 4")
+        return errors
+
+    # Collect option labels per question from config JSON
+    q_options = {}
+    for qid, qtitle, qtype, qreq, qconfig in questions:
+        try:
+            cfg = qconfig if isinstance(qconfig, dict) else (
+                json.loads(qconfig) if qconfig else {})
+        except Exception:
+            cfg = {}
+        opts = cfg.get("options", []) or []
+        labels = []
+        for o in opts:
+            if isinstance(o, dict):
+                labels.append(str(o.get("value") or o.get("text") or "").strip().lower())
+            else:
+                labels.append(str(o or "").strip().lower())
+        q_options[qid] = labels
+
+    # Required choice option labels
+    needed_satisfaction = {"excellent", "good", "fair", "poor"}
+    needed_workload = {"too light", "manageable", "heavy", "overwhelming"}
+    needed_rating = {"1", "2", "3", "4", "5"}
+
+    found_sat = any(needed_satisfaction.issubset(set(opts)) for opts in q_options.values())
+    found_wl = any(needed_workload.issubset(set(opts)) for opts in q_options.values())
+    found_rating = any(needed_rating.issubset(set(opts)) for opts in q_options.values())
+
+    if not found_sat:
+        errors.append("Form missing satisfaction question with Excellent/Good/Fair/Poor options")
+    if not found_wl:
+        errors.append("Form missing workload question with Too Light/Manageable/Heavy/Overwhelming options")
+    if not found_rating:
+        errors.append("Form missing teaching quality 1-5 rating options")
+
+    # Open-ended (text/short_answer) question that is NOT required
+    optional_text_q = any(
+        ("text" in (qtype or "").lower() or "paragraph" in (qtype or "").lower()
+         or "short" in (qtype or "").lower())
+        and not qreq
+        for _qid, _qt, qtype, qreq, _cfg in questions
+    )
+    if not optional_text_q:
+        errors.append("Form missing optional (not required) open-ended text question")
 
     return errors
 
@@ -183,10 +324,23 @@ def check_email(cur):
 
     if not emails:
         errors.append("No email with 'Spring 2014' and 'survey/feedback' in subject found")
-    else:
-        to_str = str(emails[0][2]).lower()
-        if "students@university.edu" not in to_str:
-            errors.append(f"Email not sent to students@university.edu, to_addr: {emails[0][2]}")
+        return errors
+
+    # Must be sent to students@university.edu (AND not OR with subject)
+    matched = [e for e in emails if "students@university.edu" in str(e[2] or "").lower()]
+    if not matched:
+        errors.append(
+            f"No email with subject match AND to_addr=students@university.edu; "
+            f"to_addrs observed: {[e[2] for e in emails]}")
+        return errors
+
+    # Check from_addr is the registrar (sender)
+    from_ok = any(
+        "registrar@university.edu" in str(e[1] or "").lower() for e in matched)
+    if not from_ok:
+        errors.append(
+            f"Email from_addr should be registrar@university.edu; "
+            f"got: {[e[1] for e in matched]}")
 
     return errors
 

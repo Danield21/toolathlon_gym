@@ -84,13 +84,14 @@ def main():
                 errors.append(f"Missing row: {g_row[0]}")
                 continue
             
+            # Employee_Count is integer — exact equality
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 1):
-                    errors.append(f"{key}.Employee_Count: {a_row[1]} vs {g_row[1]} (tol=1)")
+                if not num_close(a_row[1], g_row[1], 0):
+                    errors.append(f"{key}.Employee_Count: {a_row[1]} vs {g_row[1]} (exact)")
 
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 5.0):
-                    errors.append(f"{key}.Avg_Salary: {a_row[2]} vs {g_row[2]} (tol=5.0)")
+                if not num_close(a_row[2], g_row[2], 0.5):
+                    errors.append(f"{key}.Avg_Salary: {a_row[2]} vs {g_row[2]} (tol=0.5)")
 
             if len(a_row) > 3 and len(g_row) > 3:
                 if not num_close(a_row[3], g_row[3], 1.0):
@@ -105,12 +106,12 @@ def main():
                     errors.append(f"{key}.Benchmark: {a_row[5]} vs {g_row[5]} (tol=1.0)")
 
             if len(a_row) > 6 and len(g_row) > 6:
-                if not num_close(a_row[6], g_row[6], 5.0):
-                    errors.append(f"{key}.Variance: {a_row[6]} vs {g_row[6]} (tol=5.0)")
+                if not num_close(a_row[6], g_row[6], 1.0):
+                    errors.append(f"{key}.Variance: {a_row[6]} vs {g_row[6]} (tol=1.0)")
 
             if len(a_row) > 7 and len(g_row) > 7:
-                if not num_close(a_row[7], g_row[7], 0.5):
-                    errors.append(f"{key}.Variance_Pct: {a_row[7]} vs {g_row[7]} (tol=0.5)")
+                if not num_close(a_row[7], g_row[7], 0.1):
+                    errors.append(f"{key}.Variance_Pct: {a_row[7]} vs {g_row[7]} (tol=0.1)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -148,8 +149,17 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 10.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=10.0)")
+                # Per-metric tolerance: counts exact, others 0.5 abs
+                key_l = key.lower()
+                is_count = (
+                    "count" in key_l
+                    or "total_employees" in key_l
+                    or "departments_above" in key_l
+                    or "departments_below" in key_l
+                )
+                tol = 0 if is_count else 0.5
+                if not num_close(a_row[1], g_row[1], tol):
+                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol={tol})")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")

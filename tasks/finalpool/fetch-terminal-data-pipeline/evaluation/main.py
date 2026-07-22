@@ -372,6 +372,31 @@ def check_excel(agent_workspace, expected):
               f"Found {len(data_rows)} rows")
 
 
+def check_memory_note(workspace, expected):
+    """Verify memory/memory.json was written with key pipeline metrics."""
+    print("\n=== Checking Memory Note ===")
+    import json as _json
+    mem_path = os.path.join(workspace, "memory", "memory.json")
+    if not os.path.isfile(mem_path):
+        # Try alternate locations
+        alt_path = os.path.join(workspace, "memory.json")
+        if os.path.isfile(alt_path):
+            mem_path = alt_path
+    check("memory/memory.json exists", os.path.isfile(mem_path), f"Not found: {mem_path}")
+    if not os.path.isfile(mem_path):
+        return
+    try:
+        with open(mem_path, "r") as f:
+            content = f.read()
+        # Accept either JSON or plaintext note; require at least one key metric reference
+        keys_checked = ["low", "stock", "revenue", "total", "sales", "inventory", "pipeline"]
+        matches = sum(1 for k in keys_checked if k.lower() in content.lower())
+        check("Memory note references pipeline metrics (>=3 keywords)", matches >= 3,
+              f"Matched {matches} keywords; content snippet: {content[:200]}")
+    except Exception as e:
+        check("Memory note readable", False, str(e))
+
+
 def check_gsheet():
     """Check Google Sheet Pipeline Dashboard."""
     print("\n=== Checking Google Sheet ===")
@@ -422,6 +447,13 @@ def check_gsheet():
         check("Google Sheet contains at least 4 product references",
               products_found >= 4,
               f"Found {products_found}/4 product name keywords")
+        # Header check: first row should contain key fields from Combined View
+        header_cells = [v for r, c, v in cells if r == 0 and v is not None]
+        header_text = " ".join(str(v).lower() for v in header_cells)
+        expected_header_keywords = ["product", "stock", "revenue"]
+        hdr_matches = sum(1 for k in expected_header_keywords if k in header_text)
+        check("Google Sheet header aligns with Combined View (>=2 of product/stock/revenue)",
+              hdr_matches >= 2, f"Header: {header_text[:200]}")
 
     cur.close()
     conn.close()
@@ -437,31 +469,51 @@ def main():
 
     expected = compute_expected(args.groundtruth_workspace)
 
+    # Critical checks — must all pass. Tracked by record_critical via FAIL_COUNT tracking.
+    start_fail = FAIL_COUNT
     check_script(args.agent_workspace)
+    script_ok = FAIL_COUNT == start_fail
+
+    start_fail = FAIL_COUNT
     check_cleaned_data(args.agent_workspace, expected)
+    cleaned_ok = FAIL_COUNT == start_fail
+
+    start_fail = FAIL_COUNT
     check_excel(args.agent_workspace, expected)
+    excel_ok = FAIL_COUNT == start_fail
+
+    start_fail = FAIL_COUNT
     check_gsheet()
+    start_fail2 = FAIL_COUNT
+    check_memory_note(args.agent_workspace, expected)
+    memory_ok = FAIL_COUNT == start_fail2
 
     total = PASS_COUNT + FAIL_COUNT
     pass_rate = PASS_COUNT / total if total > 0 else 0
+
+    # Critical gates: clean_data script, cleaned JSONs, excel and memory must be correct.
+    critical_passed = script_ok and cleaned_ok and excel_ok and memory_ok
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")
     print(f"  Failed: {FAIL_COUNT}")
     print(f"  Pass Rate: {pass_rate:.1%}")
+    print(f"  Script OK: {script_ok}, Cleaned OK: {cleaned_ok}, Excel OK: {excel_ok}, Memory OK: {memory_ok}")
+
+    overall_ok = critical_passed and pass_rate >= 0.85
 
     result = {
         "passed": PASS_COUNT,
         "failed": FAIL_COUNT,
         "pass_rate": round(pass_rate, 3),
-        "success": pass_rate >= 0.7,
+        "success": overall_ok,
     }
 
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    sys.exit(0 if pass_rate >= 0.7 else 1)
+    sys.exit(0 if overall_ok else 1)
 
 
 if __name__ == "__main__":

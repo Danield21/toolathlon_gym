@@ -10,11 +10,32 @@ import psycopg2
 
 DB_CONN = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
 }
+
+NOISE_PAPERS = [
+    {
+        "id": 980,
+        "title": "A Survey of 3D Point Cloud Processing with Deep Learning",
+        "authors": [{"name": "Zhijian Tan"}, {"name": "Hao Li"}, {"name": "Yu Zhou"}],
+        "abstract": "We review recent advances in processing 3D point cloud data using deep neural networks across indoor scene understanding, autonomous driving, and object detection. Methods surveyed include PointNet, PointNet++, DGCNN, and transformer-based architectures. This survey focuses on geometric point cloud data rather than language or text data.",
+        "pub_year": 2021,
+        "venue": "IEEE TPAMI",
+        "citation_count": 2500,
+    },
+    {
+        "id": 981,
+        "title": "Soil Microbiome Dynamics Under Climate Change: A Metagenomic Survey",
+        "authors": [{"name": "Maria Rodriguez"}, {"name": "James Thornton"}, {"name": "Akiko Takeda"}],
+        "abstract": "We survey metagenomic studies of soil microbiome community composition and function under climate change. Our analysis includes amplicon sequencing and shotgun metagenomics data from temperate, tropical, and arctic biomes. This work belongs to environmental microbiology and is not related to natural language processing.",
+        "pub_year": 2022,
+        "venue": "Nature Microbiology",
+        "citation_count": 800,
+    },
+]
 
 NLP_PAPERS = [
     {
@@ -75,17 +96,17 @@ NLP_PAPERS = [
 
 
 def inject_papers(conn):
-    """Clear and inject NLP papers into scholarly.scholar_papers."""
+    """Clear and inject NLP papers plus noise papers into scholarly.scholar_papers."""
     with conn.cursor() as cur:
         cur.execute("DELETE FROM scholarly.scholar_papers")
-        for p in NLP_PAPERS:
+        for p in NLP_PAPERS + NOISE_PAPERS:
             cur.execute("""
                 INSERT INTO scholarly.scholar_papers (id, title, authors, abstract, pub_year, venue, citation_count)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (p["id"], p["title"], json.dumps(p["authors"]),
                   p["abstract"], p["pub_year"], p["venue"], p["citation_count"]))
     conn.commit()
-    print(f"[preprocess] Injected {len(NLP_PAPERS)} NLP papers into scholarly.scholar_papers")
+    print(f"[preprocess] Injected {len(NLP_PAPERS)} NLP + {len(NOISE_PAPERS)} noise papers into scholarly.scholar_papers")
 
 
 def main():

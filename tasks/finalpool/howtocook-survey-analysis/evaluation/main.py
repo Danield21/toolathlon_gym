@@ -300,6 +300,22 @@ def check_gsheet():
           len(non_empty) >= 5,
           f"Found {len(non_empty)} non-empty recipe names")
 
+    # Verify that at least 5 rows have Category == 荤菜 (the most popular cuisine)
+    # Locate the category column from the header
+    if all_cells:
+        cat_col_idx = None
+        for c in header_cells:
+            if c[2] and ("category" in str(c[2]).lower() or "type" in str(c[2]).lower()):
+                cat_col_idx = c[1]
+                break
+        if cat_col_idx is not None:
+            category_cells = [c for c in all_cells
+                              if c[0] > min_row and c[1] == cat_col_idx]
+            meat_rows = [c for c in category_cells if c[2] and "荤菜" in str(c[2])]
+            check("Recommended Menu has >=5 rows with Category '荤菜'",
+                  len(meat_rows) >= 5,
+                  f"Found {len(meat_rows)} rows with 荤菜 category")
+
     cur.close()
     conn.close()
 

@@ -28,8 +28,33 @@ DB_CONFIG = {
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
-# Top 5 worst breach ticket IDs (for calendar/email checks)
-TOP5_TICKET_IDS = ["INC8275", "INC7833", "INC6422", "INC6854", "INC0925"]
+# Top 5 worst breach ticket IDs (computed dynamically at runtime, falls back to hardcoded)
+_FALLBACK_TOP5 = ["INC8275", "INC7833", "INC6422", "INC6854", "INC0925"]
+
+
+def _get_top5_ticket_ids():
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT t."TICKET_ID"
+            FROM sf_data."SUPPORT_CENTER__PUBLIC__TICKETS" t
+            JOIN sf_data."SUPPORT_CENTER__PUBLIC__SLA_POLICIES" p ON t."PRIORITY" = p."PRIORITY"
+            WHERE t."PRIORITY" IN ('High','Medium')
+              AND t."RESPONSE_TIME_HOURS" > p."RESPONSE_TARGET_HOURS"
+            ORDER BY (t."RESPONSE_TIME_HOURS" - p."RESPONSE_TARGET_HOURS") DESC
+            LIMIT 5
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        ids = [str(r[0]).strip() for r in rows]
+        return ids if len(ids) >= 5 else _FALLBACK_TOP5
+    except Exception:
+        return _FALLBACK_TOP5
+
+
+TOP5_TICKET_IDS = _get_top5_ticket_ids()
 
 
 def record(name, passed, detail=""):
@@ -463,6 +488,46 @@ def check_email():
 # Main
 # ============================================================================
 
+def check_noise_preserved():
+    """Reverse validation: noise events/notion pages/emails must still be present (not deleted)."""
+    print("\n=== Checking Noise Preservation ===")
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM gcal.events WHERE id LIKE 'noise-gcal-%'")
+        gcal_cnt = cur.fetchone()[0]
+        record("noise gcal events preserved", gcal_cnt >= 3,
+               f"Found {gcal_cnt}/3")
+        cur.execute("SELECT COUNT(*) FROM notion.pages WHERE id LIKE 'noise-page-%'")
+        notion_cnt = cur.fetchone()[0]
+        record("noise notion pages preserved", notion_cnt >= 3,
+               f"Found {notion_cnt}/3")
+        cur.execute("SELECT COUNT(*) FROM email.messages WHERE message_id LIKE 'noise-email-%'")
+        email_cnt = cur.fetchone()[0]
+        record("noise emails preserved", email_cnt >= 3,
+               f"Found {email_cnt}/3")
+
+        # Also confirm agent output (notion SLA page + SLA alert email) doesn't repeat noise topics
+        cur.execute("SELECT properties FROM notion.pages WHERE id NOT LIKE 'noise-page-%' AND archived=false AND in_trash=false")
+        for (props,) in cur.fetchall():
+            s = str(props).lower()
+            for marker in ("coffee machine", "office move", "security training", "hiring pipeline"):
+                if marker in s:
+                    record(f"notion output contaminated by noise '{marker}'", False, f"props: {s[:100]}")
+        cur.execute("SELECT subject, body_text FROM email.messages WHERE message_id NOT LIKE 'noise-email-%'")
+        for (subj, body) in cur.fetchall():
+            text = ((subj or "") + " " + (body or "")).lower()
+            for marker in ("coffee machine", "engineering blog roundup", "security training"):
+                if marker in text:
+                    record(f"email output contaminated by noise '{marker}'", False, f"body: {text[:100]}")
+        cur.close()
+        conn.close()
+        return FAIL_COUNT == 0
+    except Exception as e:
+        record("noise preservation check", False, str(e))
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False, default=".")
@@ -475,14 +540,16 @@ def main():
     gcal_ok = check_gcal()
     notion_ok = check_notion()
     email_ok = check_email()
+    noise_ok = check_noise_preserved()
 
-    all_passed = excel_ok and gcal_ok and notion_ok and email_ok
+    all_passed = excel_ok and gcal_ok and notion_ok and email_ok and noise_ok
 
     print(f"\n=== SUMMARY ===")
     print(f"  Excel:   {'PASS' if excel_ok else 'FAIL'}")
     print(f"  GCal:    {'PASS' if gcal_ok else 'FAIL'}")
     print(f"  Notion:  {'PASS' if notion_ok else 'FAIL'}")
     print(f"  Email:   {'PASS' if email_ok else 'FAIL'}")
+    print(f"  Noise:   {'PASS' if noise_ok else 'FAIL'}")
     print(f"  Passed: {PASS_COUNT}, Failed: {FAIL_COUNT}")
     print(f"  Overall: {'PASS' if all_passed else 'FAIL'}")
 

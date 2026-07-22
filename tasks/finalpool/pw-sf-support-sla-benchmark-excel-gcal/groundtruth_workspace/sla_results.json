@@ -1,0 +1,31 @@
+{
+  "rows": [
+    {
+      "priority": "High",
+      "ticket_count": 6466,
+      "our_avg_response_hrs": 6.23,
+      "industry_avg_response_hrs": 3.5,
+      "response_gap": 2.73,
+      "avg_csat": 3.26,
+      "compliance_status": "Non-Compliant"
+    },
+    {
+      "priority": "Medium",
+      "ticket_count": 15774,
+      "our_avg_response_hrs": 12.28,
+      "industry_avg_response_hrs": 7,
+      "response_gap": 5.28,
+      "avg_csat": 3.26,
+      "compliance_status": "Non-Compliant"
+    },
+    {
+      "priority": "Low",
+      "ticket_count": 9348,
+      "our_avg_response_hrs": 25.76,
+      "industry_avg_response_hrs": 20,
+      "response_gap": 5.76,
+      "avg_csat": 3.25,
+      "compliance_status": "Non-Compliant"
+    }
+  ]
+}

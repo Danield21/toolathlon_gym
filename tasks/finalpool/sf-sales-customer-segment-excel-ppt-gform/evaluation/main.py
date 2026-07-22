@@ -108,6 +108,14 @@ def main():
                 if len(a_row) > 4 and len(g_row) > 4:
                     if not num_close(a_row[4], g_row[4], 5):
                         errors.append(f"{key}.Avg_Order_Value: {a_row[4]} vs {g_row[4]}")
+                # Orders_Per_Customer (col 5)
+                if len(a_row) > 5 and len(g_row) > 5:
+                    if not num_close(a_row[5], g_row[5], 0.5):
+                        errors.append(f"{key}.Orders_Per_Customer: {a_row[5]} vs {g_row[5]}")
+                # Avg_Discount_Pct (col 6)
+                if len(a_row) > 6 and len(g_row) > 6:
+                    if not num_close(a_row[6], g_row[6], 1.0):
+                        errors.append(f"{key}.Avg_Discount_Pct: {a_row[6]} vs {g_row[6]}")
                 # Revenue_Share_Pct (col 7)
                 if len(a_row) > 7 and len(g_row) > 7:
                     if not num_close(a_row[7], g_row[7], 2):
@@ -235,39 +243,125 @@ def main():
             if seg not in all_text:
                 all_errors.append(f"PPT missing '{seg}' segment")
 
-        # Check for revenue figure
-        revenue_present = any(x in all_text for x in ["839609", "839,609"])
-        if not revenue_present:
-            all_errors.append("PPT missing Consumer revenue figure (~839609)")
+        # Check for revenue figure (dynamic - extract Consumer revenue from GT)
+        consumer_rev = None
+        try:
+            gt_wb_ck = openpyxl.load_workbook(gt_file, data_only=True)
+            for r in load_sheet_rows(gt_wb_ck, "Segment Performance") or []:
+                if r and r[0] and str(r[0]).strip().lower() == "consumer" and len(r) > 3:
+                    consumer_rev = r[3]
+                    break
+        except Exception:
+            consumer_rev = 839609.2
+        # Accept a few common formatting variants of the consumer revenue value
+        if consumer_rev is not None:
+            iv = int(round(float(consumer_rev)))
+            variants = [str(iv), f"{iv:,}", f"{iv/1000:.0f}K", f"{iv/1000:.1f}K",
+                        f"{iv/1000000:.2f}M", f"{iv/1000000:.1f}M",
+                        f"${iv:,}", f"${iv}"]
+            # Also accept the value rounded down to 3 significant digits
+            also = []
+            for tens in [1, 10, 100, 1000]:
+                also.append(str((iv // tens) * tens))
+                also.append(f"{(iv//tens)*tens:,}")
+            variants += also
+            revenue_present = any(v in all_text for v in variants)
+            if not revenue_present:
+                all_errors.append(f"PPT missing Consumer revenue figure (~{iv})")
 
-        # Check for strategic categories
-        for cat in ["Star", "Cash Cow"]:
+        # Check for strategic categories — derive from groundtruth Strategic Matrix (skip header)
+        gt_categories = set()
+        try:
+            sm_rows = load_sheet_rows(gt_wb_ck, "Strategic Matrix") or []
+            for r in sm_rows[1:]:
+                if r and len(r) > 4 and r[4]:
+                    gt_categories.add(str(r[4]).strip())
+        except Exception:
+            gt_categories = {"Star", "Cash Cow"}
+        # Require at least the categories present in GT (limit to known set to avoid header collisions)
+        for cat in gt_categories:
             if cat not in all_text:
                 all_errors.append(f"PPT missing strategic category '{cat}'")
 
         print(f"    PPT checks done ({len(prs.slides)} slides)")
 
-    # --- Check 3: Google Form ---
-    print("Checking Google Form...")
+    # --- Check 3: Survey form ---
+    print("Checking Customer Experience Survey form...")
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
-        cur.execute("SELECT id FROM gform.forms WHERE LOWER(title) LIKE '%customer experience%'")
+        cur.execute("SELECT id, title FROM gform.forms WHERE LOWER(title) LIKE '%customer experience%'")
         rows = cur.fetchall()
         if not rows:
-            all_errors.append("Google Form 'Customer Experience Survey' not found in gform.forms")
+            all_errors.append("Form 'Customer Experience Survey' not found in gform.forms")
         else:
-            form_id = rows[0][0]
-            cur.execute("SELECT COUNT(*) FROM gform.questions WHERE form_id = %s", (form_id,))
-            q_count = cur.fetchone()[0]
-            if q_count < 6:
-                all_errors.append(f"Google Form has only {q_count} questions, expected at least 6")
+            # Reject if the only matching form is actually the noise form
+            non_noise = [
+                (fid, title) for fid, title in rows
+                if "onboarding" not in (title or "").lower()
+                and "checklist" not in (title or "").lower()
+            ]
+            if not non_noise:
+                all_errors.append("No non-noise Customer Experience Survey found")
             else:
-                print(f"    GForm found with {q_count} questions")
+                form_id = non_noise[0][0]
+                cur.execute(
+                    "SELECT title, question_type FROM gform.questions WHERE form_id = %s",
+                    (form_id,),
+                )
+                qrows = cur.fetchall()
+                q_count = len(qrows)
+                if q_count < 6:
+                    all_errors.append(
+                        f"Survey form has only {q_count} questions, expected at least 6"
+                    )
+                # Per task spec, the form must have:
+                #   - at least one multiple-choice / radio question (product category)
+                #   - a 1-5 satisfaction (scale-style; commonly RADIO/SCALE) for pricing
+                #   - a 1-5 satisfaction for delivery
+                #   - a 1-10 NPS-style score
+                #   - at least one open-text / paragraph question
+                types_lower = [
+                    (str(t or "").strip().upper(), str(q or "").strip().lower())
+                    for t, q in qrows
+                ]
+                has_mc = any(
+                    qt in ("RADIO", "MULTIPLE_CHOICE", "CHECKBOX", "DROPDOWN")
+                    for qt, _ in types_lower
+                )
+                has_text = any(
+                    qt in ("TEXT", "SHORT_ANSWER", "PARAGRAPH")
+                    for qt, _ in types_lower
+                )
+                if not has_mc:
+                    all_errors.append(
+                        "Survey form missing a multiple-choice / radio question"
+                    )
+                if not has_text:
+                    all_errors.append(
+                        "Survey form missing an open-text / short-answer question"
+                    )
+                # Look for thematic coverage in question titles
+                joined = " ".join(qt for _, qt in types_lower)
+                themes_required = [
+                    ("pricing", ("price", "pricing", "cost")),
+                    ("delivery", ("deliver", "shipping", "logistic")),
+                    ("recommend / NPS", ("recommend", "nps", "likelihood")),
+                ]
+                for label, keys in themes_required:
+                    if not any(k in joined for k in keys):
+                        all_errors.append(
+                            f"Survey form missing question about {label}"
+                        )
+                if q_count >= 6 and has_mc and has_text:
+                    print(
+                        f"    Survey form found with {q_count} questions "
+                        f"(types validated)"
+                    )
         cur.close()
         conn.close()
     except Exception as e:
-        all_errors.append(f"Error checking GForm: {e}")
+        all_errors.append(f"Error checking survey form: {e}")
 
     # --- Final result ---
     if all_errors:

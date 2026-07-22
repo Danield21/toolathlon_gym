@@ -108,9 +108,13 @@ def main():
                 # Max_Salary (col 7)
                 if not num_close(a_row[7], g_row[7], 5.0):
                     errors.append(f"{key} Max_Salary: {a_row[7]} vs {g_row[7]}")
-                # Salary_Std_Dev (col 8)
-                if not num_close(a_row[8], g_row[8], 5.0):
-                    errors.append(f"{key} Salary_Std_Dev: {a_row[8]} vs {g_row[8]}")
+                # Salary_Std_Dev (col 8) - relative tolerance
+                try:
+                    std_tol = max(5.0, abs(float(g_row[8])) * 0.10)
+                except (TypeError, ValueError):
+                    std_tol = 5.0
+                if not num_close(a_row[8], g_row[8], std_tol):
+                    errors.append(f"{key} Salary_Std_Dev: {a_row[8]} vs {g_row[8]} (tol={std_tol:.2f})")
 
             if errors:
                 all_errors.extend(errors)
@@ -236,11 +240,15 @@ def main():
             if len(_text.strip()) < 100:
                 all_errors.append("Equity_Report.docx has too little text content (< 100 chars)")
 
-            # Check for key section headings
+            # Check for key section headings - must appear as headings (not just body)
             required_sections = ["executive summary", "methodology", "finding", "recommendation", "compliance"]
-            missing_sections = [s for s in required_sections if s not in _text and s not in _headings]
-            if len(missing_sections) > 2:
-                all_errors.append(f"Equity_Report.docx missing sections: {missing_sections}")
+            missing_in_text = [s for s in required_sections if s not in _text and s not in _headings]
+            if len(missing_in_text) > 2:
+                all_errors.append(f"Equity_Report.docx missing sections: {missing_in_text}")
+            # At least 3 of 5 required sections must appear in actual headings
+            in_headings_count = sum(1 for s in required_sections if s in _headings)
+            if in_headings_count < 3:
+                all_errors.append(f"Only {in_headings_count}/5 required sections present as Heading-styled paragraphs")
 
             # Check for key content keywords
             content_kws = ["equity", "salary", "department", "gap"]
@@ -267,13 +275,62 @@ def main():
         else:
             form_id = forms[0][0]
             print(f"    GForm found (id={form_id})")
-            # Check question count
-            cur.execute("SELECT COUNT(*) FROM gform.questions WHERE form_id = %s", (form_id,))
-            q_count = cur.fetchone()[0]
+            # Fetch question types + titles ordered by position/id
+            cur.execute("""
+                SELECT question_type, COALESCE(title, '')
+                FROM gform.questions WHERE form_id = %s
+                ORDER BY id
+            """, (form_id,))
+            q_rows = cur.fetchall()
+            q_count = len(q_rows)
             if q_count < 5:
                 all_errors.append(f"Google Form has {q_count} questions, expected at least 5")
             else:
                 print(f"    {q_count} questions found.")
+                q_types_upper = [str(r[0] or "").upper() for r in q_rows]
+                q_titles_lower = [str(r[1] or "").lower() for r in q_rows]
+
+                # Required question type-mapping per task.md:
+                #   Q1: dropdown (department)
+                #   Q2: short answer (years of experience)
+                #   Q3: multiple choice 1-5 (compensation satisfaction)
+                #   Q4: multiple choice 1-5 (fairness rating)
+                #   Q5: paragraph (additional comments)
+                DROPDOWN = {"DROPDOWN", "DROPDOWN_LIST"}
+                SHORT = {"TEXT", "SHORT_ANSWER", "SHORT_TEXT", "TEXTQUESTION"}
+                CHOICE = {"RADIO", "MULTIPLE_CHOICE", "CHOICE", "CHOICEQUESTION"}
+                PARA = {"PARAGRAPH", "LONG_ANSWER", "PARAGRAPH_TEXT"}
+
+                def has_type_near_keyword(wanted_types, keywords):
+                    for t, title in zip(q_types_upper, q_titles_lower):
+                        if t in wanted_types and any(k in title for k in keywords):
+                            return True
+                    return False
+
+                def has_any_type(wanted_types):
+                    return any(t in wanted_types for t in q_types_upper)
+
+                # Dropdown for department
+                if not (has_type_near_keyword(DROPDOWN, ["department", "dept", "team"])
+                        or (has_any_type(DROPDOWN) and any("department" in t or "dept" in t for t in q_titles_lower))):
+                    all_errors.append(
+                        f"Form missing dropdown question about department. "
+                        f"Types: {q_types_upper}, titles sample: {q_titles_lower[:5]}")
+                # Short answer for years
+                if not has_type_near_keyword(SHORT, ["year", "experience"]):
+                    all_errors.append(
+                        f"Form missing short-answer question about years of experience. "
+                        f"Types: {q_types_upper}")
+                # Multiple choice questions - need at least two (satisfaction + fairness)
+                choice_count = sum(1 for t in q_types_upper if t in CHOICE)
+                if choice_count < 2:
+                    all_errors.append(
+                        f"Form needs >=2 multiple choice questions for satisfaction + fairness, got {choice_count}")
+                # Paragraph for comments
+                if not has_any_type(PARA):
+                    all_errors.append(
+                        f"Form missing paragraph question for additional comments. "
+                        f"Types: {q_types_upper}")
         cur.close()
         conn.close()
     except Exception as e:

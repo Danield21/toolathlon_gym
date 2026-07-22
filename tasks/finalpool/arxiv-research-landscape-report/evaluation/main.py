@@ -134,6 +134,17 @@ def check_excel(workspace):
                     if not ok:
                         all_ok = False
 
+            # NEW: Check Paper Analysis sorted by Citation_Count DESC
+            try:
+                cites = [float(r[cite_col]) for r in data if cite_col < len(r) and r[cite_col] is not None]
+                sorted_ok = cites == sorted(cites, reverse=True)
+                record("Paper Analysis sorted by Citation_Count DESC", sorted_ok,
+                       f"Got order: {cites}")
+                if not sorted_ok:
+                    all_ok = False
+            except Exception:
+                pass
+
     # Conference Fit sheet
     cf_rows = load_sheet_rows(wb, "Conference Fit") or load_sheet_rows(wb, "Conference_Fit")
     if cf_rows is None:
@@ -141,10 +152,61 @@ def check_excel(workspace):
         all_ok = False
     else:
         record("Sheet 'Conference Fit' exists", True)
+        header = cf_rows[0] if cf_rows else []
         data = cf_rows[1:]
         record("Conference Fit has 3 rows", len(data) == 3, f"Found {len(data)}")
         if len(data) != 3:
             all_ok = False
+        # Check conference names present
+        conf_col = find_col(header, ["Conference", "Conference_Name", "Name"])
+        if conf_col is not None:
+            found_confs = " ".join(str(r[conf_col]).lower() for r in data if conf_col < len(r) and r[conf_col])
+            for c in ["neurips", "icml", "aaai"]:
+                ok = c in found_confs
+                record(f"Conference Fit mentions {c.upper()}", ok, f"Found: {found_confs}")
+                if not ok:
+                    all_ok = False
+        # Check Matching_Papers and Avg_Citations columns exist
+        mp_col = find_col(header, ["Matching_Papers", "Matching Papers", "Paper_Count"])
+        ac_col = find_col(header, ["Avg_Citations", "Average_Citations", "Avg Citations"])
+        record("Conference Fit has Matching_Papers column", mp_col is not None, f"Header: {header}")
+        record("Conference Fit has Avg_Citations column", ac_col is not None, f"Header: {header}")
+        if mp_col is None or ac_col is None:
+            all_ok = False
+
+        # NEW: Matching_Papers numeric values. Given topics + papers mapping:
+        # NeurIPS 2026 (deep learning, RL, NLP) matches 2 papers (00001, 00002)
+        # ICML 2026 (optimization, generative models) matches 2 papers (00003, 00005)
+        # AAAI 2026 (knowledge graphs, planning, NLP) matches 2 papers (00001, 00004)
+        expected_mp = {"neurips": 2, "icml": 2, "aaai": 2}
+        if mp_col is not None and conf_col is not None:
+            for row in data:
+                conf = str(row[conf_col]).lower() if conf_col < len(row) and row[conf_col] else ""
+                mp_val = row[mp_col] if mp_col < len(row) else None
+                for key, expected in expected_mp.items():
+                    if key in conf:
+                        ok = num_close(mp_val, expected, tol=1)
+                        record(f"Conference Fit Matching_Papers for {key.upper()}", ok,
+                               f"Got {mp_val}, expected ~{expected}")
+                        if not ok:
+                            all_ok = False
+
+        # NEW: Avg_Citations numeric values
+        # NeurIPS 2026: (520 + 350) / 2 = 435
+        # ICML 2026: (280 + 150) / 2 = 215
+        # AAAI 2026: (350 + 190) / 2 = 270
+        expected_ac = {"neurips": 435, "icml": 215, "aaai": 270}
+        if ac_col is not None and conf_col is not None:
+            for row in data:
+                conf = str(row[conf_col]).lower() if conf_col < len(row) and row[conf_col] else ""
+                ac_val = row[ac_col] if ac_col < len(row) else None
+                for key, expected in expected_ac.items():
+                    if key in conf:
+                        ok = num_close(ac_val, expected, tol=30)
+                        record(f"Conference Fit Avg_Citations for {key.upper()}", ok,
+                               f"Got {ac_val}, expected ~{expected}")
+                        if not ok:
+                            all_ok = False
 
     # Summary sheet
     sum_rows = load_sheet_rows(wb, "Summary")
@@ -182,12 +244,24 @@ def check_excel(workspace):
             record("Summary: Avg_Citations exists", False)
             all_ok = False
 
-        # Highest Cited Paper
+        # Highest Cited Paper - stricter: must match full phrase "deep rl with human feedback"
         hc_key = next((k for k in metrics if "highest" in k or "most" in k), None)
         if hc_key:
             val = str(metrics[hc_key]).lower() if metrics[hc_key] else ""
-            ok = "deep rl" in val or "human feedback" in val or "rl" in val
-            record("Summary: Highest_Cited is Deep RL paper", ok, f"Got: {metrics[hc_key]}")
+            # Require the full title "Deep RL with Human Feedback" (allowing minor whitespace variations)
+            ok = "deep rl with human feedback" in val or (
+                "deep rl" in val and "human feedback" in val and "deep rl with human feedback".replace(" ", "") in val.replace(" ", "")
+            )
+            record("Summary: Highest_Cited is Deep RL paper (exact phrase)", ok, f"Got: {metrics[hc_key]}")
+            if not ok:
+                all_ok = False
+
+        # NEW: Best_Conference_Fit should be one of the top conferences (tied at 2)
+        bcf_key = next((k for k in metrics if "best" in k and ("conference" in k or "fit" in k)), None)
+        if bcf_key:
+            val = str(metrics[bcf_key]).lower() if metrics[bcf_key] else ""
+            ok = any(c in val for c in ["neurips", "icml", "aaai"])
+            record("Summary: Best_Conference_Fit is a valid conference", ok, f"Got: {metrics[bcf_key]}")
             if not ok:
                 all_ok = False
 
@@ -207,17 +281,64 @@ def check_word(workspace):
         doc = Document(path)
         full_text = "\n".join(p.text for p in doc.paragraphs).lower()
 
-        record("Document has substantial content", len(full_text) > 200,
-               f"Only {len(full_text)} chars")
-        record("Mentions conference", any(c.lower() in full_text for c in ["neurips", "icml", "aaai"]),
-               "No conference names found")
-        record("Mentions research/landscape", "research" in full_text or "landscape" in full_text,
-               "Missing research/landscape keywords")
-        record("Mentions papers or topics",
-               any(kw in full_text for kw in ["transformer", "reinforcement", "optimization", "knowledge graph", "generative"]),
-               "No topic keywords found")
+        # Require longer document (>= 4 sections of analysis)
+        all_ok = True
+        ok = len(full_text) > 400
+        record("Document has substantial content (>400 chars)", ok, f"Only {len(full_text)} chars")
+        if not ok:
+            all_ok = False
+        ok = sum(1 for c in ["neurips", "icml", "aaai"] if c in full_text) >= 3
+        record("Mentions all three conferences (NeurIPS, ICML, AAAI)", ok, "Missing one or more conferences")
+        if not ok:
+            all_ok = False
+        ok = "research" in full_text or "landscape" in full_text
+        record("Mentions research/landscape", ok)
+        if not ok:
+            all_ok = False
+        # Require at least 3 topic keywords (not just 1)
+        topic_kws = ["transformer", "reinforcement", "optimization", "knowledge graph", "generative", "nlp"]
+        topic_hits = sum(1 for kw in topic_kws if kw in full_text)
+        ok = topic_hits >= 3
+        record(f"Mentions >=3 topic keywords ({topic_hits}/6)", ok)
+        if not ok:
+            all_ok = False
 
-        return True
+        # Check 4 sections: overview, alignment, priority, gap analysis
+        has_overview = any(kw in full_text for kw in ["overview", "summary", "analysis"])
+        has_alignment = any(kw in full_text for kw in ["align", "mapping", "map to", "fit"])
+        has_priority = any(kw in full_text for kw in ["priority", "recommend", "preferred", "prioritize"])
+        has_gap = any(kw in full_text for kw in ["gap", "missing", "coverage", "uncovered", "topic"])
+        record("Word has overview section", has_overview)
+        record("Word has alignment section", has_alignment)
+        record("Word has priority section", has_priority)
+        record("Word has gap analysis section", has_gap)
+        # Require at least 3 of 4 sections present (gap may be mentioned implicitly via 'topic')
+        section_count = sum([has_overview, has_alignment, has_priority, has_gap])
+        ok = section_count >= 3
+        record(f"Word has >=3 of 4 required sections ({section_count}/4)", ok)
+        if not ok:
+            all_ok = False
+
+        # Reference check: confirm the report draws on research_priorities.md /
+        # publication_history.json by mentioning at least one of the group's
+        # past venues (ACL/NeurIPS/ICML/AAAI/ICLR/CVPR) AND at least one
+        # stated group expertise keyword (transformer/alignment/knowledge graph/optimization).
+        past_venues = ["acl", "neurips", "icml", "aaai", "iclr", "cvpr"]
+        venue_hits = sum(1 for v in past_venues if v in full_text)
+        ok = venue_hits >= 3
+        record(f"Report references >=3 past venues from publication_history ({venue_hits}/6)", ok)
+        if not ok:
+            all_ok = False
+
+        expertise_kws = ["transformer", "alignment", "knowledge graph", "optimization",
+                         "reinforcement learning", "generative", "nlp"]
+        expertise_hits = sum(1 for kw in expertise_kws if kw in full_text)
+        ok = expertise_hits >= 3
+        record(f"Report references >=3 group expertise areas ({expertise_hits}/7)", ok)
+        if not ok:
+            all_ok = False
+
+        return all_ok
     except Exception as e:
         record("Word document readable", False, str(e))
         return False

@@ -1,6 +1,6 @@
 You are preparing a quarterly investment committee briefing for the CFO. The goal is to combine internal sales performance data with external market context and schedule the briefing around existing calendar commitments.
 
-Start by reading briefing_template.json in your workspace. It defines the expected report structure and KPIs the committee cares about. Also read committee_members.csv, which lists the attendees and their roles. Finally, open previous_quarter.xlsx, which contains last quarter's summary data you will use for comparison.
+Start by reading briefing_template.json in your workspace. It defines the expected report structure and KPIs the committee cares about. Also read committee_members.csv, which lists the attendees and their roles. Finally, open previous_quarter.xlsx, which contains historical summary data from an earlier quarter that you can use as a structural reference for the comparison sheet.
 
 From the enterprise data warehouse, query the sales database to get quarterly revenue broken down by product brand. Specifically, pull Q3 2025 (July through September) and Q4 2025 (October through December) revenue for each brand. Also query the top 10 customers by total spend during the full year 2025, including their name, segment, total spend amount, and order count.
 

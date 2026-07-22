@@ -1,0 +1,9 @@
+{
+  "papers": [
+    {"id": "2301.00001", "title": "LLM Reasoning Survey", "authors": ["Author A"], "year": 2023, "citation_count": 200, "references": []},
+    {"id": "2302.00002", "title": "Prompt Engineering Guide", "authors": ["Author B"], "year": 2023, "citation_count": 150, "references": ["2301.00001"]},
+    {"id": "2303.00003", "title": "In-Context Learning Theory", "authors": ["Author C"], "year": 2023, "citation_count": 120, "references": ["2301.00001"]},
+    {"id": "2304.00004", "title": "Chain-of-Thought Reasoning", "authors": ["Author F"], "year": 2023, "citation_count": 90, "references": ["2301.00001"]},
+    {"id": "2305.00005", "title": "Survey of In-Context Learning", "authors": ["Author G"], "year": 2023, "citation_count": 75, "references": ["2303.00003"]}
+  ]
+}

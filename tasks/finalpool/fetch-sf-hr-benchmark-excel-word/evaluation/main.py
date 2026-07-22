@@ -262,7 +262,7 @@ def check_word(agent_workspace):
         ("Mentions Support", "support" in full_text),
         ("Mentions R&D", "r&d" in full_text),
         ("Mentions benchmark", "benchmark" in full_text),
-        ("Mentions variance or comparison", "variance" in full_text or "comparison" in full_text or "compared" in full_text or "difference" in full_text),
+        ("Mentions variance", "variance" in full_text),
     ]
 
     for name, cond in checks:

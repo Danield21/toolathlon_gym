@@ -15,10 +15,10 @@ DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolath
 
 SYMBOLS = ["AMZN", "GOOGL", "JNJ", "JPM", "XOM"]
 
-# Tolerances
-PRICE_TOL = 0.5
-RETURN_TOL = 0.5
-RS_TOL = 0.05
+# Tolerances (tightened)
+PRICE_TOL = 0.05  # 2-decimal price
+RETURN_TOL = 0.2  # 2-decimal percentage rounding
+RS_TOL = 0.01     # 3-decimal RS
 
 
 def load_sheet_rows(wb, sheet_name):
@@ -88,26 +88,38 @@ def check_excel(agent_ws, gt_ws):
                 if g is None:
                     continue
 
-                # Check Latest_Price (col index 3)
+                # Company_Name (col 1)
+                if not str_match(a[1], g[1]):
+                    errors.append(f"{sym}: Company_Name '{a[1]}' != '{g[1]}'")
+                # Sector (col 2)
+                if not str_match(a[2], g[2]):
+                    errors.append(f"{sym}: Sector '{a[2]}' != '{g[2]}'")
+                # Latest_Price (col 3)
                 if not num_close(a[3], g[3], PRICE_TOL):
                     errors.append(f"{sym}: Latest_Price {a[3]} != {g[3]} (tol {PRICE_TOL})")
 
-                # Check returns (cols 4,5,6)
+                # returns (cols 4,5,6)
                 for idx, name in [(4, "Return_1M_Pct"), (5, "Return_3M_Pct"), (6, "Return_6M_Pct")]:
                     if not num_close(a[idx], g[idx], RETURN_TOL):
                         errors.append(f"{sym}: {name} {a[idx]} != {g[idx]} (tol {RETURN_TOL})")
 
-                # Check Composite_Momentum (col 7)
+                # Composite_Momentum (col 7)
                 if not num_close(a[7], g[7], RETURN_TOL):
-                    errors.append(f"{sym}: Composite_Momentum {a[7]} != {g[7]} (tol {RETURN_TOL})")
+                    errors.append(f"{sym}: Composite_Momentum {a[7]} != {g[7]}")
 
-                # Check Benchmark_Momentum (col 8)
+                # Benchmark_Momentum (col 8)
                 if not num_close(a[8], g[8], RETURN_TOL):
-                    errors.append(f"{sym}: Benchmark_Momentum {a[8]} != {g[8]} (tol {RETURN_TOL})")
+                    errors.append(f"{sym}: Benchmark_Momentum {a[8]} != {g[8]}")
 
-                # Check Signal (col 9)
+                # Signal (col 9)
                 if not str_match(a[9], g[9]):
                     errors.append(f"{sym}: Signal '{a[9]}' != '{g[9]}'")
+
+        # Sort: alphabetical
+        if 'agent_data' in dir() and agent_data:
+            symbols_in_order = [str(r[0]).strip().upper() for r in agent_data]
+            if symbols_in_order != sorted(SYMBOLS):
+                errors.append(f"Momentum Analysis not alphabetically sorted: {symbols_in_order}")
 
     # --- Sheet 2: Relative Strength ---
     agent_rs = load_sheet_rows(wb_agent, "Relative Strength")
@@ -182,6 +194,15 @@ def check_excel(agent_ws, gt_ws):
             if not num_close(a_sum.get("Avg_Composite_Momentum", 0), g_sum["Avg_Composite_Momentum"], RETURN_TOL):
                 errors.append(f"Summary Avg_Composite_Momentum: {a_sum.get('Avg_Composite_Momentum')} != {g_sum['Avg_Composite_Momentum']}")
 
+        # Benchmark_Return_6M (numeric)
+        if "Benchmark_Return_6M" in g_sum:
+            if not num_close(a_sum.get("Benchmark_Return_6M", 0), g_sum["Benchmark_Return_6M"], RETURN_TOL):
+                errors.append(f"Summary Benchmark_Return_6M: {a_sum.get('Benchmark_Return_6M')} != {g_sum['Benchmark_Return_6M']}")
+        # Analysis_Date (string match)
+        if "Analysis_Date" in g_sum:
+            if not str_match(a_sum.get("Analysis_Date", ""), g_sum["Analysis_Date"]):
+                errors.append(f"Summary Analysis_Date: '{a_sum.get('Analysis_Date')}' != '{g_sum['Analysis_Date']}'")
+
     return errors
 
 
@@ -192,32 +213,81 @@ def check_notion():
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
 
-        # Check for database with title containing "Sector Research"
+        # Find database titled exactly 'Sector Research'
+        cur.execute("SELECT id, title FROM notion.databases WHERE archived = false")
+        all_dbs = cur.fetchall()
+        target_db = None
+        for did, title in all_dbs:
+            title_text = ""
+            if isinstance(title, list):
+                for t in title:
+                    if isinstance(t, dict):
+                        title_text += t.get("plain_text", "") or t.get("text", {}).get("content", "")
+            else:
+                title_text = str(title or "")
+            if title_text.strip().lower() == "sector research":
+                target_db = did
+                break
+        if target_db is None:
+            errors.append(f"No Notion database titled 'Sector Research'. Found: {[t for _, t in all_dbs]}")
+            cur.close(); conn.close()
+            return errors
+
+        # 5 pages parented to target db
         cur.execute("""
-            SELECT id FROM notion.databases
-            WHERE title::text ILIKE '%sector research%'
-        """)
-        db_rows = cur.fetchall()
-        if not db_rows:
-            # Fallback: check pages directly
-            cur.execute("""
-                SELECT COUNT(*) FROM notion.pages
-                WHERE properties::text ILIKE '%sector%'
-                  AND (properties::text ILIKE '%momentum%' OR properties::text ILIKE '%signal%')
-            """)
-            count = cur.fetchone()[0]
-            if count < 5:
-                errors.append("No Notion database 'Sector Research' found and fewer than 5 sector pages")
-        else:
-            db_id = db_rows[0][0]
-            # Check for pages linked to this database
-            cur.execute("""
-                SELECT COUNT(*) FROM notion.pages
-                WHERE parent::text ILIKE %s
-            """, (f'%{db_id}%',))
-            count = cur.fetchone()[0]
-            if count < 5:
-                errors.append(f"Sector Research database has {count} pages, expected 5")
+            SELECT id, properties FROM notion.pages
+            WHERE archived = false AND parent->>'database_id' = %s
+        """, (target_db,))
+        pages = cur.fetchall()
+        if len(pages) != 5:
+            errors.append(f"Sector Research database has {len(pages)} pages, expected 5")
+
+        # Each page: validate Stock title, Sector select, Signal select, Momentum number, Last_Updated date
+        valid_signals = {"overweight", "neutral", "underweight"}
+        signals_seen = set()
+        symbols_seen = set()
+        for pid, props in pages:
+            if not isinstance(props, dict):
+                continue
+            page_signal_present = False
+            page_signal_valid = False
+            for k, v in props.items():
+                if not isinstance(v, dict):
+                    continue
+                t = v.get("type")
+                kn = (k or "").lower()
+                if t == "title" and ("stock" in kn or kn == "name"):
+                    arr = v.get("title", [])
+                    name = "".join(x.get("plain_text", "") for x in arr).strip().upper()
+                    if name in [s.upper() for s in SYMBOLS]:
+                        symbols_seen.add(name)
+                if t == "select" and "signal" in kn:
+                    page_signal_present = True
+                    sel = v.get("select")
+                    if isinstance(sel, dict):
+                        sname = (sel.get("name") or "").strip().lower()
+                        if sname in valid_signals:
+                            page_signal_valid = True
+                            signals_seen.add(sname)
+                        else:
+                            errors.append(f"Page {pid}: invalid signal '{sname}' (must be one of {sorted(valid_signals)})")
+                if t == "number" and "momentum" in kn:
+                    n = v.get("number")
+                    if not isinstance(n, (int, float)):
+                        errors.append(f"Page {pid}: Momentum is not a number")
+                if t == "date" and ("last_updated" in kn.replace(" ", "_") or "updated" in kn):
+                    d = v.get("date")
+                    if not isinstance(d, dict) or not d.get("start"):
+                        errors.append(f"Page {pid}: Last_Updated has no date")
+            if not page_signal_present:
+                errors.append(f"Page {pid}: missing Signal property")
+            elif not page_signal_valid:
+                # already added invalid signal error above; this catches None select
+                pass
+
+        missing_syms = set(SYMBOLS) - symbols_seen
+        if missing_syms:
+            errors.append(f"Notion DB missing symbols: {sorted(missing_syms)}")
 
         cur.close()
         conn.close()
@@ -227,32 +297,53 @@ def check_notion():
 
 
 def check_emails():
-    """Check for 2 emails: one to investment_team, one to trading_desk."""
+    """Check for 2 emails: investment_team@firm.com (Sector Rotation Analysis Update) and trading_desk@firm.com (Actionable Sector Signals)."""
     errors = []
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
 
         cur.execute("""
-            SELECT subject FROM email.messages
-            WHERE to_addr::text ILIKE '%investment_team@firm.com%'
-            ORDER BY id DESC LIMIT 1
+            SELECT subject, to_addr, COALESCE(body_text, body_html, '')
+            FROM email.messages
         """)
-        rows = cur.fetchall()
-        if not rows:
-            errors.append("No email found to investment_team@firm.com")
-
-        cur.execute("""
-            SELECT subject FROM email.messages
-            WHERE to_addr::text ILIKE '%trading_desk@firm.com%'
-            ORDER BY id DESC LIMIT 1
-        """)
-        rows = cur.fetchall()
-        if not rows:
-            errors.append("No email found to trading_desk@firm.com")
-
+        all_emails = cur.fetchall()
         cur.close()
         conn.close()
+
+        def find_email(target_to, target_subj):
+            import json as _json
+            for subj, to_addr, body in all_emails:
+                tos = []
+                if isinstance(to_addr, list):
+                    tos = [str(t).lower() for t in to_addr]
+                elif isinstance(to_addr, str):
+                    try:
+                        p = _json.loads(to_addr)
+                        tos = [str(t).lower() for t in p] if isinstance(p, list) else [to_addr.lower()]
+                    except Exception:
+                        tos = [to_addr.lower()]
+                if (target_subj in (subj or "").strip().lower() and
+                        any(target_to in t for t in tos)):
+                    return subj, to_addr, body
+            return None
+
+        e1 = find_email("investment_team@firm.com", "sector rotation analysis update")
+        if not e1:
+            errors.append("No email subject 'Sector Rotation Analysis Update' to investment_team@firm.com")
+        else:
+            body_lower = (e1[2] or "").lower()
+            if not any(k in body_lower for k in ["overweight", "underweight", "bullish", "bearish", "mixed"]):
+                errors.append("investment_team email body lacks portfolio signal/strength keywords")
+
+        e2 = find_email("trading_desk@firm.com", "actionable sector signals")
+        if not e2:
+            errors.append("No email subject 'Actionable Sector Signals' to trading_desk@firm.com")
+        else:
+            body_lower = (e2[2] or "").lower()
+            symbols_in_body = sum(1 for s in SYMBOLS if s.lower() in body_lower)
+            if symbols_in_body < 5:
+                errors.append(f"trading_desk email body mentions only {symbols_in_body}/5 stock symbols")
     except Exception as e:
         errors.append(f"Error checking emails: {e}")
     return errors

@@ -15,7 +15,7 @@ import psycopg2
 
 DB_CONN = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -257,6 +257,29 @@ def inject_scholarly_scholar(conn, papers):
     print(f"Injected {len(papers)} papers into scholarly.scholar_papers")
 
 
+def init_memory_file(agent_workspace):
+    """Ensure memory/memory.json exists as empty structure.
+
+    Memory MCP servers vary in whether they auto-create the file on first
+    write; pre-creating it avoids a false-negative when the agent tries to
+    read-before-write.
+    """
+    if not agent_workspace:
+        return
+    memory_dir = os.path.join(agent_workspace, "memory")
+    try:
+        os.makedirs(memory_dir, exist_ok=True)
+        memory_path = os.path.join(memory_dir, "memory.json")
+        if not os.path.exists(memory_path):
+            with open(memory_path, "w") as f:
+                json.dump({"entities": [], "relations": []}, f)
+            print(f"Initialized empty memory.json at {memory_path}")
+        else:
+            print(f"memory.json already present at {memory_path}; leaving unchanged")
+    except Exception as e:
+        print(f"[WARN] failed to init memory.json: {e}")
+
+
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", type=str, required=False)
@@ -271,6 +294,8 @@ async def main():
         inject_scholarly_scholar(conn, all_papers)
     finally:
         conn.close()
+
+    init_memory_file(args.agent_workspace)
 
     print("\nPreprocessing completed successfully!")
 

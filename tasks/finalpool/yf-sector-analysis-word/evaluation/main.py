@@ -97,6 +97,21 @@ def check_word(agent_workspace):
            "market cap" in full_text,
            "market cap not mentioned")
 
+    # Require per-ticker section ("AMZN - Amazon.com" etc.) for each ticker
+    for ticker in TICKERS:
+        # Per task.md: section heading "[Ticker] - [Company Name]"
+        record(f"Word: per-ticker section for {ticker}",
+               (ticker.lower() + " -") in full_text or (ticker.lower() + " –") in full_text,
+               f"Expected section heading like '{ticker} - <company>'")
+
+    # Require market-cap "B" billion notation appears at least 5 times (e.g. "1234.56B", "$1234.56B")
+    import re as _re
+    mcap_pattern = _re.compile(r"\$?\s*\d{1,6}(?:[.,]\d+)?\s*b\b", _re.IGNORECASE)
+    mcap_matches = mcap_pattern.findall(full_text)
+    record("Word: contains market-cap values in 'B' (billions) format",
+           len(mcap_matches) >= 5,
+           f"Expected >=5 'NN.NNB' matches, got {len(mcap_matches)}: {mcap_matches[:8]}")
+
     return True
 
 
@@ -246,7 +261,7 @@ def main():
     word_ok = check_word(args.agent_workspace)
     excel_ok = check_excel(args.agent_workspace)
 
-    all_passed = word_ok and excel_ok
+    all_passed = word_ok and excel_ok and FAIL_COUNT == 0
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

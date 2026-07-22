@@ -11,7 +11,7 @@ import psycopg2
 
 DB_CONN = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -45,6 +45,25 @@ REASONING_PAPERS = [
     },
 ]
 
+# Noise papers about word embeddings - must NOT be included by agent
+NOISE_PAPERS = [
+    {
+        "id": "1301.3781",
+        "title": "Efficient Estimation of Word Representations in Vector Space",
+        "abstract": "We propose two novel model architectures for computing continuous vector representations of words. We use the skip-gram and CBOW architectures for word2vec, a distributed representation learning system. These word representations capture semantic similarities between words.",
+    },
+    {
+        "id": "1310.4546",
+        "title": "Distributed Representations of Words and Phrases and their Compositionality",
+        "abstract": "The skip-gram model is an efficient method for learning high-quality distributed word representations. We extend the skip-gram approach with several modifications that improve the quality of word embeddings and accelerate training.",
+    },
+    {
+        "id": "1402.3722",
+        "title": "GloVe: Global Vectors for Word Representation",
+        "abstract": "Recent methods for learning word vector representations have succeeded in capturing fine-grained semantic and syntactic regularities. We propose a new global log-bilinear regression model that combines the advantages of global matrix factorization and local context window methods for word representation.",
+    },
+]
+
 
 def clear_gsheet(conn):
     """Clear all Google Sheets data."""
@@ -57,16 +76,16 @@ def clear_gsheet(conn):
 
 
 def inject_arxiv_latex_papers(conn):
-    """Clear and inject reasoning papers into arxiv_latex.papers."""
+    """Clear and inject reasoning + noise (word embedding) papers into arxiv_latex.papers."""
     with conn.cursor() as cur:
         cur.execute("DELETE FROM arxiv_latex.papers")
-        for p in REASONING_PAPERS:
+        for p in REASONING_PAPERS + NOISE_PAPERS:
             cur.execute("""
                 INSERT INTO arxiv_latex.papers (id, title, abstract)
                 VALUES (%s, %s, %s)
             """, (p["id"], p["title"], p["abstract"]))
     conn.commit()
-    print(f"[preprocess] Injected {len(REASONING_PAPERS)} reasoning papers into arxiv_latex.papers")
+    print(f"[preprocess] Injected {len(REASONING_PAPERS)} reasoning + {len(NOISE_PAPERS)} noise papers into arxiv_latex.papers")
 
 
 def main():

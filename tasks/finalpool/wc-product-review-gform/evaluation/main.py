@@ -69,18 +69,28 @@ def check_gform(expected):
 
     cur.execute("SELECT title, question_type, required FROM gform.questions WHERE form_id=%s ORDER BY position", (target_form,))
     questions = cur.fetchall()
-    record("At least 5 questions", len(questions) >= 5, f"Found {len(questions)}")
+    record("Exactly 5 questions", len(questions) == 5, f"Found {len(questions)}")
 
-    # Check that product names appear in questions
-    matched_products = 0
+    # Each question must be required
+    record("All 5 questions are required",
+           all(q[2] is True for q in questions),
+           f"Required flags: {[q[2] for q in questions]}")
+
+    # All 5 product names must appear (one per question)
+    matched = []
     for prod in expected["products"]:
-        prod_name_lower = prod["name"].lower()[:30]
+        prod_name_low = (prod["name"] or "").lower()
+        # Try longest-substring match
         for q_title, q_type, q_req in questions:
-            if prod_name_lower in (q_title or "").lower() or prod["name"][:20].lower() in (q_title or "").lower():
-                matched_products += 1
+            ql = (q_title or "").lower()
+            # Require reasonably unique name substring of >=15 chars (or full if shorter)
+            key = prod_name_low[:25] if len(prod_name_low) > 25 else prod_name_low
+            if key and key in ql:
+                matched.append(prod["name"])
                 break
-    record("Product names in questions", matched_products >= 3,
-           f"Found {matched_products} product names in {len(questions)} questions")
+    record(f"All 5 lowest-rated product names in questions",
+           len(matched) == 5,
+           f"Matched: {matched}")
 
     cur.close()
     conn.close()
@@ -116,20 +126,51 @@ def check_emails(expected):
         if cust["email"].lower() in " ".join(all_to):
             matched_customers += 1
 
-    record("Emails to affected customers",
-           matched_customers >= len(expected["customers"]) * 0.7,
+    record("Emails to 100% of affected customers",
+           matched_customers == len(expected["customers"]),
            f"Matched {matched_customers}/{len(expected['customers'])}")
 
-    # Check subject and body content
-    if emails:
-        subj = emails[0][0] or ""
-        record("Email subject mentions feedback/survey",
-               "feedback" in subj.lower() or "survey" in subj.lower() or "quality" in subj.lower(),
-               f"Subject: {subj}")
+    # Every email must have exact subject + body-with-first-name
+    target_subject = "we value your feedback - product quality survey"
+    subject_matches = 0
+    first_name_matches = 0
 
-        body = emails[0][2] or ""
-        record("Email body has content",
-               len(body) > 20, f"Body length: {len(body)}")
+    # Build customer email -> first_name map
+    cust_map = {c["email"].lower(): c["first_name"] for c in expected["customers"]}
+
+    for subj, to, body in emails:
+        # Parse to_addr
+        to_list = []
+        if isinstance(to, list):
+            to_list = [str(r).lower() for r in to]
+        elif isinstance(to, str):
+            try:
+                p = json.loads(to)
+                if isinstance(p, list):
+                    to_list = [str(r).lower() for r in p]
+                else:
+                    to_list = [to.lower()]
+            except Exception:
+                to_list = [to.lower()]
+
+        if (subj or "").strip().lower() == target_subject:
+            subject_matches += 1
+
+        # If any recipient matches an expected customer, check first_name in body
+        body_low = (body or "").lower()
+        for recip in to_list:
+            fn = cust_map.get(recip)
+            if fn and fn.lower() in body_low:
+                first_name_matches += 1
+                break
+
+    record("All emails have exact subject 'We Value Your Feedback - Product Quality Survey'",
+           subject_matches == len(emails) and subject_matches > 0,
+           f"Subject match: {subject_matches}/{len(emails)}")
+
+    record(f"All emails to affected customers include first_name in body",
+           first_name_matches >= len(expected["customers"]),
+           f"{first_name_matches}/{len(expected['customers'])} had first_name in body")
 
     cur.close()
     conn.close()

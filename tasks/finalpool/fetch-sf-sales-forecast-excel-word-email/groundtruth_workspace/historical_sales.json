@@ -1,0 +1,27 @@
+[
+  {
+    "region": "Asia Pacific",
+    "current_orders": 4198,
+    "current_revenue": 642644.81
+  },
+  {
+    "region": "Europe",
+    "current_orders": 4100,
+    "current_revenue": 648798.47
+  },
+  {
+    "region": "Latin America",
+    "current_orders": 3697,
+    "current_revenue": 549129.15
+  },
+  {
+    "region": "Middle East",
+    "current_orders": 3872,
+    "current_revenue": 602107.55
+  },
+  {
+    "region": "North America",
+    "current_orders": 4133,
+    "current_revenue": 606318.35
+  }
+]

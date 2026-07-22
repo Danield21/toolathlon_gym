@@ -1,0 +1,22 @@
+[
+  {
+    "region": "Asia Pacific",
+    "growth_rate_pct": 8.5
+  },
+  {
+    "region": "Europe",
+    "growth_rate_pct": 3.2
+  },
+  {
+    "region": "Latin America",
+    "growth_rate_pct": 6.8
+  },
+  {
+    "region": "Middle East",
+    "growth_rate_pct": 5.4
+  },
+  {
+    "region": "North America",
+    "growth_rate_pct": 4.1
+  }
+]

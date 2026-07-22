@@ -1,0 +1,8 @@
+{
+  "total_employees": 50000,
+  "total_courses": 22,
+  "avg_overall_performance": 3,
+  "highest_performing_dept": "Engineering",
+  "lowest_performing_dept": "Operations",
+  "most_popular_course": "Applied Analytics & Algorithms (Fall 2013)"
+}

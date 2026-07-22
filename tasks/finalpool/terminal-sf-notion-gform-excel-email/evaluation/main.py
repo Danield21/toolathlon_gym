@@ -123,6 +123,23 @@ def check_excel(agent_workspace, gt_workspace):
         has_medium = any("medium" in p.lower() for p in priorities)
         record("Action_Items has High priority items", has_high)
         record("Action_Items has Medium priority items", has_medium)
+        # Per-department priority validation: Low below avg = High, above = Medium (per task.md)
+        gt_ai = gt_wb["Action_Items"]
+        gt_ai_rows = list(gt_ai.iter_rows(min_row=2, values_only=True))
+        gt_priority = {}
+        for g in gt_ai_rows:
+            if g and g[1]:
+                gt_priority[str(g[1]).strip().lower()] = str(g[0]).strip().lower()
+        for a in rows3:
+            if not a or len(a) < 2 or not a[1]:
+                continue
+            dept_key = str(a[1]).strip().lower()
+            gt_p = gt_priority.get(dept_key)
+            if gt_p is None:
+                continue
+            actual_p = str(a[0]).strip().lower() if a[0] else ""
+            record(f"{a[1]} priority matches groundtruth ({gt_p})",
+                   actual_p == gt_p, f"Got {actual_p}, expected {gt_p}")
 
     wb.close()
     gt_wb.close()
@@ -150,11 +167,20 @@ def check_gform():
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM gform.forms WHERE LOWER(title) LIKE '%employee engagement%'")
+        # Exact-ish match: title contains 'employee engagement survey' but NOT archived/pre-existing/historical
+        cur.execute("""
+            SELECT COUNT(*) FROM gform.forms
+            WHERE LOWER(title) LIKE '%%employee engagement survey%%'
+              AND LOWER(title) NOT LIKE '%%pre-existing%%'
+              AND LOWER(title) NOT LIKE '%%preexisting%%'
+              AND LOWER(title) NOT LIKE '%%archived%%'
+              AND LOWER(title) NOT LIKE '%%historical%%'
+              AND LOWER(title) NOT LIKE '%%legacy%%'
+        """)
         count = cur.fetchone()[0]
         cur.close()
         conn.close()
-        record("Employee Engagement Survey form exists", count >= 1, f"Found {count}")
+        record("Employee Engagement Survey form exists (not pre-existing)", count >= 1, f"Found {count}")
         return count >= 1
     except Exception as e:
         record("GForm check", False, str(e))
@@ -237,6 +263,24 @@ def check_reverse_validation(workspace):
         count = cur.fetchone()[0]
         record("No duplicate Notion HR Dashboard pages", count <= 1,
                f"Found {count} matching pages")
+
+        # Reverse: noise Notion pages preserved
+        noise_titles = ["Unrelated Meeting Notes", "Office Supplies Inventory",
+                        "Travel Policy 2024", "Software License Overview", "Holiday Calendar"]
+        cur.execute("SELECT properties::text FROM notion.pages")
+        all_props = " ".join(r[0] or "" for r in cur.fetchall())
+        preserved = sum(1 for t in noise_titles if t in all_props)
+        record("Reverse: noise Notion pages preserved",
+               preserved >= 4,
+               f"Only {preserved}/5 noise pages remain")
+
+        # Reverse: archived survey form preserved
+        cur.execute("SELECT COUNT(*) FROM gform.forms WHERE title = 'Archived 2023 Workplace Climate Survey'")
+        archived_count = cur.fetchone()[0]
+        record("Reverse: archived survey form preserved",
+               archived_count >= 1,
+               f"Archived form count: {archived_count}")
+
         cur.close()
         conn.close()
     except Exception:

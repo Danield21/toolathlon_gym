@@ -71,19 +71,29 @@ def check_pptx(agent_workspace):
                     all_text += " " + shape.text
         all_text_lower = all_text.lower()
 
-        # Keywords from real 2024+ Fireship AI videos and academic papers
+        # Require at least 5 distinct AI/ML technical terms across slides (not just generic 'ai')
         ai_terms = [
-            "deepseek", "openai", "claude", "grok", "ai", "llm",
+            "deepseek", "openai", "claude", "grok", "llm",
             "transformer", "language model", "machine learning", "neural",
-            "gpt", "bert", "vibe coding"
+            "gpt", "bert", "vibe coding", "generative", "openrouter",
+            "llama", "anthropic", "cuda", "rag",
         ]
         found_terms = [t for t in ai_terms if t in all_text_lower]
-        record("PPT contains >= 3 AI/ML-related terms", len(found_terms) >= 3,
-               f"Found terms: {found_terms}")
+        record("PPT contains >= 5 distinct AI/ML technical terms", len(found_terms) >= 5,
+               f"Found terms ({len(found_terms)}): {found_terms}")
 
-        has_overview = any(kw in all_text_lower for kw in ["overview", "research", "technology", "2024", "2025"])
-        record("PPT contains overview/research/technology content", has_overview,
-               f"Text sample: {all_text[:300]}")
+        # Slide titles/headings should reference each pillar
+        # Slide 2: videos with view counts; slide 3: papers/citations; slide 4: technology landscape; slide 5: insights
+        record("PPT mentions 'video' (slide 2 context)", "video" in all_text_lower,
+               f"Sample: {all_text_lower[:200]}")
+        record("PPT mentions 'paper' (slide 3 context)", "paper" in all_text_lower,
+               "Missing 'paper'")
+        record("PPT mentions 'technology' (slide 4 context)",
+               "technology" in all_text_lower or "technologies" in all_text_lower,
+               "Missing 'technology'")
+        record("PPT mentions 'insight' or 'recommendation' (slide 5)",
+               "insight" in all_text_lower or "recommendation" in all_text_lower,
+               "Missing slide 5 content marker")
 
     except ImportError:
         record("python-pptx available", False, "python-pptx not installed")
@@ -97,21 +107,23 @@ def check_gsheet():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
-    # Find the spreadsheet
+    # Find the spreadsheet — require strict workbook title 'AI_Research_Overview'
     cur.execute("SELECT id, title FROM gsheet.spreadsheets")
     spreadsheets = cur.fetchall()
 
     ai_spreadsheet = None
     for ss_id, title in spreadsheets:
-        if title and any(kw in title.lower() for kw in ["ai", "research", "overview", "fireship"]):
+        if title and title.lower().strip() == "ai_research_overview":
             ai_spreadsheet = (ss_id, title)
             break
+    # Allow case-insensitive match on the canonical name (no fallback to ANY spreadsheet)
+    if not ai_spreadsheet:
+        for ss_id, title in spreadsheets:
+            if title and "ai_research_overview" in title.lower().strip():
+                ai_spreadsheet = (ss_id, title)
+                break
 
-    if not ai_spreadsheet and spreadsheets:
-        # Take any spreadsheet
-        ai_spreadsheet = spreadsheets[0]
-
-    record("GSheet spreadsheet exists", ai_spreadsheet is not None,
+    record("GSheet 'AI_Research_Overview' exists", ai_spreadsheet is not None,
            f"Spreadsheets found: {[s[1] for s in spreadsheets]}")
 
     if not ai_spreadsheet:
@@ -150,8 +162,18 @@ def check_gsheet():
     if has_papers:
         paper_sheet_id = next(sid for sid, t in sheet_titles_lower if "paper" in t)
         paper_rows = count_data_rows(paper_sheet_id)
-        record("Papers sheet has >= 3 data rows", paper_rows >= 3,
+        record("Papers sheet has >= 5 data rows", paper_rows >= 5,
                f"Found {paper_rows} rows")
+        # Verify at least one well-known paper title appears
+        cur.execute("""
+            SELECT value FROM gsheet.cells WHERE sheet_id = %s
+        """, (paper_sheet_id,))
+        cell_values = " ".join((str(r[0]) if r[0] else "") for r in cur.fetchall()).lower()
+        # The injected scholar_papers contain titles such as "Attention Is All You Need", "BERT", "GPT", "deepseek"
+        known_papers = ["attention is all you need", "bert", "gpt", "deepseek", "llama"]
+        found_paper = [p for p in known_papers if p in cell_values]
+        record("Papers sheet references >= 1 well-known AI paper",
+               len(found_paper) >= 1, f"Found: {found_paper}; sample cells: {cell_values[:200]}")
 
     if has_tech_map:
         tech_sheet_id = next(sid for sid, t in sheet_titles_lower if "tech" in t or "map" in t or "technology" in t)
@@ -246,12 +268,25 @@ def check_emails():
     if to_research:
         subj, _, _, body = to_research[0]
         content = ((subj or "") + " " + (body or "")).lower()
-        # Check for real 2024+ AI keywords (DeepSeek, OpenAI, Claude, Grok, AI)
-        has_ai = any(kw in content for kw in [
-            "deepseek", "openai", "claude", "grok", "ai", "technology",
-            "research", "overview", "presentation", "llm"
-        ])
-        record("Research email mentions AI/technology content", has_ai, f"Subject: {subj}")
+        # Subject must reference overview/research; body must mention presentation
+        record("Research email subject mentions overview/research/AI",
+               any(k in (subj or "").lower() for k in ["overview", "research", "ai", "technology"]),
+               f"Subject: {subj}")
+        record("Research email body mentions 'presentation' (deliverable handoff)",
+               "presentation" in content,
+               f"Body sample: {(body or '')[:200]}")
+        # Specific tech terms required
+        tech_count = sum(1 for kw in ["deepseek", "openai", "claude", "llm", "transformer", "machine learning", "language model"] if kw in content)
+        record("Research email body mentions >= 2 specific AI tech terms",
+               tech_count >= 2,
+               f"Found {tech_count} terms in body")
+
+    if to_team:
+        subj_t, _, _, body_t = to_team[0]
+        content_t = ((subj_t or "") + " " + (body_t or "")).lower()
+        record("Team email body mentions 'spreadsheet'",
+               "spreadsheet" in content_t or "sheet" in content_t,
+               f"Subject: {subj_t}; body: {(body_t or '')[:200]}")
 
 
 def main():
@@ -263,7 +298,7 @@ def main():
     args = parser.parse_args()
 
     check_pptx(args.agent_workspace)
-    check_xlsx_content(args.agent_workspace, args.groundtruth_workspace)
+    # Note: AI_Research_Overview_local.xlsx is not required by task.md — skip local xlsx check.
     check_gsheet()
     check_emails()
 
@@ -272,24 +307,23 @@ def main():
         print("\nFAIL: No checks were performed.")
         sys.exit(1)
 
-    accuracy = PASS_COUNT / total * 100
-    print(f"\nOverall: {PASS_COUNT}/{total} checks passed ({accuracy:.1f}%)")
+    print(f"\nOverall: {PASS_COUNT}/{total} checks passed")
 
     result = {
         "total_passed": PASS_COUNT,
         "total_checks": total,
-        "accuracy": accuracy,
+        "failed": FAIL_COUNT,
     }
 
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:
-        print("FAIL")
+        print(f"FAIL ({FAIL_COUNT} failures)")
         sys.exit(1)
 
 

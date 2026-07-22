@@ -91,18 +91,23 @@ def main():
                 if len(a_row) > 1 and len(g_row) > 1:
                     if not str_match(a_row[1], g_row[1]):
                         all_errors.append(f"{key}.Sector: {a_row[1]} vs {g_row[1]}")
-                # Col 2: Latest_Close
+                # Col 2: Latest_Close - tighten from 5.0 to 1.0 (specific date close)
                 if len(a_row) > 2 and len(g_row) > 2:
-                    if not num_close(a_row[2], g_row[2], 5.0):
-                        all_errors.append(f"{key}.Latest_Close: {a_row[2]} vs {g_row[2]} (tol=5.0)")
-                # Col 3: YTD_Return_Pct
+                    if not num_close(a_row[2], g_row[2], 1.0):
+                        all_errors.append(f"{key}.Latest_Close: {a_row[2]} vs {g_row[2]} (tol=1.0)")
+                # Col 3: YTD_Return_Pct - tighten from 3.0 to 0.5 percentage points
                 if len(a_row) > 3 and len(g_row) > 3:
-                    if not num_close(a_row[3], g_row[3], 3.0):
-                        all_errors.append(f"{key}.YTD_Return_Pct: {a_row[3]} vs {g_row[3]} (tol=3.0)")
-                # Col 4: One_Year_Return_Pct
+                    if not num_close(a_row[3], g_row[3], 0.5):
+                        all_errors.append(f"{key}.YTD_Return_Pct: {a_row[3]} vs {g_row[3]} (tol=0.5)")
+                # Col 4: One_Year_Return_Pct - tighten from 3.0 to 0.5
                 if len(a_row) > 4 and len(g_row) > 4:
-                    if not num_close(a_row[4], g_row[4], 3.0):
-                        all_errors.append(f"{key}.One_Year_Return_Pct: {a_row[4]} vs {g_row[4]} (tol=3.0)")
+                    if not num_close(a_row[4], g_row[4], 0.5):
+                        all_errors.append(f"{key}.One_Year_Return_Pct: {a_row[4]} vs {g_row[4]} (tol=0.5)")
+
+            # Verify alphabetical sort by Symbol
+            symbols_in_order = [str(r[0]).strip().upper() for r in a_data if r and r[0]]
+            if symbols_in_order != sorted(symbols_in_order):
+                all_errors.append(f"Stock Performance not sorted alphabetically by Symbol. Got {symbols_in_order}")
             if not all_errors:
                 print("    PASS")
 
@@ -135,10 +140,19 @@ def main():
                 if len(a_row) > 1 and len(g_row) > 1:
                     if not num_close(a_row[1], g_row[1], 0):
                         all_errors.append(f"{key}.Num_Stocks: {a_row[1]} vs {g_row[1]}")
-                # Col 2: Avg_YTD_Return_Pct
+                # Col 2: Avg_YTD_Return_Pct - tighten 3.0 to 0.5
                 if len(a_row) > 2 and len(g_row) > 2:
-                    if not num_close(a_row[2], g_row[2], 3.0):
-                        all_errors.append(f"{key}.Avg_YTD_Return: {a_row[2]} vs {g_row[2]} (tol=3.0)")
+                    if not num_close(a_row[2], g_row[2], 0.5):
+                        all_errors.append(f"{key}.Avg_YTD_Return: {a_row[2]} vs {g_row[2]} (tol=0.5)")
+                # Col 3: Avg_One_Year_Return_Pct (was missing!)
+                if len(a_row) > 3 and len(g_row) > 3:
+                    if not num_close(a_row[3], g_row[3], 0.5):
+                        all_errors.append(f"{key}.Avg_One_Year_Return: {a_row[3]} vs {g_row[3]} (tol=0.5)")
+
+            # Verify alphabetical sort by Sector
+            sectors_in_order = [str(r[0]).strip() for r in a_data if r and r[0]]
+            if sectors_in_order != sorted(sectors_in_order, key=lambda s: s.lower()):
+                all_errors.append(f"Sector Summary not sorted alphabetically. Got {sectors_in_order}")
             new_errors = len(all_errors) - prev_errors
             if new_errors == 0:
                 print("    PASS")
@@ -154,15 +168,49 @@ def main():
         if len(slides) < 4:
             all_errors.append(f"PPT has {len(slides)} slides, expected at least 4")
         else:
-            # Check title slide
-            title_text = ""
+            # Check title slide title + subtitle
+            slide1_text = ""
             for shape in slides[0].shapes:
                 if shape.has_text_frame:
-                    title_text += shape.text_frame.text.lower() + " "
-            if "sector" not in title_text:
-                all_errors.append(f"Title slide missing 'sector'. Found: {title_text[:100]}")
+                    slide1_text += shape.text_frame.text + "\n"
+            sl1_lower = slide1_text.lower()
+            if "sector performance analysis" not in sl1_lower:
+                all_errors.append(f"Slide 1 title missing 'Sector Performance Analysis'. Found: {slide1_text[:200]}")
+            if "market report" not in sl1_lower or "2026-03-06" not in sl1_lower:
+                all_errors.append(f"Slide 1 subtitle missing 'Market Report - 2026-03-06'. Found: {slide1_text[:200]}")
 
-            # Check all PPT text for key content
+            # Slide 2: Individual Stock Performance
+            slide2_text = ""
+            for shape in slides[1].shapes:
+                if shape.has_text_frame:
+                    slide2_text += shape.text_frame.text + "\n"
+            sl2_lower = slide2_text.lower()
+            if "individual stock performance" not in sl2_lower:
+                all_errors.append(f"Slide 2 title not 'Individual Stock Performance'. Found: {slide2_text[:200]}")
+
+            # Slide 3: Sector Comparison
+            slide3_text = ""
+            for shape in slides[2].shapes:
+                if shape.has_text_frame:
+                    slide3_text += shape.text_frame.text + "\n"
+            sl3_lower = slide3_text.lower()
+            if "sector comparison" not in sl3_lower:
+                all_errors.append(f"Slide 3 title not 'Sector Comparison'. Found: {slide3_text[:200]}")
+
+            # Slide 4: Key Findings
+            slide4_text = ""
+            for shape in slides[3].shapes:
+                if shape.has_text_frame:
+                    slide4_text += shape.text_frame.text + "\n"
+            sl4_lower = slide4_text.lower()
+            if "key findings" not in sl4_lower:
+                all_errors.append(f"Slide 4 title not 'Key Findings'. Found: {slide4_text[:200]}")
+            # Key Findings should mention best/worst sector and stock
+            if not (("best" in sl4_lower and "worst" in sl4_lower)
+                    or ("highest" in sl4_lower and "lowest" in sl4_lower)):
+                all_errors.append(f"Slide 4 'Key Findings' must identify best AND worst. Found: {slide4_text[:300]}")
+
+            # All PPT text contains all tickers
             all_ppt_text = ""
             for slide in slides:
                 for shape in slide.shapes:
@@ -173,29 +221,52 @@ def main():
                 if ticker.lower() not in all_ppt_text:
                     all_errors.append(f"PPT missing ticker: {ticker}")
 
-            if "key findings" not in all_ppt_text and "key" not in all_ppt_text:
-                if "summary" not in all_ppt_text and "conclusion" not in all_ppt_text:
-                    all_errors.append("PPT missing Key Findings slide")
+        if all_errors:
+            print(f"    FAIL: {[e for e in all_errors if 'PPT' in e or 'lide' in e or 'ticker' in e][:3]}")
 
-        if not any("ppt" in e.lower() or "slide" in e.lower() or "ticker" in e.lower() for e in all_errors[prev_errors:] if "ppt" in e.lower() or "slide" in e.lower()):
-            ppt_errors = [e for e in all_errors if "ppt" in e.lower() or "slide" in e.lower() or "ticker" in e.lower()]
-            if not ppt_errors:
-                print("    PASS")
-
-    # ---- Non-blocking Email check ----
-    print("  Non-blocking: Email DB check...")
+    # ---- Email check (BLOCKING) ----
+    print("  Checking Email...")
     try:
         import psycopg2
         conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM email.sent_log")
-        count = cur.fetchone()[0]
-        print(f"    [INFO] Found {count} sent email(s) (non-blocking)")
+        cur.execute("""
+            SELECT subject, from_addr, to_addr, body_text FROM email.messages
+            WHERE to_addr::text ILIKE '%%investments@company.com%%'
+        """)
+        emails = cur.fetchall()
         cur.close()
         conn.close()
+
+        if not emails:
+            all_errors.append("No email sent to investments@company.com")
+        else:
+            ok_subj = False
+            ok_body = False
+            for subject, from_addr, to_addr, body in emails:
+                sl = (subject or "").strip().lower()
+                bl = (body or "").lower()
+                # Subject: exact 'Sector Analysis Report - 2026-03-06'
+                if sl == "sector analysis report - 2026-03-06":
+                    ok_subj = True
+                # Body must mention best/worst sector + best/worst stock
+                if (("best" in bl or "highest" in bl)
+                        and ("worst" in bl or "lowest" in bl)
+                        and any(t.lower() in bl for t in TICKERS)):
+                    ok_body = True
+            if not ok_subj:
+                all_errors.append(
+                    f"No email subject 'Sector Analysis Report - 2026-03-06'. "
+                    f"Subjects: {[e[0] for e in emails]}"
+                )
+            if not ok_body:
+                all_errors.append(
+                    f"No email body mentions best/worst sector and best/worst stock. "
+                    f"Bodies (first 200): {[(e[3] or '')[:200] for e in emails][:1]}"
+                )
     except Exception as e:
-        print(f"    [INFO] Email check skipped: {e} (non-blocking)")
+        all_errors.append(f"Email check error: {e}")
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

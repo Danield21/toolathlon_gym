@@ -75,6 +75,10 @@ def main():
         for row in a_data:
             if row and row[0] is not None:
                 a_lookup[str(row[0]).strip().lower()] = row
+        # Validate sort order: should be alphabetical by Department
+        a_dept_order = [str(r[0]).strip().lower() for r in a_data if r and r[0] is not None]
+        if a_dept_order != sorted(a_dept_order):
+            all_errors.append(f"Department Summary not sorted alphabetically: {a_dept_order}")
         for g_row in g_data:
             if not g_row or g_row[0] is None:
                 continue
@@ -83,22 +87,26 @@ def main():
             if a_row is None:
                 all_errors.append(f"Missing department: {g_row[0]}")
                 continue
-            # Col 1: Employees count
+            # Col 1: Employees count - must be exact (deterministic data)
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 50):
-                    all_errors.append(f"{key}.Employees: {a_row[1]} vs {g_row[1]} (tol=50)")
-            # Col 2: Avg_Salary
+                if not num_close(a_row[1], g_row[1], 1):
+                    all_errors.append(f"{key}.Employees: {a_row[1]} vs {g_row[1]} (tol=1)")
+            # Col 2: Avg_Salary - tighter tolerance (rounded to 2 decimals)
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 500):
-                    all_errors.append(f"{key}.Avg_Salary: {a_row[2]} vs {g_row[2]} (tol=500)")
-            # Col 3: Min_Salary
+                if not num_close(a_row[2], g_row[2], 1.0):
+                    all_errors.append(f"{key}.Avg_Salary: {a_row[2]} vs {g_row[2]} (tol=1.0)")
+            # Col 3: Min_Salary - exact match
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 2000):
-                    all_errors.append(f"{key}.Min_Salary: {a_row[3]} vs {g_row[3]} (tol=2000)")
-            # Col 4: Max_Salary
+                if not num_close(a_row[3], g_row[3], 1):
+                    all_errors.append(f"{key}.Min_Salary: {a_row[3]} vs {g_row[3]} (tol=1)")
+            # Col 4: Max_Salary - exact match
             if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 50000):
-                    all_errors.append(f"{key}.Max_Salary: {a_row[4]} vs {g_row[4]} (tol=50000)")
+                if not num_close(a_row[4], g_row[4], 1):
+                    all_errors.append(f"{key}.Max_Salary: {a_row[4]} vs {g_row[4]} (tol=1)")
+            # Col 5: Median_Salary - tight tolerance (rounded)
+            if len(a_row) > 5 and len(g_row) > 5:
+                if not num_close(a_row[5], g_row[5], 1.0):
+                    all_errors.append(f"{key}.Median_Salary: {a_row[5]} vs {g_row[5]} (tol=1.0)")
         if not all_errors:
             print("    PASS")
 
@@ -128,20 +136,28 @@ def main():
             if a_row is None:
                 all_errors.append(f"Missing edu row: {g_row[0]} / {g_row[1]}")
                 continue
-            # Col 2: Count
+            # Col 2: Count - exact (deterministic)
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 50):
-                    all_errors.append(f"{key}.Count: {a_row[2]} vs {g_row[2]} (tol=50)")
-            # Col 3: Avg_Salary
+                if not num_close(a_row[2], g_row[2], 1):
+                    all_errors.append(f"{key}.Count: {a_row[2]} vs {g_row[2]} (tol=1)")
+            # Col 3: Avg_Salary - tight (rounded to 2 decimals)
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 1000):
-                    all_errors.append(f"{key}.Avg_Salary: {a_row[3]} vs {g_row[3]} (tol=1000)")
+                if not num_close(a_row[3], g_row[3], 1.0):
+                    all_errors.append(f"{key}.Avg_Salary: {a_row[3]} vs {g_row[3]} (tol=1.0)")
+            # Col 4: Min_Salary
+            if len(a_row) > 4 and len(g_row) > 4:
+                if not num_close(a_row[4], g_row[4], 1):
+                    all_errors.append(f"{key}.Min_Salary: {a_row[4]} vs {g_row[4]} (tol=1)")
+            # Col 5: Max_Salary
+            if len(a_row) > 5 and len(g_row) > 5:
+                if not num_close(a_row[5], g_row[5], 1):
+                    all_errors.append(f"{key}.Max_Salary: {a_row[5]} vs {g_row[5]} (tol=1)")
 
         new_errors = len(all_errors) - prev_errors
         if new_errors == 0:
             print("    PASS")
 
-    # ---- Check PDF exists (blocking but lenient) ----
+    # ---- Check PDF exists (blocking with content checks) ----
     print("  Checking PDF...")
     pdf_path = os.path.join(args.agent_workspace, "Compensation_Report.pdf")
     if not os.path.exists(pdf_path):
@@ -151,22 +167,72 @@ def main():
         if file_size < 500:
             all_errors.append(f"Compensation_Report.pdf too small ({file_size} bytes)")
         else:
-            print("    PASS")
+            # Content checks
+            try:
+                pdf_text = ""
+                try:
+                    import pdfplumber
+                    with pdfplumber.open(pdf_path) as pdf:
+                        for page in pdf.pages:
+                            pdf_text += (page.extract_text() or "") + "\n"
+                except ImportError:
+                    try:
+                        from pypdf import PdfReader
+                        reader = PdfReader(pdf_path)
+                        for page in reader.pages:
+                            pdf_text += (page.extract_text() or "") + "\n"
+                    except ImportError:
+                        from PyPDF2 import PdfReader
+                        reader = PdfReader(pdf_path)
+                        for page in reader.pages:
+                            pdf_text += (page.extract_text() or "") + "\n"
+                pdf_lower = pdf_text.lower()
+                # Title check
+                if "compensation analysis report" not in pdf_lower:
+                    all_errors.append("PDF missing 'Compensation Analysis Report' title")
+                if "hr analytics" not in pdf_lower:
+                    all_errors.append("PDF missing 'HR Analytics' subtitle")
+                if "2026-03-06" not in pdf_lower and "march 6, 2026" not in pdf_lower and "march 06, 2026" not in pdf_lower:
+                    all_errors.append("PDF missing date 2026-03-06")
+                # Validate at least 3 of 7 dept names appear in PDF
+                dept_count = sum(1 for d in ["engineering", "finance", "hr", "operations", "r&d", "sales", "support"]
+                                 if d in pdf_lower)
+                if dept_count < 5:
+                    all_errors.append(f"PDF missing department names (found {dept_count}/7)")
+                if not all_errors or all([e for e in all_errors if "PDF" not in e]):
+                    print("    PASS")
+            except Exception as e:
+                print(f"    [WARN] PDF content extraction error: {e}")
 
-    # ---- Non-blocking Notion check ----
-    print("  Non-blocking: Notion DB check...")
+    # ---- Notion check (BLOCKING) ----
+    print("  Checking Notion page (blocking)...")
     try:
         import psycopg2
         conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM notion.pages")
+        # Look for page with title 'Compensation Analysis 2026'
+        cur.execute("""
+            SELECT COUNT(*) FROM notion.pages
+            WHERE LOWER(properties::text) LIKE '%%compensation analysis 2026%%'
+               OR LOWER(properties::text) LIKE '%%compensation%%2026%%'
+        """)
         count = cur.fetchone()[0]
-        print(f"    [INFO] Found {count} Notion page(s) (non-blocking)")
+        if count == 0:
+            # fallback: look in blocks block_data for the title
+            cur.execute("""
+                SELECT COUNT(*) FROM notion.blocks
+                WHERE LOWER(block_data::text) LIKE '%%compensation analysis 2026%%'
+            """)
+            count = cur.fetchone()[0]
+        if count == 0:
+            all_errors.append("Notion page 'Compensation Analysis 2026' not found")
+        else:
+            print(f"    PASS (found {count} matching Notion entries)")
         cur.close()
         conn.close()
     except Exception as e:
-        print(f"    [INFO] Notion check skipped: {e} (non-blocking)")
+        all_errors.append(f"Notion check failed: {e}")
 
     if all_errors:
         print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")

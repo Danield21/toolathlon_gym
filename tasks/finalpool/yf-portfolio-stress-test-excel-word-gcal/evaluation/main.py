@@ -68,6 +68,9 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 # Monthly_Volatility_Pct (col 5)
                 if not num_close(a_row[5], gt_row[5], 0.5):
                     errors.append(f"{sym} Monthly_Volatility_Pct: {a_row[5]} vs expected {gt_row[5]}")
+                # Worst_Monthly_Return_Pct (col 6)
+                if not num_close(a_row[6], gt_row[6], 0.5):
+                    errors.append(f"{sym} Worst_Monthly_Return_Pct: {a_row[6]} vs expected {gt_row[6]}")
                 # Sharpe_Ratio (col 7)
                 if not num_close(a_row[7], gt_row[7], 0.1):
                     errors.append(f"{sym} Sharpe_Ratio: {a_row[7]} vs expected {gt_row[7]}")
@@ -106,6 +109,30 @@ def check_excel(agent_workspace, groundtruth_workspace):
                         errors.append(f"{sc_name} total value: {a_val} vs expected {gt_val}")
                     if not num_close(a_pnl, gt_pnl, 5.0):
                         errors.append(f"{sc_name} total PnL: {a_pnl} vs expected {gt_pnl}")
+
+            # NEW: per-stock Scenario_PnL checks for every (Scenario, Stock) combination
+            gt_pnl_lookup = {}
+            for r in gt_data2:
+                if r[0] and r[1] and str(r[1]).strip() != "Portfolio_Total":
+                    gt_pnl_lookup[(str(r[0]).strip(), str(r[1]).strip().upper())] = (r[3], r[4], r[5])
+
+            agent_pnl_lookup = {}
+            for r in agent_data2:
+                if r[0] and r[1] and str(r[1]).strip() != "Portfolio_Total":
+                    agent_pnl_lookup[(str(r[0]).strip(), str(r[1]).strip().upper())] = (r[3], r[4], r[5])
+
+            for (sc_name, sym), (gt_ret, gt_val, gt_pnl) in gt_pnl_lookup.items():
+                if (sc_name, sym) not in agent_pnl_lookup:
+                    errors.append(f"Stress Scenarios: row missing for {sc_name} / {sym}")
+                    continue
+                a_ret, a_val, a_pnl = agent_pnl_lookup[(sc_name, sym)]
+                # tolerance: 1% of magnitude or 50 abs, whichever larger
+                tol_pnl = max(50.0, abs(float(gt_pnl) if gt_pnl is not None else 0) * 0.01)
+                tol_val = max(50.0, abs(float(gt_val) if gt_val is not None else 0) * 0.01)
+                if a_pnl is not None and not num_close(a_pnl, gt_pnl, tol_pnl):
+                    errors.append(f"{sc_name}/{sym} Scenario_PnL: {a_pnl} vs expected {gt_pnl}")
+                if a_val is not None and not num_close(a_val, gt_val, tol_val):
+                    errors.append(f"{sc_name}/{sym} Scenario_Value: {a_val} vs expected {gt_val}")
 
         # --- Sheet: Risk Summary ---
         agent_rows3 = load_sheet_rows(wb_agent, "Risk Summary")
@@ -173,6 +200,24 @@ def check_word(agent_workspace):
             errors.append("Word doc missing VaR discussion")
         if "drawdown" not in full_text:
             errors.append("Word doc missing drawdown discussion")
+
+        # NEW: ensure document cites at least one substantial numeric figure
+        # (drawdown %, VaR amount, scenario loss). Look for >=2 percent values
+        # and at least one large dollar amount.
+        import re
+        pct_matches = re.findall(r"-?\d+(?:\.\d+)?\s*%", full_text)
+        # also look for explicit pct words
+        pct_matches += re.findall(r"-?\d+(?:\.\d+)?\s*percent", full_text)
+        if len(pct_matches) < 2:
+            errors.append(
+                f"Word doc has too few percent figures ({len(pct_matches)} < 2)"
+            )
+
+        dollar_matches = re.findall(r"\$\s*\d{1,3}(?:[,]\d{3})+(?:\.\d+)?", full_text)
+        # also accept plain large numbers (e.g. 260000)
+        big_num_matches = re.findall(r"\b\d{5,}\b", full_text)
+        if len(dollar_matches) + len(big_num_matches) < 1:
+            errors.append("Word doc cites no large dollar amount")
 
     except Exception as e:
         errors.append(f"Error reading Word doc: {e}")

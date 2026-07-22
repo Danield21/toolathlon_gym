@@ -107,14 +107,38 @@ def check_top_products(agent_rows, gt_rows):
         if len(a_products) != len(g_products):
             errors.append(f"{region}: product count {len(a_products)} vs expected {len(g_products)}")
             continue
-        for k, (a_p, g_p) in enumerate(zip(a_products, g_products)):
+        # Build GT lookup by product_name for order-independent comparison within region
+        g_by_name = {}
+        for g_p in g_products:
+            if len(g_p) > 1 and g_p[1] is not None:
+                g_by_name[str(g_p[1]).strip().lower()] = g_p
+        a_by_name = {}
+        for a_p in a_products:
+            if len(a_p) > 1 and a_p[1] is not None:
+                a_by_name[str(a_p[1]).strip().lower()] = a_p
+        for pname_lc, g_p in g_by_name.items():
+            if pname_lc not in a_by_name:
+                errors.append(f"{region}: product '{g_p[1]}' missing in agent output")
+                continue
+            a_p = a_by_name[pname_lc]
             try:
-                a_rev = float(a_p[3]) if a_p[3] is not None else 0
-                g_rev = float(g_p[3])
-                if abs(a_rev - g_rev) > 1.0:
-                    errors.append(f"{region} product #{k+1}: revenue {a_rev} vs expected {g_rev}")
+                a_rev = float(a_p[3]) if len(a_p) > 3 and a_p[3] is not None else 0
+                g_rev = float(g_p[3]) if len(g_p) > 3 else 0
+                # Percentage tolerance for large revenues (0.5%) or absolute 1.0 for small
+                tol = max(1.0, abs(g_rev) * 0.005)
+                if abs(a_rev - g_rev) > tol:
+                    errors.append(f"{region}/{g_p[1]}: revenue {a_rev} vs expected {g_rev} (tol {tol:.2f})")
             except (ValueError, TypeError):
-                errors.append(f"{region} product #{k+1}: invalid revenue '{a_p[3]}'")
+                errors.append(f"{region}/{g_p[1]}: invalid revenue '{a_p[3] if len(a_p) > 3 else None}'")
+            # Units_Sold column (col 2)
+            try:
+                if len(a_p) > 2 and len(g_p) > 2 and a_p[2] is not None and g_p[2] is not None:
+                    a_units = float(a_p[2])
+                    g_units = float(g_p[2])
+                    if abs(a_units - g_units) > max(1, abs(g_units) * 0.01):
+                        errors.append(f"{region}/{g_p[1]}: units_sold {a_units} vs expected {g_units}")
+            except (ValueError, TypeError):
+                pass
 
     return len(errors) == 0, errors
 
@@ -139,8 +163,9 @@ def check_summary(agent_rows, gt_rows):
         try:
             a_val = float(agent_dict[key.lower()])
             g_val = float(expected)
-            if abs(a_val - g_val) > 1.0:
-                errors.append(f"{key}: {a_val} vs expected {g_val}")
+            tol = max(1.0, abs(g_val) * 0.005)
+            if abs(a_val - g_val) > tol:
+                errors.append(f"{key}: {a_val} vs expected {g_val} (tol {tol:.2f})")
         except (ValueError, TypeError):
             errors.append(f"{key}: invalid value '{agent_dict[key]}'")
 

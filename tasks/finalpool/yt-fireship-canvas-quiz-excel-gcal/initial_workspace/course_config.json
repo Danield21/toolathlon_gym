@@ -4,8 +4,7 @@
   "points_possible": 50,
   "time_limit_minutes": 30,
   "questions_per_video": 2,
-  "total_questions": 10,
-  "videos_to_use": 5,
+  "max_videos_to_use": 5,
   "excel_file": "TypeScript_Course_Tracker.xlsx",
   "sheets": [
     "Videos",

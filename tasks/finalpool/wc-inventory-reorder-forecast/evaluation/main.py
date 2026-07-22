@@ -30,14 +30,24 @@ def check_excel(agent_workspace, gt_data):
         else:
             data_rows = [r for r in rows[1:] if r and r[0] is not None]
             expected = gt_data["total_products"]
-            if abs(len(data_rows) - expected) > 5:
-                errors.append(f"Stock Analysis has {len(data_rows)} rows, expected ~{expected}")
+            # Tighter: off by at most 1
+            if abs(len(data_rows) - expected) > 1:
+                errors.append(f"Stock Analysis has {len(data_rows)} rows, expected {expected} (+/-1)")
 
             # Check some products marked as needing reorder
             reorder_yes = [r for r in data_rows if r and len(r) > 7 and str(r[7]).strip().lower() == "yes"]
             expected_reorder = gt_data["reorder_count"]
-            if abs(len(reorder_yes) - expected_reorder) > 3:
-                errors.append(f"Products marked Needs_Reorder=Yes: {len(reorder_yes)}, expected ~{expected_reorder}")
+            # Exact count
+            if len(reorder_yes) != expected_reorder:
+                errors.append(f"Products marked Needs_Reorder=Yes: {len(reorder_yes)}, expected {expected_reorder}")
+
+            # Verify reorder products list matches expected (by product name substring)
+            expected_names = {re["product_name"][:40].strip().lower()
+                              for re in gt_data.get("reorder_events", [])}
+            actual_reorder_names = {str(r[1])[:40].strip().lower() for r in reorder_yes}
+            missing = expected_names - actual_reorder_names
+            if len(missing) > 2:
+                errors.append(f"Missing reorder products: {list(missing)[:3]}")
 
         # Check Reorder Schedule sheet
         rows2 = load_sheet_rows(wb, "Reorder Schedule")
@@ -45,8 +55,9 @@ def check_excel(agent_workspace, gt_data):
             errors.append("Sheet 'Reorder Schedule' not found")
         else:
             data_rows2 = [r for r in rows2[1:] if r and r[0] is not None]
-            if abs(len(data_rows2) - gt_data["reorder_count"]) > 3:
-                errors.append(f"Reorder Schedule has {len(data_rows2)} rows, expected ~{gt_data['reorder_count']}")
+            # Exact count
+            if len(data_rows2) != gt_data["reorder_count"]:
+                errors.append(f"Reorder Schedule has {len(data_rows2)} rows, expected {gt_data['reorder_count']}")
 
     except Exception as e:
         errors.append(f"Error reading Excel: {e}")

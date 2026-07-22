@@ -15,17 +15,23 @@ FAIL_COUNT = 0
 # The 6 NLP papers from scholarly.scholar_papers (IDs 169-174)
 EXPECTED_NLP_PAPERS = [
     {"id": 169, "title": "Attention Is All You Need",
-     "year": 2017, "venue": "NeurIPS 2017", "citations": 120000},
+     "year": 2017, "venue": "NeurIPS 2017", "citations": 120000,
+     "authors": ["Vaswani", "Shazeer", "Parmar"]},
     {"id": 170, "title": "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
-     "year": 2019, "venue": "NAACL 2019", "citations": 95000},
+     "year": 2019, "venue": "NAACL 2019", "citations": 95000,
+     "authors": ["Devlin", "Chang", "Lee"]},
     {"id": 171, "title": "RoBERTa: A Robustly Optimized BERT Pretraining Approach",
-     "year": 2019, "venue": "arXiv preprint", "citations": 18000},
+     "year": 2019, "venue": "arXiv preprint", "citations": 18000,
+     "authors": ["Liu", "Ott", "Goyal"]},
     {"id": 172, "title": "Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer",
-     "year": 2020, "venue": "JMLR 2020", "citations": 22000},
+     "year": 2020, "venue": "JMLR 2020", "citations": 22000,
+     "authors": ["Raffel", "Shazeer", "Roberts"]},
     {"id": 173, "title": "GPT-4 Technical Report",
-     "year": 2023, "venue": "arXiv preprint", "citations": 8000},
+     "year": 2023, "venue": "arXiv preprint", "citations": 8000,
+     "authors": ["OpenAI"]},
     {"id": 174, "title": "Training language models to follow instructions with human feedback",
-     "year": 2022, "venue": "NeurIPS 2022", "citations": 12000},
+     "year": 2022, "venue": "NeurIPS 2022", "citations": 12000,
+     "authors": ["Ouyang", "Wu", "Jiang"]},
 ]
 
 # Short keywords to detect each paper in text
@@ -43,7 +49,9 @@ PAPER_KEYWORD_ALTS = [
     ["gpt-4", "gpt4"],
     ["attention is all you need"],
     ["roberta"],
-    ["text-to-text", "t5", "transfer learning"],
+    # Dropped 'transfer learning' (too broad: matches any paper discussing
+    # transfer learning, not specifically the T5 paper).
+    ["text-to-text", "t5"],
     ["instructgpt", "follow instructions", "human feedback"],
 ]
 
@@ -197,6 +205,35 @@ def check_excel(agent_workspace):
                         ok = num_close(actual, paper["citations"], tol=5000)
                         record(f"Citations for {paper['title'][:40]}...", ok,
                                f"Got {actual}, expected {paper['citations']}")
+                        break
+
+    # Check Authors and Venue columns for a few representative rows
+    authors_col = find_col(header, ["Authors", "authors", "Author"])
+    if authors_col is not None and title_col is not None:
+        for row in data_rows:
+            if title_col < len(row) and row[title_col]:
+                t = str(row[title_col]).strip().lower()
+                for paper in EXPECTED_NLP_PAPERS:
+                    if paper["title"].lower() in t or t in paper["title"].lower():
+                        actual = str(row[authors_col]).lower() if authors_col < len(row) and row[authors_col] is not None else ""
+                        # Require at least one last-name match
+                        matched = any(a.lower() in actual for a in paper["authors"])
+                        record(f"Authors for {paper['title'][:35]}...", matched,
+                               f"Got '{actual[:100]}', expected surnames {paper['authors']}")
+                        break
+
+    if venue_col is not None and title_col is not None:
+        for row in data_rows:
+            if title_col < len(row) and row[title_col]:
+                t = str(row[title_col]).strip().lower()
+                for paper in EXPECTED_NLP_PAPERS:
+                    if paper["title"].lower() in t or t in paper["title"].lower():
+                        actual = str(row[venue_col]).lower() if venue_col < len(row) and row[venue_col] is not None else ""
+                        # Accept either exact venue or normalized (strip year)
+                        expected_venue_core = paper["venue"].lower().split()[0]
+                        matched = expected_venue_core in actual
+                        record(f"Venue for {paper['title'][:35]}...", matched,
+                               f"Got '{actual}', expected contains '{expected_venue_core}'")
                         break
 
     # Check Summary sheet

@@ -1,0 +1,11 @@
+{
+  "total_courses": 22,
+  "papers_reviewed": 5,
+  "high_relevance_papers": 2,
+  "curriculum_coverage_pct": 65.0,
+  "top_gap_area": "Machine Learning",
+  "gaps": [
+    {"area": "Machine Learning", "level": "High"},
+    {"area": "Data Analytics", "level": "Medium"}
+  ]
+}

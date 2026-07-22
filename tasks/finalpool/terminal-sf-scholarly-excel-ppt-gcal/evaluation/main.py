@@ -305,11 +305,26 @@ def check_reverse_validation(workspace):
                 ws = wb[wb.sheetnames[ri_idx]]
                 rows = list(ws.iter_rows(min_row=2, values_only=True))
                 all_text = " ".join(str(c) for r in rows for c in r if c).lower()
-                noise_topics = ["healthcare", "medical", "clinical trial", "genomic"]
+                # Expanded noise topics: healthcare, ML theory
+                noise_topics = ["healthcare", "medical", "clinical trial", "genomic",
+                                "federated learning", "convergence analysis",
+                                "non-iid", "fedavg", "fedprox", "oncology",
+                                "cardiology", "neurology", "patient recruitment"]
                 for topic in noise_topics:
                     check(f"Research_Insights does not contain noise topic '{topic}'",
                           topic not in all_text,
                           f"Found '{topic}' in Research_Insights")
+
+        # Reverse: noise papers preserved in scholarly DB
+        cur.execute("""
+            SELECT COUNT(*) FROM scholarly.scholar_papers
+            WHERE lower(title) LIKE '%%clinical trial%%'
+               OR lower(title) LIKE '%%federated learning%%'
+        """)
+        noise_paper_count = cur.fetchone()[0]
+        check("Reverse: noise scholarly papers preserved",
+              noise_paper_count >= 2,
+              f"Only {noise_paper_count}/2 noise papers remain")
     except Exception as e:
         check("Reverse validation", False, str(e))
     finally:
@@ -411,7 +426,8 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    # Tightened: require ALL checks to pass (previously >= 70%).
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

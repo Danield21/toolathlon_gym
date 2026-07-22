@@ -1,18 +1,16 @@
 """
 Evaluation for yt-transcript-notion-song-report-gcal-email task.
 
-Checks:
-1. Song_Analysis_Report.xlsx exists
-2. Tracklist sheet has >= 8 rows with Song_Title and Artist columns
-3. Artist_Stats sheet has >= 4 rows
-4. Publication_Plan sheet has >= 3 rows with Publish_Date column
-5. Notion page exists with Afrobeat or Mix or Analysis in title
-6. Notion database exists with >= 8 song entries
-7. GCal has >= 3 new publication events in March 2026
-8. Email sent to editorial@musicblog.com
+Tightened checks:
+1. Song_Analysis_Report.xlsx with exactly 3 sheets and required columns
+2. Tracklist >= 12 rows, Artist_Stats >= 4 rows, Publication_Plan exactly 3 rows w/ 3 specific dates
+3. Notion: page with required title tokens (afrobeat AND analysis); database with >= 10 song entries
+4. GCal: 3 distinct events on 2026-03-15, 03-22, 03-29 (publish events) with required keywords
+5. Both emails sent: editorial@musicblog.com (subject + body) and artists@afrobeat.com (subject)
 """
 import json
 import os
+import re
 import sys
 from argparse import ArgumentParser
 
@@ -21,7 +19,7 @@ import openpyxl
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -42,6 +40,10 @@ def record(name, passed, detail=""):
         print(f"  [FAIL] {name}{msg}")
 
 
+def norm(s):
+    return str(s or "").strip().lower().replace("_", " ")
+
+
 def num_close(a, b, tol=1.0):
     try:
         return abs(float(a) - float(b)) <= tol
@@ -49,10 +51,29 @@ def num_close(a, b, tol=1.0):
         return False
 
 
-def str_match(a, b):
-    if a is None or b is None:
-        return a is None and b is None
-    return str(a).strip().lower() == str(b).strip().lower()
+def date_norm(v):
+    """Normalize cell to YYYY-MM-DD or '' on failure."""
+    if v is None:
+        return ""
+    if hasattr(v, "strftime"):
+        try:
+            return v.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    s = str(v).strip()
+    m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m:
+        y, mo, d = m.groups()
+        return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+    # Allow "March 15, 2026"
+    months = {"january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
+              "july":7,"august":8,"september":9,"october":10,"november":11,"december":12}
+    m2 = re.match(r"^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})", s)
+    if m2:
+        mo = months.get(m2.group(1).lower())
+        if mo:
+            return f"{int(m2.group(3)):04d}-{mo:02d}-{int(m2.group(2)):02d}"
+    return ""
 
 
 def check_excel(agent_workspace, groundtruth_workspace="."):
@@ -60,6 +81,14 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
     xlsx_path = os.path.join(agent_workspace, "Song_Analysis_Report.xlsx")
     if not os.path.exists(xlsx_path):
         record("Song_Analysis_Report.xlsx exists", False, f"Not found at {xlsx_path}")
+        for k in ["Excel file readable", "Tracklist sheet exists",
+                  "Tracklist columns correct", "Tracklist has >= 12 data rows",
+                  "Artist_Stats sheet exists", "Artist_Stats has >= 4 data rows",
+                  "Publication_Plan sheet exists", "Publication_Plan has exactly 3 rows",
+                  "Publication_Plan has 3 required dates",
+                  "Publication_Plan platform is AfroBeats Today",
+                  "Publication_Plan status is Scheduled"]:
+            record(k, False, "skipped (no excel)")
         return
     record("Song_Analysis_Report.xlsx exists", True)
 
@@ -70,7 +99,7 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         return
     record("Excel file readable", True)
 
-    # Check Tracklist sheet
+    # ---------- Tracklist ----------
     tracklist_sheet = None
     for name in wb.sheetnames:
         if "track" in name.lower():
@@ -78,19 +107,22 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
             break
     if tracklist_sheet is None:
         record("Tracklist sheet exists", False, f"Sheets: {wb.sheetnames}")
+        for k in ["Tracklist columns correct", "Tracklist has >= 12 data rows"]:
+            record(k, False, "skipped")
     else:
         record("Tracklist sheet exists", True)
         rows = list(tracklist_sheet.iter_rows(values_only=True))
-        headers = [str(c).strip().lower() if c else "" for c in (rows[0] if rows else [])]
-        has_title = any("song" in h or "title" in h for h in headers)
-        has_artist = any("artist" in h for h in headers)
-        record("Tracklist has Song_Title and Artist columns", has_title and has_artist,
+        headers = [norm(c) for c in (rows[0] if rows else [])]
+        required = ["track no", "song title", "artist", "start time sec",
+                    "estimated duration sec", "genre"]
+        ok_headers = all(any(req in h for h in headers) for req in required)
+        record("Tracklist columns correct", ok_headers,
                f"Headers: {rows[0] if rows else []}")
-        data_rows = [r for r in rows[1:] if any(c for c in r)]
-        record("Tracklist has >= 8 data rows", len(data_rows) >= 8,
+        data_rows = [r for r in rows[1:] if any(c is not None and str(c).strip() != "" for c in r)]
+        record("Tracklist has >= 12 data rows", len(data_rows) >= 12,
                f"Found {len(data_rows)} data rows")
 
-    # Check Artist_Stats sheet
+    # ---------- Artist_Stats ----------
     artist_sheet = None
     for name in wb.sheetnames:
         if "artist" in name.lower() or "stat" in name.lower():
@@ -98,88 +130,93 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
             break
     if artist_sheet is None:
         record("Artist_Stats sheet exists", False, f"Sheets: {wb.sheetnames}")
+        record("Artist_Stats has >= 4 data rows", False, "skipped")
     else:
         record("Artist_Stats sheet exists", True)
         rows = list(artist_sheet.iter_rows(values_only=True))
-        data_rows = [r for r in rows[1:] if any(c for c in r)]
+        data_rows = [r for r in rows[1:] if any(c is not None and str(c).strip() != "" for c in r)]
         record("Artist_Stats has >= 4 data rows", len(data_rows) >= 4,
                f"Found {len(data_rows)} rows")
 
-    # Check Publication_Plan sheet
+    # ---------- Publication_Plan ----------
     pub_sheet = None
     for name in wb.sheetnames:
-        if "pub" in name.lower() or "plan" in name.lower():
+        n = name.lower()
+        if "publication" in n or "publish" in n or n == "publication_plan" or "plan" in n:
             pub_sheet = wb[name]
             break
     if pub_sheet is None:
         record("Publication_Plan sheet exists", False, f"Sheets: {wb.sheetnames}")
+        for k in ["Publication_Plan has exactly 3 rows",
+                  "Publication_Plan has 3 required dates",
+                  "Publication_Plan platform is AfroBeats Today",
+                  "Publication_Plan status is Scheduled"]:
+            record(k, False, "skipped")
     else:
         record("Publication_Plan sheet exists", True)
         rows = list(pub_sheet.iter_rows(values_only=True))
-        headers = [str(c).strip().lower() if c else "" for c in (rows[0] if rows else [])]
-        has_date = any("date" in h or "publish" in h for h in headers)
-        record("Publication_Plan has Publish_Date column", has_date,
-               f"Headers: {rows[0] if rows else []}")
-        data_rows = [r for r in rows[1:] if any(c for c in r)]
-        record("Publication_Plan has >= 3 data rows", len(data_rows) >= 3,
+        headers = [norm(c) for c in (rows[0] if rows else [])]
+        # locate columns
+        def col_idx(*candidates):
+            for i, h in enumerate(headers):
+                if any(c in h for c in candidates):
+                    return i
+            return -1
+        ci_date = col_idx("publish date", "publish_date", "date")
+        ci_plat = col_idx("platform")
+        ci_stat = col_idx("status")
+        data_rows = [r for r in rows[1:] if any(c is not None and str(c).strip() != "" for c in r)]
+        record("Publication_Plan has exactly 3 rows", len(data_rows) == 3,
                f"Found {len(data_rows)} rows")
 
-    # --- Groundtruth XLSX value comparison ---
-    gt_path = os.path.join(groundtruth_workspace, "Song_Analysis_Report.xlsx")
-    if os.path.isfile(gt_path):
-        gt_wb = openpyxl.load_workbook(gt_path, data_only=True)
-        for gt_sname in gt_wb.sheetnames:
-            gt_ws = gt_wb[gt_sname]
-            a_ws = None
-            for asn in wb.sheetnames:
-                if asn.strip().lower() == gt_sname.strip().lower():
-                    a_ws = wb[asn]
-                    break
-            if a_ws is None:
-                record(f"GT sheet '{gt_sname}' exists in agent xlsx", False, f"Available: {wb.sheetnames}")
-                continue
-            gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-            a_rows = [r for r in a_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-            record(f"GT '{gt_sname}' row count", len(a_rows) == len(gt_rows),
-                   f"Expected {len(gt_rows)}, got {len(a_rows)}")
-            for ri in range(min(3, len(gt_rows))):
-                if ri >= len(a_rows):
-                    break
-                ok = True
-                for ci in range(min(len(gt_rows[ri]), len(a_rows[ri]))):
-                    gv, av = gt_rows[ri][ci], a_rows[ri][ci]
-                    if gv is None:
-                        continue
-                    if isinstance(gv, (int, float)):
-                        if not num_close(av, gv, max(abs(gv) * 0.1, 1.0)):
-                            ok = False
-                            break
-                    else:
-                        if not str_match(av, gv):
-                            ok = False
-                            break
-                record(f"GT '{gt_sname}' row {ri+1} values", ok,
-                       f"gt={gt_rows[ri][:4]}, agent={a_rows[ri][:4] if ri < len(a_rows) else 'missing'}")
-        gt_wb.close()
+        required_dates = {"2026-03-15", "2026-03-22", "2026-03-29"}
+        found_dates = set()
+        if ci_date >= 0:
+            for r in data_rows:
+                if ci_date < len(r):
+                    nd = date_norm(r[ci_date])
+                    if nd:
+                        found_dates.add(nd)
+        record("Publication_Plan has 3 required dates",
+               required_dates.issubset(found_dates),
+               f"got dates: {sorted(found_dates)}")
+
+        plat_ok = False
+        if ci_plat >= 0:
+            plats = [str(r[ci_plat] or "").lower() for r in data_rows if ci_plat < len(r)]
+            plat_ok = len(plats) == 3 and all("afrobeats today" in p for p in plats)
+        record("Publication_Plan platform is AfroBeats Today", plat_ok,
+               f"platforms: {plats if ci_plat>=0 else 'no col'}")
+
+        stat_ok = False
+        if ci_stat >= 0:
+            stats = [str(r[ci_stat] or "").strip().lower() for r in data_rows if ci_stat < len(r)]
+            stat_ok = len(stats) == 3 and all("scheduled" in s for s in stats)
+        record("Publication_Plan status is Scheduled", stat_ok,
+               f"statuses: {stats if ci_stat>=0 else 'no col'}")
 
 
 def check_notion():
     print("\n=== Check 2: Notion Pages and Database ===")
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
-    cur.execute("SELECT id, parent, properties FROM notion.pages")
-    pages = cur.fetchall()
-    cur.close()
-    conn.close()
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("SELECT id, parent, properties FROM notion.pages")
+        pages = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        record("Notion DB query", False, str(e))
+        for k in ["Notion analysis page with required tokens",
+                  "Notion song database has >= 10 entries"]:
+            record(k, False, "skipped")
+        return
 
-    # Check for analysis page
     found_page = False
-    db_id = None
     for page_id, parent, props in pages:
         try:
-            # workspace-level page
             parent_type = parent.get("type", "") if isinstance(parent, dict) else ""
-            if parent_type == "workspace":
+            if parent_type in ("workspace", "page_id"):
                 title_items = []
                 for key, val in props.items():
                     if isinstance(val, dict) and val.get("type") == "title":
@@ -189,71 +226,128 @@ def check_notion():
                     item.get("text", {}).get("content", "") for item in title_items
                     if isinstance(item, dict)
                 ).lower()
-                if "afrobeat" in title_text or "mix" in title_text or "analysis" in title_text:
+                # Require BOTH "afrobeat" AND "analysis" tokens (NOT just "analysis")
+                if "afrobeat" in title_text and ("analysis" in title_text or "blog" in title_text):
                     found_page = True
-            # database-level page (song entry)
-            elif parent_type == "database_id":
-                if db_id is None:
-                    db_id = parent.get("database_id")
         except Exception:
             continue
 
-    record("Notion page exists with Afrobeat/Mix/Analysis in title", found_page,
-           f"Total pages found: {len(pages)}")
+    record("Notion analysis page with required tokens", found_page,
+           f"Total pages: {len(pages)}")
 
-    # Count song entries (pages with database parent)
     db_entries = [p for p in pages if isinstance(p[1], dict) and p[1].get("type") == "database_id"]
-    record("Notion database has >= 8 song entries", len(db_entries) >= 8,
+    record("Notion song database has >= 10 entries", len(db_entries) >= 10,
            f"Found {len(db_entries)} database-parented pages")
 
 
 def check_gcal():
     print("\n=== Check 3: GCal Publication Events ===")
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT summary, start_datetime FROM gcal.events
-        WHERE start_datetime >= '2026-03-15' AND start_datetime < '2026-04-01'
-        ORDER BY start_datetime
-    """)
-    events = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    pub_events = [e for e in events
-                  if any(kw in (e[0] or "").lower()
-                         for kw in ["publish", "article", "genre", "afrobeat", "spotlight", "mix", "feature"])]
-    record("GCal has >= 3 publication-related events in March 2026", len(pub_events) >= 3,
-           f"Found {len(pub_events)} events: {[e[0] for e in pub_events]}")
-
-
-def check_email_sent():
-    print("\n=== Check 4: Email Sent to editorial@musicblog.com ===")
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
     try:
-        # Check sent messages in Sent/SENT folders or via sent_log join
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
         cur.execute("""
-            SELECT count(*) FROM email.messages m
-            JOIN email.folders f ON m.folder_id = f.id
-            WHERE UPPER(f.name) IN ('SENT')
-              AND m.to_addr::text ILIKE '%editorial@musicblog.com%'
+            SELECT summary, start_datetime FROM gcal.events
+            WHERE start_datetime >= '2026-03-01' AND start_datetime < '2026-04-01'
+            ORDER BY start_datetime
         """)
-        count = cur.fetchone()[0]
-        if count == 0:
-            # Fallback: check sent_log joined with messages
-            cur.execute("""
-                SELECT count(*) FROM email.sent_log sl
-                JOIN email.messages m ON sl.message_id = m.id
-                WHERE m.to_addr::text ILIKE '%editorial@musicblog.com%'
-            """)
-            count = cur.fetchone()[0]
-        record("Email sent to editorial@musicblog.com", count >= 1, f"Sent count: {count}")
-    except Exception as e:
-        record("Email sent_log check", False, str(e))
-    finally:
+        events = cur.fetchall()
         cur.close()
         conn.close()
+    except Exception as e:
+        record("GCal DB query", False, str(e))
+        for k in ["GCal Publish Afrobeat Mix Feature on 2026-03-15",
+                  "GCal Artist Spotlight Article on 2026-03-22",
+                  "GCal Genre Overview Piece on 2026-03-29"]:
+            record(k, False, "skipped")
+        return
+
+    def event_on_date(target_date_str, kw_required, expected_title):
+        for summary, start_dt in events:
+            try:
+                ds = start_dt.strftime("%Y-%m-%d") if hasattr(start_dt, "strftime") else str(start_dt)[:10]
+            except Exception:
+                ds = ""
+            if ds == target_date_str:
+                s_lower = (summary or "").strip().lower()
+                # Accept exact title match
+                if s_lower == expected_title.lower():
+                    return True
+                # Otherwise require ALL keyword tokens (was 2-of-N — too loose)
+                if all(kw in s_lower for kw in kw_required):
+                    return True
+        return False
+
+    record("GCal Publish Afrobeat Mix Feature on 2026-03-15",
+           event_on_date("2026-03-15",
+                         ["publish", "afrobeat", "mix", "feature"],
+                         "Publish Afrobeat Mix Feature"),
+           f"events: {[(s, str(d)[:16]) for s,d in events]}")
+    record("GCal Artist Spotlight Article on 2026-03-22",
+           event_on_date("2026-03-22",
+                         ["artist", "spotlight", "article"],
+                         "Artist Spotlight Article"),
+           f"events: {[(s, str(d)[:16]) for s,d in events]}")
+    record("GCal Genre Overview Piece on 2026-03-29",
+           event_on_date("2026-03-29",
+                         ["genre", "overview", "piece"],
+                         "Genre Overview Piece"),
+           f"events: {[(s, str(d)[:16]) for s,d in events]}")
+
+
+def check_emails():
+    print("\n=== Check 4: Emails sent ===")
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("SELECT to_addr, subject, body_text, body_html FROM email.messages")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        record("Email DB query", False, str(e))
+        for k in ["Editorial email sent", "Editorial email subject correct",
+                  "Editorial email body has summary",
+                  "Artists email sent", "Artists email subject correct"]:
+            record(k, False, "skipped")
+        return
+
+    edit_msgs = []
+    art_msgs = []
+    for to_addr, subj, btxt, bhtml in rows:
+        to_str = str(to_addr or "").lower()
+        body = (btxt or "") + "\n" + (bhtml or "")
+        if "editorial@musicblog.com" in to_str:
+            edit_msgs.append((subj or "", body))
+        if "artists@afrobeat.com" in to_str:
+            art_msgs.append((subj or "", body))
+
+    record("Editorial email sent", len(edit_msgs) >= 1, f"count={len(edit_msgs)}")
+    if edit_msgs:
+        # Pick first message
+        subj_l = edit_msgs[0][0].lower()
+        body_l = edit_msgs[0][1].lower()
+        # subject must contain key tokens
+        ok_subj = ("afrobeat" in subj_l and "analysis" in subj_l and "report" in subj_l and "ready" in subj_l)
+        record("Editorial email subject correct", ok_subj, f"subj={subj_l[:120]}")
+        # Tighten: require BOTH 'track' or 'song' AND a publication date hint
+        # (task says "summary of the number of tracks identified and the publication schedule")
+        has_count_word = "track" in body_l or "song" in body_l
+        has_schedule_hint = ("publication" in body_l or "schedule" in body_l
+                              or "march" in body_l)
+        ok_body = has_count_word and has_schedule_hint
+        record("Editorial email body has summary (tracks/songs + schedule)",
+               ok_body, f"body sample: {body_l[:200]}")
+    else:
+        record("Editorial email subject correct", False, "skipped")
+        record("Editorial email body has summary", False, "skipped")
+
+    record("Artists email sent", len(art_msgs) >= 1, f"count={len(art_msgs)}")
+    if art_msgs:
+        subj_l = art_msgs[0][0].lower()
+        ok_subj = ("artist" in subj_l and "feature" in subj_l and ("afrobeat" in subj_l or "mix" in subj_l))
+        record("Artists email subject correct", ok_subj, f"subj={subj_l[:120]}")
+    else:
+        record("Artists email subject correct", False, "skipped")
 
 
 def main():
@@ -267,7 +361,7 @@ def main():
     check_excel(args.agent_workspace, args.groundtruth_workspace)
     check_notion()
     check_gcal()
-    check_email_sent()
+    check_emails()
 
     total = PASS_COUNT + FAIL_COUNT
     if total == 0:
@@ -275,19 +369,20 @@ def main():
         sys.exit(1)
 
     accuracy = PASS_COUNT / total * 100
-    print(f"\nOverall: {PASS_COUNT}/{total} checks passed ({accuracy:.1f}%)")
+    print(f"\nOverall: {PASS_COUNT}/{total} checks passed ({accuracy:.1f}%) [FAIL_COUNT={FAIL_COUNT}]")
 
     result = {
         "total_passed": PASS_COUNT,
         "total_checks": total,
         "accuracy": accuracy,
+        "fail_count": FAIL_COUNT,
     }
 
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

@@ -81,14 +81,22 @@ def main():
             if a_row is None:
                 errors.append(f"Missing: {g_row[0]}|{g_row[1]}")
                 continue
-            # Count
+            # Count tol=0 (deterministic SF data)
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 50):
+                if not num_close(a_row[2], g_row[2], 0):
                     errors.append(f"{key}.Count: {a_row[2]} vs {g_row[2]}")
-            # Internal_Pct
+            # Internal_Pct tol=0.5
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 1.0):
+                if not num_close(a_row[3], g_row[3], 0.5):
                     errors.append(f"{key}.Internal_Pct: {a_row[3]} vs {g_row[3]}")
+            # Benchmark_Pct tol=0.5
+            if len(a_row) > 4 and len(g_row) > 4:
+                if not num_close(a_row[4], g_row[4], 0.5):
+                    errors.append(f"{key}.Benchmark_Pct: {a_row[4]} vs {g_row[4]}")
+            # Gap tol=0.5
+            if len(a_row) > 5 and len(g_row) > 5:
+                if not num_close(a_row[5], g_row[5], 0.5):
+                    errors.append(f"{key}.Gap: {a_row[5]} vs {g_row[5]}")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -123,11 +131,17 @@ def main():
                 errors.append(f"Missing: {g_row[0]}|{g_row[1]}")
                 continue
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 50):
+                if not num_close(a_row[2], g_row[2], 0):
                     errors.append(f"{key}.Count: {a_row[2]} vs {g_row[2]}")
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 1.0):
+                if not num_close(a_row[3], g_row[3], 0.5):
                     errors.append(f"{key}.Internal_Pct: {a_row[3]} vs {g_row[3]}")
+            if len(a_row) > 4 and len(g_row) > 4:
+                if not num_close(a_row[4], g_row[4], 0.5):
+                    errors.append(f"{key}.Benchmark_Pct: {a_row[4]} vs {g_row[4]}")
+            if len(a_row) > 5 and len(g_row) > 5:
+                if not num_close(a_row[5], g_row[5], 0.5):
+                    errors.append(f"{key}.Gap: {a_row[5]} vs {g_row[5]}")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -163,8 +177,20 @@ def main():
                 continue
             # Internal_Value
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 1.5):
-                    errors.append(f"{key}.Internal: {a_row[2]} vs {g_row[2]}")
+                if not num_close(a_row[2], g_row[2], 0.5):
+                    errors.append(f"{key}.Internal_Value: {a_row[2]} vs {g_row[2]}")
+            # Benchmark_Value
+            if len(a_row) > 3 and len(g_row) > 3:
+                if not num_close(a_row[3], g_row[3], 0.5):
+                    errors.append(f"{key}.Benchmark_Value: {a_row[3]} vs {g_row[3]}")
+            # Gap
+            if len(a_row) > 4 and len(g_row) > 4:
+                if not num_close(a_row[4], g_row[4], 0.5):
+                    errors.append(f"{key}.Gap: {a_row[4]} vs {g_row[4]}")
+            # Status (Aligned/Above/Below) — exact match
+            if len(a_row) > 5 and len(g_row) > 5:
+                if not str_match(a_row[5], g_row[5]):
+                    errors.append(f"{key}.Status: '{a_row[5]}' vs '{g_row[5]}'")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -196,13 +222,13 @@ def main():
                 continue
             if len(a_row) > 1 and len(g_row) > 1:
                 if key in ("total_employees",):
-                    if not num_close(a_row[1], g_row[1], 100):
+                    if not num_close(a_row[1], g_row[1], 0):
                         errors.append(f"{key}: {a_row[1]} vs {g_row[1]}")
                 elif key in ("total_departments", "education_levels"):
-                    if not num_close(a_row[1], g_row[1], 1):
+                    if not num_close(a_row[1], g_row[1], 0):
                         errors.append(f"{key}: {a_row[1]} vs {g_row[1]}")
                 else:
-                    if not num_close(a_row[1], g_row[1], 1.0):
+                    if not num_close(a_row[1], g_row[1], 0.2):
                         errors.append(f"{key}: {a_row[1]} vs {g_row[1]}")
         if errors:
             all_errors.extend(errors)
@@ -212,7 +238,7 @@ def main():
         else:
             print("    PASS")
 
-    # Check PowerPoint exists
+    # Check PowerPoint exists + content
     print("  Checking DEI_Board_Report.pptx...")
     pptx_file = os.path.join(args.agent_workspace, "DEI_Board_Report.pptx")
     if not os.path.exists(pptx_file):
@@ -226,8 +252,54 @@ def main():
             if slide_count < 5:
                 all_errors.append(f"PowerPoint has only {slide_count} slides, expected 5+")
                 print(f"    FAIL: only {slide_count} slides")
-            else:
+
+            # Per-slide content check
+            slide_texts = []
+            for slide in prs.slides:
+                t = ""
+                for shape in slide.shapes:
+                    if shape.has_text_frame:
+                        t += shape.text_frame.text + " "
+                slide_texts.append(t.lower())
+            full = " ".join(slide_texts)
+
+            # Required topics across slides
+            required_topics = {
+                "education": "education",
+                "age": "age",
+                "recommendations or actions": ("recommendation" in full or "action item" in full or "improving" in full),
+            }
+            for topic, present in required_topics.items():
+                if isinstance(present, bool):
+                    if not present:
+                        all_errors.append(f"PPTX missing topic '{topic}'")
+                else:
+                    if present not in full:
+                        all_errors.append(f"PPTX missing topic '{topic}'")
+
+            # Recommendations slide should have at least 4 bullets / lines
+            rec_slide_text = ""
+            for st in slide_texts:
+                if "recommendation" in st or "action item" in st:
+                    rec_slide_text = st
+                    break
+            if rec_slide_text:
+                # Count distinct lines >= 4
+                lines = [ln.strip() for ln in rec_slide_text.split("\n") if ln.strip()]
+                if len(lines) < 4:
+                    # Also try counting by separator characters (- or •)
+                    bullet_count = max(rec_slide_text.count("•"), rec_slide_text.count("-"), len(lines))
+                    if bullet_count < 4:
+                        all_errors.append(f"Recommendations slide has only {bullet_count} action items (need >=4)")
+
+            # Total slide content >= 200 chars
+            if len(full.strip()) < 200:
+                all_errors.append(f"PPTX total content too sparse ({len(full)} chars)")
+
+            if not any("DEI_Board_Report" in e or "PPTX" in e for e in all_errors):
                 print("    PASS")
+            else:
+                print(f"    Some PPTX checks failed.")
         except Exception as e:
             all_errors.append(f"PPTX read error: {e}")
             print(f"    ERROR: {e}")

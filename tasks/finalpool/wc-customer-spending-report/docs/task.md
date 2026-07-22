@@ -4,4 +4,4 @@ Create an Excel file called WC_Customer_Report.xlsx with two sheets. The "Custom
 
 The "Summary" sheet should have Total_Active_Customers, Total_Spent_All rounded to 2 decimals, Top_Customer name, and Avg_Lifetime_Value rounded to 2 decimals.
 
-Also create a Google Sheet titled "Customer Analysis" with a sheet "Spending" containing the same customer data.
+Also create a cloud spreadsheet titled "Customer Analysis" with a sheet "Spending" containing the same customer data.

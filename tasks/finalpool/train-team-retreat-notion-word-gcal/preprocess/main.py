@@ -8,7 +8,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -25,10 +25,10 @@ def clear_tables(conn):
             cur.execute("DELETE FROM email.drafts")
         except Exception:
             pass
-        # Clear notion pages
+        # Clear notion pages whose properties JSON contains 'retreat' (titles live in properties)
         try:
-            cur.execute("DELETE FROM notion.blocks WHERE page_id IN (SELECT id FROM notion.pages WHERE title ILIKE '%retreat%')")
-            cur.execute("DELETE FROM notion.pages WHERE title ILIKE '%retreat%'")
+            cur.execute("DELETE FROM notion.blocks WHERE page_id IN (SELECT id FROM notion.pages WHERE properties::text ILIKE '%retreat%')")
+            cur.execute("DELETE FROM notion.pages WHERE properties::text ILIKE '%retreat%'")
         except Exception:
             pass
     conn.commit()

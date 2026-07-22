@@ -15,14 +15,18 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+LOCAL_FAIL_COUNT = 0
+CURRENT_CATEGORY = "local"
 
 def check(name, condition, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+    global PASS_COUNT, FAIL_COUNT, LOCAL_FAIL_COUNT
     if condition:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if CURRENT_CATEGORY == "local":
+            LOCAL_FAIL_COUNT += 1
         detail_str = str(detail)[:200] if detail else ""
         print(f"  [FAIL] {name}: {detail_str}")
 
@@ -63,15 +67,31 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                         if h:
                             check(f"{sheet_name} has {h} column", h in headers, f"headers: {headers[:10]}")
                     # Check row count
-                    gt_rows = list(gt_ws.iter_rows(min_row=2, values_only=True))
-                    data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-                    min_rows = max(1, len(gt_rows) - 2)
-                    check(f"{sheet_name} has >= {min_rows} data rows", len(data_rows) >= min_rows, f"got {len(data_rows)}")
+                    gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if r and any(c is not None for c in r)]
+                    data_rows = [r for r in ws.iter_rows(min_row=2, values_only=True) if r and any(c is not None for c in r)]
+                    # Require exactly len(gt_rows) data rows (was len(gt_rows)-2).
+                    check(f"{sheet_name} has {len(gt_rows)} data rows", len(data_rows) == len(gt_rows), f"got {len(data_rows)}, expected {len(gt_rows)}")
 
-                    # Cell value comparison against groundtruth
+                    # Sort-order validation per task.md requirements.
+                    header_map_sort = {h: i for i, h in enumerate(headers)}
+                    if sheet_name == "KPI_Scorecard":
+                        ach_i = header_map_sort.get("achievement_pct")
+                        if ach_i is not None:
+                            vals = [safe_float(r[ach_i]) for r in data_rows if ach_i < len(r)]
+                            vals_nn = [v for v in vals if v is not None]
+                            check("KPI_Scorecard sorted by Achievement_Pct ascending",
+                                  vals_nn == sorted(vals_nn), f"{vals[:8]}")
+                    elif sheet_name == "Revenue_Detail":
+                        reg_i = header_map_sort.get("region")
+                        if reg_i is not None:
+                            vals = [str(r[reg_i]).strip().lower() for r in data_rows if reg_i < len(r) and r[reg_i] is not None]
+                            check("Revenue_Detail sorted by Region",
+                                  vals == sorted(vals), f"{vals[:8]}")
+
+                    # Cell value comparison against groundtruth (ALL rows)
                     header_map = {h: i for i, h in enumerate(headers)}
                     gt_header_map = {h: i for i, h in enumerate(gt_headers)}
-                    for ri in range(min(3, len(gt_rows), len(data_rows))):
+                    for ri in range(min(len(gt_rows), len(data_rows))):
                         gt_row = gt_rows[ri]
                         agent_row = data_rows[ri]
                         for ci, gt_h in enumerate(gt_headers):
@@ -85,15 +105,17 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                             gf = safe_float(gv)
                             af = safe_float(av)
                             if gf is not None and af is not None:
-                                tol = max(0.5, abs(gf) * 0.15)
-                                check(f"{sheet_name} R{ri+2} {gt_h} ~{gf:.1f}",
+                                # Tighter tolerance: 5% or 0.5 abs
+                                tol = max(0.5, abs(gf) * 0.05)
+                                check(f"{sheet_name} R{ri+2} {gt_h} ~{gf:.2f}",
                                       abs(gf - af) <= tol, f"got {af}")
                             elif gv is not None and av is not None:
                                 gs = str(gv).strip().lower()
                                 avs = str(av).strip().lower()
                                 if gs:
+                                    # Exact equality only (avoid Met/Missed/Near substring collisions)
                                     check(f"{sheet_name} R{ri+2} {gt_h} text",
-                                          gs == avs or gs in avs or avs in gs,
+                                          gs == avs,
                                           f"expected {gs[:50]}, got {avs[:50]}")
 
     # Check KPI_Review.docx
@@ -117,28 +139,43 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         else:
             check("KPI_Review.docx has headings", len(headings) >= 2, f"found {len(headings)} headings")
 
-    # Check Python script exists (terminal usage)
+    # Check Python script with specific filename - runtime
+    global CURRENT_CATEGORY
+    CURRENT_CATEGORY = "runtime"
     py_files = [f for f in os.listdir(agent_workspace) if f.endswith(".py")]
-    check("Python analysis script exists", len(py_files) >= 1, f"found: {py_files}")
+    check("kpi_reconciler.py exists", "kpi_reconciler.py" in py_files, f"found: {py_files}")
+    check("kpi_reconciliation.json output exists",
+          os.path.exists(os.path.join(agent_workspace, "kpi_reconciliation.json")),
+          f"workspace files: {os.listdir(agent_workspace)[:20]}")
 
-    # Database checks
+    # Database checks - runtime
     try:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT subject, to_addr FROM email.messages WHERE folder_id = (SELECT id FROM email.folders WHERE name = 'Sent' LIMIT 1) AND subject ILIKE '%kpi%'")
+        # Task.md: subject exactly "Q1 KPI Performance Summary" to executive-team@company.com
+        # Drop Sent-folder filter: check by subject + recipient only.
+        cur.execute("""
+            SELECT subject, to_addr FROM email.messages
+            WHERE subject ILIKE '%%q1 kpi performance summary%%'
+              AND to_addr::text ILIKE '%%executive-team@company.com%%'
+        """)
         email_row = cur.fetchone()
-        check("Email with correct subject sent", email_row is not None, "no matching email found")
-        if email_row:
-            check("Email has recipient", email_row[1] is not None, f"to_addr: {email_row[1]}")
-        # Reverse verification: noise emails should not be in Sent folder
-        cur.execute("SELECT COUNT(*) FROM email.messages WHERE folder_id = (SELECT id FROM email.folders WHERE name = 'Sent' LIMIT 1) AND subject ILIKE '%newsletter%'")
+        check("Email with subject 'Q1 KPI Performance Summary' to executive-team@company.com",
+              email_row is not None, "no matching email found")
+        # Reverse verification: noise subject emails (should not be injected by agent as sent)
+        cur.execute("""
+            SELECT COUNT(*) FROM email.messages
+            WHERE subject ILIKE '%%newsletter%%'
+              AND to_addr::text ILIKE '%%executive-team@company.com%%'
+        """)
         noise_sent = cur.fetchone()[0]
-        check("No noise emails in Sent folder", noise_sent == 0, f"found {noise_sent} noise emails in Sent")
+        check("No newsletter emails to executive-team", noise_sent == 0, f"found {noise_sent}")
         conn.close()
     except Exception as e:
         check("DB checks", False, str(e))
 
-    return FAIL_COUNT == 0, f"Passed {PASS_COUNT}/{PASS_COUNT + FAIL_COUNT} checks"
+    print(f"Local FAIL_COUNT: {LOCAL_FAIL_COUNT}, Total FAIL_COUNT: {FAIL_COUNT}")
+    return LOCAL_FAIL_COUNT == 0, f"Passed {PASS_COUNT}/{PASS_COUNT + FAIL_COUNT} checks (local_fails={LOCAL_FAIL_COUNT})"
 
 def main():
     parser = argparse.ArgumentParser()

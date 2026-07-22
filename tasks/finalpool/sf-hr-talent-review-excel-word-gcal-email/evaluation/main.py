@@ -31,21 +31,72 @@ FAIL_COUNT = 0
 
 DEPARTMENTS = ["Engineering", "Finance", "HR", "Operations", "R&D", "Sales", "Support"]
 
-# Expected department data (from actual Snowflake queries)
-DEPT_EXPECTED = {
-    "Engineering": {"headcount": 7096, "avg_perf": 3.21, "avg_salary": 58991.61, "promo": 1578},
-    "Finance":     {"headcount": 7148, "avg_perf": 3.21, "avg_salary": 57878.19, "promo": 1588},
-    "HR":          {"headcount": 7077, "avg_perf": 3.20, "avg_salary": 58920.45, "promo": 1588},
-    "Operations":  {"headcount": 7120, "avg_perf": 3.18, "avg_salary": 57808.74, "promo": 1541},
-    "R&D":         {"headcount": 7083, "avg_perf": 3.20, "avg_salary": 57905.93, "promo": 1519},
-    "Sales":       {"headcount": 7232, "avg_perf": 3.19, "avg_salary": 58864.79, "promo": 1596},
-    "Support":     {"headcount": 7244, "avg_perf": 3.20, "avg_salary": 58400.48, "promo": 1540},
+# Fallback values (only used if DB query fails)
+DEPT_EXPECTED_FALLBACK = {
+    "Engineering": {"headcount": 7096, "avg_perf": 3.21, "avg_salary": 58991.61,
+                    "min_salary": 0, "max_salary": 0, "promo": 1578},
+    "Finance":     {"headcount": 7148, "avg_perf": 3.21, "avg_salary": 57878.19,
+                    "min_salary": 0, "max_salary": 0, "promo": 1588},
+    "HR":          {"headcount": 7077, "avg_perf": 3.20, "avg_salary": 58920.45,
+                    "min_salary": 0, "max_salary": 0, "promo": 1588},
+    "Operations":  {"headcount": 7120, "avg_perf": 3.18, "avg_salary": 57808.74,
+                    "min_salary": 0, "max_salary": 0, "promo": 1541},
+    "R&D":         {"headcount": 7083, "avg_perf": 3.20, "avg_salary": 57905.93,
+                    "min_salary": 0, "max_salary": 0, "promo": 1519},
+    "Sales":       {"headcount": 7232, "avg_perf": 3.19, "avg_salary": 58864.79,
+                    "min_salary": 0, "max_salary": 0, "promo": 1596},
+    "Support":     {"headcount": 7244, "avg_perf": 3.20, "avg_salary": 58400.48,
+                    "min_salary": 0, "max_salary": 0, "promo": 1540},
 }
 
+# From Compensation_Benchmarks.pdf
 INDUSTRY_BENCHMARKS = {
     "Engineering": 62000, "Finance": 60000, "HR": 55000, "Operations": 54000,
     "R&D": 63000, "Sales": 61000, "Support": 53000,
 }
+
+
+def load_dept_expected():
+    """Runtime DB query for department stats; fallback to constants if it fails."""
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT "DEPARTMENT",
+                   COUNT(*) AS headcount,
+                   ROUND(AVG("PERFORMANCE_RATING")::numeric, 2) AS avg_perf,
+                   ROUND(AVG("SALARY")::numeric, 2) AS avg_salary,
+                   MIN("SALARY") AS min_salary,
+                   MAX("SALARY") AS max_salary
+            FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES"
+            GROUP BY "DEPARTMENT"
+        ''')
+        dept_stats = {r[0]: {"headcount": int(r[1]), "avg_perf": float(r[2]),
+                             "avg_salary": float(r[3]), "min_salary": float(r[4]),
+                             "max_salary": float(r[5])} for r in cur.fetchall()}
+        # Promotion candidates per PDF: rating>=4 AND years_experience>=3
+        cur.execute('''
+            SELECT "DEPARTMENT", COUNT(*) AS promo
+            FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES"
+            WHERE "PERFORMANCE_RATING" >= 4 AND "YEARS_EXPERIENCE" >= 3
+            GROUP BY "DEPARTMENT"
+        ''')
+        for r in cur.fetchall():
+            if r[0] in dept_stats:
+                dept_stats[r[0]]["promo"] = int(r[1])
+        cur.close(); conn.close()
+        # Ensure all 7 depts covered
+        for d in DEPARTMENTS:
+            if d not in dept_stats:
+                dept_stats[d] = DEPT_EXPECTED_FALLBACK.get(d, {})
+            dept_stats[d].setdefault("promo", 0)
+        return dept_stats
+    except Exception as e:
+        print(f"[eval] load_dept_expected fallback: {e}")
+        return dict(DEPT_EXPECTED_FALLBACK)
+
+
+DEPT_EXPECTED = load_dept_expected()
 
 
 def check(name, condition, detail=""):
@@ -160,10 +211,33 @@ def check_excel(agent_workspace):
         check("Promotion_Candidates has 21 rows (3 per dept)", abs(len(rows2) - 21) <= 2,
               f"Found {len(rows2)} rows")
 
-        # Check a known candidate
+        # Validate candidates match actual top-3 per department using PDF criteria
+        # (rating = 5 AND years_experience >= 3, ordered by salary DESC within dept).
         all_text = " ".join(str(c) for row in rows2 for c in row if c)
-        check("Promotion_Candidates contains 'Luke Lewis'", "Luke Lewis" in all_text)
-        check("Promotion_Candidates contains 'Leo Johnson'", "Leo Johnson" in all_text)
+        try:
+            conn_ck = psycopg2.connect(**DB)
+            cur_ck = conn_ck.cursor()
+            # PDF criteria: rating>=4 AND years>=3, ordered by rating DESC
+            # then salary DESC as tiebreaker per PDF guidance
+            cur_ck.execute('''
+                SELECT "EMPLOYEE_NAME" FROM (
+                  SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY "DEPARTMENT"
+                    ORDER BY "PERFORMANCE_RATING" DESC, "SALARY" DESC, "EMPLOYEE_ID" ASC
+                  ) AS rn
+                  FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES"
+                  WHERE "PERFORMANCE_RATING" >= 4 AND "YEARS_EXPERIENCE" >= 3
+                ) t WHERE rn <= 3
+            ''')
+            top_names = [r[0] for r in cur_ck.fetchall()]
+            cur_ck.close(); conn_ck.close()
+            matched = sum(1 for n in top_names if n in all_text)
+            check("Promotion_Candidates matches top-3 per dept (>=17 of 21)",
+                  matched >= 17, f"Matched {matched}/{len(top_names)} top candidates")
+        except Exception as e:
+            # Fallback: at least verify rows exist
+            check("Promotion_Candidates non-empty (fallback)", len(rows2) > 0,
+                  f"DB query failed: {e}")
 
     # Sheet 3: Salary_Analysis
     has_salary = any("salary" in s for s in sheet_names)
@@ -184,6 +258,56 @@ def check_excel(agent_workspace):
         check("Salary_Analysis has benchmark column", has_benchmark, f"Headers: {headers3}")
         has_gap = any("gap" in h for h in headers3)
         check("Salary_Analysis has gap column", has_gap, f"Headers: {headers3}")
+
+        # Per-row value checks for Avg_Salary and Benchmark_Gap
+        dept_col3 = next((i for i, h in enumerate(headers3) if "department" in h), 0)
+        avg_sal_col3 = next((i for i, h in enumerate(headers3) if "avg" in h and "sal" in h), 1)
+        min_sal_col3 = next((i for i, h in enumerate(headers3) if "min" in h), None)
+        max_sal_col3 = next((i for i, h in enumerate(headers3) if "max" in h), None)
+        bench_col3 = next((i for i, h in enumerate(headers3) if "benchmark" in h and "gap" not in h), None)
+        gap_col3 = next((i for i, h in enumerate(headers3) if "gap" in h), None)
+        for row in rows3:
+            dept_name = str(row[dept_col3]).strip() if row[dept_col3] else ""
+            matched_dept = next((d for d in DEPARTMENTS if d.lower() == dept_name.lower()), None)
+            if not matched_dept:
+                continue
+            exp = DEPT_EXPECTED[matched_dept]
+            # Avg_Salary
+            av = safe_float(row[avg_sal_col3])
+            if av is not None:
+                check(f"Salary_Analysis {matched_dept} Avg_Salary",
+                      abs(av - exp["avg_salary"]) <= max(1.0, exp["avg_salary"] * 0.005),
+                      f"Expected ~{exp['avg_salary']}, got {av}")
+            # Min_Salary
+            if min_sal_col3 is not None and exp.get("min_salary"):
+                mn = safe_float(row[min_sal_col3])
+                if mn is not None:
+                    check(f"Salary_Analysis {matched_dept} Min_Salary",
+                          abs(mn - exp["min_salary"]) <= 1.0,
+                          f"Expected {exp['min_salary']}, got {mn}")
+            # Max_Salary
+            if max_sal_col3 is not None and exp.get("max_salary"):
+                mx = safe_float(row[max_sal_col3])
+                if mx is not None:
+                    check(f"Salary_Analysis {matched_dept} Max_Salary",
+                          abs(mx - exp["max_salary"]) <= 1.0,
+                          f"Expected {exp['max_salary']}, got {mx}")
+            # Benchmark_Gap = Avg_Salary - Industry_Benchmark
+            if gap_col3 is not None and matched_dept in INDUSTRY_BENCHMARKS:
+                expected_gap = round(
+                    exp["avg_salary"] - INDUSTRY_BENCHMARKS[matched_dept], 2)
+                gv = safe_float(row[gap_col3])
+                if gv is not None:
+                    check(f"Salary_Analysis {matched_dept} Benchmark_Gap",
+                          abs(gv - expected_gap) <= 1.0,
+                          f"Expected ~{expected_gap}, got {gv}")
+            # Industry_Benchmark
+            if bench_col3 is not None and matched_dept in INDUSTRY_BENCHMARKS:
+                bv = safe_float(row[bench_col3])
+                if bv is not None:
+                    check(f"Salary_Analysis {matched_dept} Industry_Benchmark",
+                          abs(bv - INDUSTRY_BENCHMARKS[matched_dept]) <= 1.0,
+                          f"Expected {INDUSTRY_BENCHMARKS[matched_dept]}, got {bv}")
 
     wb.close()
 
@@ -231,12 +355,15 @@ def check_word(agent_workspace):
     check("Word contains at least one table", len(doc.tables) >= 1,
           f"Found {len(doc.tables)} tables")
 
-    # Check table has department data
+    # Check table has all 7 department rows
     if doc.tables:
-        table_text = " ".join(cell.text for row in doc.tables[0].rows for cell in row.cells)
-        check("Word table contains department names",
-              "engineering" in table_text.lower() and "sales" in table_text.lower(),
-              "Missing department names in table")
+        all_tables_text = ""
+        for t in doc.tables:
+            all_tables_text += " " + " ".join(cell.text for row in t.rows for cell in row.cells)
+        all_tables_text_lower = all_tables_text.lower()
+        found_depts = sum(1 for d in DEPARTMENTS if d.lower() in all_tables_text_lower)
+        check("Word tables include all 7 departments", found_depts == 7,
+              f"Found {found_depts}/7 in tables")
 
 
 def check_gcal(launch_time_str):

@@ -77,20 +77,37 @@ def main():
                 all_errors.append(f"Missing row: {g_row[0]}")
                 continue
 
-            # Order_Count (col 1)
+            # Order_Count (col 1) - exact integer
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 2):
+                if not num_close(a_row[1], g_row[1], 0):
                     all_errors.append(f"{key}.Order_Count: {a_row[1]} vs {g_row[1]}")
 
-            # Total_Revenue (col 2)
+            # Total_Revenue (col 2) - tighten to tol=1.0 (was 50.0)
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 50.0):
-                    all_errors.append(f"{key}.Total_Revenue: {a_row[2]} vs {g_row[2]}")
+                if not num_close(a_row[2], g_row[2], 1.0):
+                    all_errors.append(f"{key}.Total_Revenue: {a_row[2]} vs {g_row[2]} (tol=1.0)")
 
-            # Avg_Order_Value (col 3)
+            # Avg_Order_Value (col 3) - tighten to tol=0.05 (was 5.0)
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 5.0):
-                    all_errors.append(f"{key}.Avg_Order_Value: {a_row[3]} vs {g_row[3]}")
+                if not num_close(a_row[3], g_row[3], 0.05):
+                    all_errors.append(f"{key}.Avg_Order_Value: {a_row[3]} vs {g_row[3]} (tol=0.05)")
+
+        # Validate column headers
+        if a_rows:
+            header = [str(c or "").strip().lower() for c in a_rows[0]]
+            for col in ["payment_method", "order_count", "total_revenue", "avg_order_value"]:
+                if not any(col in h or col.replace("_", " ") in h for h in header):
+                    all_errors.append(f"Payment Methods missing column header: {col}")
+
+        # Validate alphabetical sort by payment method name
+        a_method_names = [str(r[0] or "").strip() for r in a_data if r and r[0] is not None]
+        if a_method_names:
+            sorted_names = sorted(a_method_names, key=lambda s: s.lower())
+            if a_method_names != sorted_names:
+                all_errors.append(
+                    f"Payment Methods not sorted alphabetically. Got {a_method_names}; "
+                    f"expected {sorted_names}"
+                )
 
         if not [e for e in all_errors if "Payment Methods" in e or "Missing row" in e]:
             print("    PASS")
@@ -126,8 +143,12 @@ def main():
 
             try:
                 float(a_val); float(g_val)
-                if not num_close(a_val, g_val, 50.0):
-                    all_errors.append(f"Summary.{key}: {a_val} vs {g_val} (tol=50.0)")
+                # Numeric tol depends on metric: counts are integer, totals to ~1.0
+                tol = 0
+                if "revenue" in key or "total_revenue" in key:
+                    tol = 1.0
+                if not num_close(a_val, g_val, tol):
+                    all_errors.append(f"Summary.{key}: {a_val} vs {g_val} (tol={tol})")
             except (TypeError, ValueError):
                 if not str_match(a_val, g_val):
                     all_errors.append(f"Summary.{key}: {a_val} vs {g_val}")
@@ -142,21 +163,50 @@ def main():
         conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
-        cur.execute("SELECT m.subject, m.to_addr, m.body_text FROM email.messages m")
+        cur.execute("SELECT m.subject, m.from_addr, m.to_addr, m.body_text FROM email.messages m")
         all_msgs = cur.fetchall()
 
-        found_email = False
-        for subj, to_addr, body in all_msgs:
-            subj_str = str(subj or "").lower()
+        # Filter to recipient finance-lead@company.com
+        target_emails = []
+        for subj, from_addr, to_addr, body in all_msgs:
             to_str = str(to_addr or "").lower()
-            if "payment" in subj_str and "finance-lead" in to_str:
-                found_email = True
-                break
+            if "finance-lead@company.com" in to_str:
+                target_emails.append((subj, from_addr, to_addr, body))
 
-        if not found_email:
-            all_errors.append("No email with 'Payment' in subject sent to finance-lead@company.com")
+        if not target_emails:
+            all_errors.append("No email sent to finance-lead@company.com")
         else:
-            print("    PASS")
+            # At least one must have exact subject 'Payment Method Analysis' (case-insensitive)
+            ok_subj = False
+            ok_from = False
+            ok_body = False
+            for subj, from_addr, to_addr, body in target_emails:
+                sl = (subj or "").strip().lower()
+                if sl == "payment method analysis":
+                    ok_subj = True
+                if "analytics@company.com" in (from_addr or "").lower():
+                    ok_from = True
+                bl = (body or "").lower()
+                # Body must mention the most-used method 'Credit Card (Stripe)' AND total revenue '61712'
+                if ("credit card" in bl or "stripe" in bl) and "61712" in bl:
+                    ok_body = True
+            if not ok_subj:
+                all_errors.append(
+                    f"No email with subject 'Payment Method Analysis'. "
+                    f"Subjects: {[s for s, _, _, _ in target_emails]}"
+                )
+            if not ok_from:
+                all_errors.append(
+                    f"No email from analytics@company.com. "
+                    f"Senders: {[f for _, f, _, _ in target_emails]}"
+                )
+            if not ok_body:
+                all_errors.append(
+                    f"No email body mentions most-used method (Credit Card/Stripe) AND total revenue 61712. "
+                    f"Bodies (first 200): {[(b or '')[:200] for _, _, _, b in target_emails][:1]}"
+                )
+            if ok_subj and ok_from and ok_body:
+                print("    PASS")
 
         cur.close()
         conn.close()

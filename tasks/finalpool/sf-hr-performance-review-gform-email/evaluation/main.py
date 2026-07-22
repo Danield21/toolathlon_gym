@@ -31,6 +31,45 @@ DB_CONFIG = {
 
 EXPECTED_DEPARTMENTS = {"Engineering", "Finance", "HR", "Operations", "R&D", "Sales", "Support"}
 
+
+def _fetch_dept_expected():
+    """Dynamically query DB for per-department stats. Fallback to hardcoded on failure."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG, connect_timeout=5)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT "DEPARTMENT", COUNT(*),
+                   ROUND(AVG("PERFORMANCE_RATING")::numeric, 2),
+                   SUM(CASE WHEN "PERFORMANCE_RATING" < 3 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN "PERFORMANCE_RATING" >= 4 THEN 1 ELSE 0 END)
+            FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES"
+            GROUP BY "DEPARTMENT"
+        """)
+        result = {}
+        for r in cur.fetchall():
+            result[r[0]] = {
+                "count": int(r[1]),
+                "avg": float(r[2]),
+                "low": int(r[3]),
+                "high": int(r[4]),
+            }
+        cur.close(); conn.close()
+        return result
+    except Exception as e:
+        print(f"[fallback] DB unreachable: {e}")
+        return None
+
+
+DEPT_EXPECTED = _fetch_dept_expected() or {
+    "Engineering": {"count": 7096, "avg": 3.21, "low": 1381, "high": 2535},
+    "Finance":     {"count": 7148, "avg": 3.21, "low": 1387, "high": 2510},
+    "HR":          {"count": 7077, "avg": 3.20, "low": 1425, "high": 2485},
+    "Operations":  {"count": 7120, "avg": 3.18, "low": 1431, "high": 2426},
+    "R&D":         {"count": 7083, "avg": 3.20, "low": 1415, "high": 2478},
+    "Sales":       {"count": 7232, "avg": 3.19, "low": 1494, "high": 2523},
+    "Support":     {"count": 7244, "avg": 3.20, "low": 1479, "high": 2515},
+}
+
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
@@ -100,7 +139,7 @@ def check_excel(agent_workspace):
         for cell in row:
             if cell and str(cell).strip() in EXPECTED_DEPARTMENTS:
                 found_depts.add(str(cell).strip())
-    record("All 7 departments present", len(found_depts) >= 6,
+    record("All 7 departments present", len(found_depts) == 7,
            f"Found departments: {found_depts}")
 
     # Verify Engineering count (7096) and avg (~3.21)
@@ -111,27 +150,52 @@ def check_excel(agent_workspace):
             engineering_row = row
             break
 
-    if engineering_row:
-        # Find employee count column
-        count_col = next((i for i, h in enumerate(headers) if "count" in h or "employee" in h), 1)
-        avg_col = next((i for i, h in enumerate(headers) if "avg" in h or "average" in h), 2)
+    # Identify column indices using normalized header matching
+    dept_col  = next((i for i, h in enumerate(headers) if "dept" in h or "department" in h), 0)
+    count_col = next((i for i, h in enumerate(headers) if "count" in h and "low" not in h and "high" not in h), 1)
+    avg_col   = next((i for i, h in enumerate(headers) if "avg" in h or "average" in h), 2)
+    low_col   = next((i for i, h in enumerate(headers) if "low" in h and "count" in h), None)
+    high_col  = next((i for i, h in enumerate(headers) if "high" in h and "count" in h), None)
 
-        emp_count = engineering_row[count_col] if count_col < len(engineering_row) else None
-        avg_perf = engineering_row[avg_col] if avg_col < len(engineering_row) else None
+    record("Has Low_Performers_Count column", low_col is not None, f"Headers: {rows[0]}")
+    record("Has High_Performers_Count column", high_col is not None, f"Headers: {rows[0]}")
 
+    # Build dept -> row dict
+    dept_to_row = {}
+    for row in data_rows:
+        name = str(row[dept_col]).strip() if dept_col < len(row) and row[dept_col] else ""
+        if name:
+            dept_to_row[name] = row
+
+    # Validate every expected department
+    for dept, exp in DEPT_EXPECTED.items():
+        row = dept_to_row.get(dept)
+        if row is None:
+            record(f"{dept} row present", False, f"Not found; got {list(dept_to_row.keys())}")
+            continue
+        record(f"{dept} row present", True)
         try:
-            emp_count_val = int(emp_count) if emp_count is not None else 0
-            record("Engineering Employee_Count is 7096", emp_count_val == 7096,
-                   f"Got {emp_count_val}")
+            cnt = int(row[count_col]) if count_col < len(row) and row[count_col] is not None else None
+            record(f"{dept} Employee_Count={exp['count']}", cnt == exp["count"], f"Got {cnt}")
         except (TypeError, ValueError):
-            record("Engineering Employee_Count is 7096", False, f"Could not parse: {emp_count}")
-
+            record(f"{dept} Employee_Count={exp['count']}", False, f"Parse failed: {row[count_col]}")
         try:
-            avg_val = float(avg_perf) if avg_perf is not None else 0
-            record("Engineering Avg_Performance is ~3.21", abs(avg_val - 3.21) < 0.05,
-                   f"Got {avg_val}")
+            avg = float(row[avg_col]) if avg_col < len(row) and row[avg_col] is not None else None
+            record(f"{dept} Avg_Performance={exp['avg']}", avg is not None and abs(avg - exp["avg"]) < 0.015, f"Got {avg}")
         except (TypeError, ValueError):
-            record("Engineering Avg_Performance is ~3.21", False, f"Could not parse: {avg_perf}")
+            record(f"{dept} Avg_Performance={exp['avg']}", False, f"Parse failed: {row[avg_col]}")
+        if low_col is not None:
+            try:
+                lv = int(row[low_col]) if low_col < len(row) and row[low_col] is not None else None
+                record(f"{dept} Low_Performers_Count={exp['low']}", lv == exp["low"], f"Got {lv}")
+            except (TypeError, ValueError):
+                record(f"{dept} Low_Performers_Count={exp['low']}", False, f"Parse failed: {row[low_col]}")
+        if high_col is not None:
+            try:
+                hv = int(row[high_col]) if high_col < len(row) and row[high_col] is not None else None
+                record(f"{dept} High_Performers_Count={exp['high']}", hv == exp["high"], f"Got {hv}")
+            except (TypeError, ValueError):
+                record(f"{dept} High_Performers_Count={exp['high']}", False, f"Parse failed: {row[high_col]}")
 
 
 def check_gform():
@@ -142,37 +206,85 @@ def check_gform():
     cur.execute("SELECT id, title FROM gform.forms")
     forms = cur.fetchall()
 
+    # Exact (case-insensitive) match: "Annual Performance Review Form"
     review_form = None
     for form_id, title in forms:
-        if "performance review" in (title or "").lower() or "annual performance" in (title or "").lower():
+        tlow = (title or "").strip().lower()
+        if tlow == "annual performance review form":
             review_form = (form_id, title)
             break
+    # Fallback to looser match only if exact not found
+    if review_form is None:
+        for form_id, title in forms:
+            tlow = (title or "").lower()
+            if "annual performance review" in tlow and "form" in tlow:
+                review_form = (form_id, title)
+                break
 
-    record("Annual Performance Review Form exists", review_form is not None,
+    record("Annual Performance Review Form exists (exact title)", review_form is not None,
            f"Forms found: {[f[1] for f in forms]}")
 
     if review_form:
         form_id, title = review_form
         cur.execute("SELECT COUNT(*) FROM gform.questions WHERE form_id = %s", (form_id,))
         q_count = cur.fetchone()[0]
-        record("Form has at least 4 questions", q_count >= 4,
+        record("Form has exactly 6 questions", q_count == 6,
                f"Found {q_count} questions")
 
         # Check for department and rating questions
-        cur.execute("SELECT title, question_type FROM gform.questions WHERE form_id = %s ORDER BY position", (form_id,))
+        cur.execute("SELECT title, question_type, required, config FROM gform.questions WHERE form_id = %s ORDER BY position", (form_id,))
         questions = cur.fetchall()
         q_titles_lower = [q[0].lower() for q in questions]
 
+        has_emp_id_q = any("employee" in t and "id" in t for t in q_titles_lower)
         has_dept_q = any("department" in t for t in q_titles_lower)
-        has_rating_q = any("rating" in t or "performance" in t for t in q_titles_lower)
-        has_achievement_q = any("achievement" in t or "accomplishment" in t for t in q_titles_lower)
+        has_rating_q = any("rating" in t for t in q_titles_lower) or any("performance" in t and "rating" in t for t in q_titles_lower)
+        has_achievement_q = any("achievement" in t for t in q_titles_lower)
+        has_improvement_q = any("improvement" in t for t in q_titles_lower)
+        has_goals_q = any("goal" in t for t in q_titles_lower)
 
+        record("Form has Employee ID question", has_emp_id_q,
+               f"Questions: {[q[0] for q in questions]}")
         record("Form has Department question", has_dept_q,
                f"Questions: {[q[0] for q in questions]}")
         record("Form has Performance Rating question", has_rating_q,
                f"Questions: {[q[0] for q in questions]}")
         record("Form has Key Achievements question", has_achievement_q,
                f"Questions: {[q[0] for q in questions]}")
+        record("Form has Areas for Improvement question", has_improvement_q,
+               f"Questions: {[q[0] for q in questions]}")
+        record("Form has Goals for next year question", has_goals_q,
+               f"Questions: {[q[0] for q in questions]}")
+
+        # Question type / options checks
+        dept_q = next((q for q, t in zip(questions, q_titles_lower) if "department" in t), None)
+        rating_q = next((q for q, t in zip(questions, q_titles_lower) if "rating" in t), None)
+
+        if dept_q is not None:
+            record("Department question is RADIO",
+                   (dept_q[1] or "").upper() == "RADIO",
+                   f"Got type {dept_q[1]}")
+            try:
+                cfg = dept_q[3] if isinstance(dept_q[3], dict) else json.loads(dept_q[3]) if dept_q[3] else {}
+                opts = set(str(o).strip() for o in (cfg.get("options") or []))
+                expected_opts = {"Engineering", "Finance", "HR", "Operations", "R&D", "Sales", "Support"}
+                record("Department question has all 7 dept options",
+                       expected_opts.issubset(opts),
+                       f"Got options: {opts}")
+            except Exception as e:
+                record("Department question has all 7 dept options", False, str(e))
+        if rating_q is not None:
+            record("Performance Rating question is RADIO",
+                   (rating_q[1] or "").upper() == "RADIO",
+                   f"Got type {rating_q[1]}")
+            try:
+                cfg = rating_q[3] if isinstance(rating_q[3], dict) else json.loads(rating_q[3]) if rating_q[3] else {}
+                opts = cfg.get("options") or []
+                record("Performance Rating has 5 rating options",
+                       len(opts) == 5,
+                       f"Got {len(opts)} options: {opts}")
+            except Exception as e:
+                record("Performance Rating has 5 rating options", False, str(e))
 
     cur.close()
     conn.close()
@@ -208,13 +320,20 @@ def check_email():
 
     if matching:
         subject, _, _, body_text = matching
-        all_text = ((subject or "") + " " + (body_text or "")).lower()
-        has_hr_content = (
-            "performance review" in all_text or "annual" in all_text or
-            "department" in all_text or "engineering" in all_text
-        )
-        record("Email mentions performance review", has_hr_content,
+        subj_lower = (subject or "").lower()
+        body_lower = (body_text or "").lower()
+        record("Email subject is 'Annual Performance Review Process Setup Complete'",
+               "annual performance review process setup complete" in subj_lower,
                f"Subject: {subject}")
+        # Body should summarize department distribution
+        dept_mentions = sum(1 for d in EXPECTED_DEPARTMENTS if d.lower() in body_lower)
+        record("Email body summarizes department distribution (>=4 dept names)",
+               dept_mentions >= 4,
+               f"Mentioned {dept_mentions} depts in body")
+        record("Email body mentions performance distribution",
+               ("performance" in body_lower and "distribution" in body_lower) or
+               ("rating" in body_lower),
+               f"Body sample: {body_lower[:200]}")
 
 
 def main():
@@ -247,11 +366,11 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:
-        print("FAIL")
+        print(f"FAIL ({FAIL_COUNT} checks failed)")
         sys.exit(1)
 
 

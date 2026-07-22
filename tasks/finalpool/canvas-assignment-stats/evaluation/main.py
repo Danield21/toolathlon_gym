@@ -73,30 +73,37 @@ def main():
         for row in a_data:
             if row and row[0] is not None:
                 a_lookup[str(row[0]).strip().lower()] = row
+        g_keys = set()
         for g_row in g_data:
             if not g_row or g_row[0] is None:
                 continue
             key = str(g_row[0]).strip().lower()
+            g_keys.add(key)
             a_row = a_lookup.get(key)
             if a_row is None:
                 errors.append(f"Missing row: {g_row[0]}")
                 continue
-            
+
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 1):
-                    errors.append(f"{key}.Total_Assignments: {a_row[1]} vs {g_row[1]} (tol=1)")
+                if not num_close(a_row[1], g_row[1], 0):
+                    errors.append(f"{key}.Total_Assignments: {a_row[1]} vs {g_row[1]} (exact)")
 
             if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 1.0):
-                    errors.append(f"{key}.Avg_Points: {a_row[2]} vs {g_row[2]} (tol=1.0)")
+                if not num_close(a_row[2], g_row[2], 0.5):
+                    errors.append(f"{key}.Avg_Points: {a_row[2]} vs {g_row[2]} (tol=0.5)")
 
             if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 1):
-                    errors.append(f"{key}.TMA_Count: {a_row[3]} vs {g_row[3]} (tol=1)")
+                if not num_close(a_row[3], g_row[3], 0):
+                    errors.append(f"{key}.TMA_Count: {a_row[3]} vs {g_row[3]} (exact)")
 
             if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 1):
-                    errors.append(f"{key}.CMA_Count: {a_row[4]} vs {g_row[4]} (tol=1)")
+                if not num_close(a_row[4], g_row[4], 0):
+                    errors.append(f"{key}.CMA_Count: {a_row[4]} vs {g_row[4]} (exact)")
+        # Reject extra agent-only Course_Code rows beyond GT.
+        a_keys = set(a_lookup.keys())
+        extra = a_keys - g_keys
+        if extra:
+            errors.append(f"Extra Course_Code rows not in GT: {sorted(extra)[:5]}")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -134,8 +141,10 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 5.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=5.0)")
+                # For string-valued metrics (e.g. Course_Most_Assignments) num_close
+                # falls back to case-insensitive string compare via tol=0.
+                if not num_close(a_row[1], g_row[1], 0):
+                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (exact)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -158,7 +167,7 @@ def main():
                 all_errors.append("Assignment_Overview.docx has too little text content (< 50 chars)")
             _kws = ["assignment", "overview"]
             _missing = [k for k in _kws if k not in _text and k not in _headings]
-            if len(_missing) == len(_kws):
+            if len(_missing) > 0:
                 all_errors.append(f"Assignment_Overview.docx missing expected keywords: {_missing}")
         except ImportError:
             if os.path.getsize(docx_path) < 100:

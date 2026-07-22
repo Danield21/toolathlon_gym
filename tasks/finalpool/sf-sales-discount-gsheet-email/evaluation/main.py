@@ -72,48 +72,107 @@ def main():
                 seg_sheet_id = seg_sheets[0][0]
                 cur.execute("SELECT row_index, col_index, value FROM gsheet.cells WHERE sheet_id = %s ORDER BY row_index, col_index", (seg_sheet_id,))
                 cells = cur.fetchall()
-                # Build grid
+                # Build grid as {row_idx: {col_idx: value}}
                 grid = {}
                 for row_idx, col_idx, value in cells:
                     if row_idx not in grid:
                         grid[row_idx] = {}
                     grid[row_idx][col_idx] = value
 
-                # Skip header row (row 1), check data rows
-                data_rows = {k: v for k, v in grid.items() if k > 1}
-                if expected_map and len(data_rows) < len(expected_map):
-                    db_errors.append(f"Expected {len(expected_map)} data rows, found {len(data_rows)}")
-                elif expected_map:
-                    # Check each expected segment is present
-                    for seg, exp in expected_map.items():
-                        found = False
-                        for row_idx, row_data in data_rows.items():
-                            seg_val = row_data.get(1, "")
-                            if seg_val and str(seg_val).strip().lower() == seg.lower():
-                                found = True
-                                if not num_close(row_data.get(2, ""), exp[1], 20):
-                                    db_errors.append(f"{seg}.Order_Count: {row_data.get(2)} vs {exp[1]}")
-                                if not num_close(row_data.get(3, ""), exp[2], 20):
-                                    db_errors.append(f"{seg}.Discounted_Orders: {row_data.get(3)} vs {exp[2]}")
-                                if not num_close(row_data.get(4, ""), exp[3], 2.0):
-                                    db_errors.append(f"{seg}.Discount_Rate_Pct: {row_data.get(4)} vs {exp[3]}")
-                                if not num_close(row_data.get(6, ""), exp[5], 500):
-                                    db_errors.append(f"{seg}.Total_Revenue: {row_data.get(6)} vs {exp[5]}")
+                # ---- Dynamic header detection (avoid hardcoded col indices) ----
+                def _norm(s):
+                    return str(s or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+                # Aliases each canonical column may appear as.
+                col_aliases = {
+                    "segment":            ["segment", "customer_segment", "cust_segment"],
+                    "order_count":        ["order_count", "orders", "total_orders", "num_orders"],
+                    "discounted_orders":  ["discounted_orders", "disc_orders", "orders_discounted"],
+                    "discount_rate_pct":  ["discount_rate_pct", "discount_rate", "disc_rate", "disc_rate_pct"],
+                    "avg_discount_pct":   ["avg_discount_pct", "avg_disc_pct", "average_discount_pct"],
+                    "total_revenue":      ["total_revenue", "revenue", "total_rev"],
+                    "discounted_revenue": ["discounted_revenue", "disc_revenue", "discounted_rev"],
+                    "revenue_impact_pct": ["revenue_impact_pct", "revenue_impact", "rev_impact_pct", "impact_pct"],
+                }
+                header_row_idx = None
+                col_map = {}  # canonical_name -> col_idx
+                for r in sorted(grid.keys()):
+                    row_cells = grid[r]
+                    norm_cells = {col: _norm(v) for col, v in row_cells.items()}
+                    candidate_map = {}
+                    for canon, aliases in col_aliases.items():
+                        for col_idx, normed in norm_cells.items():
+                            if normed in aliases:
+                                candidate_map[canon] = col_idx
                                 break
-                        if not found:
-                            db_errors.append(f"Segment '{seg}' not found in sheet")
+                    # Header row: must contain at least 'segment' and 4+ canonical columns mapped.
+                    if "segment" in candidate_map and len(candidate_map) >= 4:
+                        header_row_idx = r
+                        col_map = candidate_map
+                        break
+
+                if header_row_idx is None:
+                    db_errors.append(
+                        f"Could not find header row mapping (need 'Segment' + 3 metric columns). "
+                        f"Top rows: {dict(list(grid.items())[:3])}"
+                    )
+                else:
+                    data_rows = {k: v for k, v in grid.items() if k > header_row_idx}
+                    if expected_map and len(data_rows) < len(expected_map):
+                        db_errors.append(f"Expected {len(expected_map)} data rows, found {len(data_rows)}")
+                    elif expected_map:
+                        for seg, exp in expected_map.items():
+                            found = False
+                            seg_col = col_map.get("segment")
+                            for row_idx, row_data in data_rows.items():
+                                seg_val = row_data.get(seg_col, "") if seg_col is not None else ""
+                                if seg_val and str(seg_val).strip().lower() == seg.lower():
+                                    found = True
+                                    # Map canonical -> tolerance and exp index
+                                    metric_specs = [
+                                        ("order_count",        exp[1], 0,    "Order_Count"),
+                                        ("discounted_orders",  exp[2], 0,    "Discounted_Orders"),
+                                        ("discount_rate_pct",  exp[3], 0.2,  "Discount_Rate_Pct"),
+                                        ("avg_discount_pct",   exp[4], 0.05, "Avg_Discount_Pct"),
+                                        ("total_revenue",      exp[5], 1.0,  "Total_Revenue"),
+                                        ("discounted_revenue", exp[6], 1.0,  "Discounted_Revenue"),
+                                        ("revenue_impact_pct", exp[7], 0.2,  "Revenue_Impact_Pct"),
+                                    ]
+                                    for canon, exp_val, tol, label in metric_specs:
+                                        col_idx = col_map.get(canon)
+                                        if col_idx is None:
+                                            db_errors.append(f"{seg}: column '{label}' not present in header")
+                                            continue
+                                        actual = row_data.get(col_idx, "")
+                                        if not num_close(actual, exp_val, tol):
+                                            db_errors.append(
+                                                f"{seg}.{label}: {actual} vs {exp_val} (tol={tol})"
+                                            )
+                                    break
+                            if not found:
+                                db_errors.append(f"Segment '{seg}' not found in sheet")
     except Exception as e:
         db_errors.append(f"Google Sheet check error: {e}")
 
-    # Check email
+    # Check email - exact subject + recipient match
     print("  Checking email...")
     try:
-        cur.execute("""SELECT subject FROM email.messages
-                       WHERE folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%sent%')""")
+        cur.execute("""SELECT subject, to_addr, COALESCE(body_text, body_html, '')
+                       FROM email.messages""")
         email_rows = cur.fetchall()
-        found_email = any("discount" in (s or "").lower() for (s,) in email_rows)
-        if not found_email:
-            db_errors.append("No email with 'discount' in subject found in sent folder")
+        target_subj = "segment discount analysis"
+        target_to = "finance-team@company.com"
+        matched = None
+        for subj, to_addr, body in email_rows:
+            if target_subj in (subj or "").lower() and target_to in str(to_addr or "").lower():
+                matched = (subj, to_addr, body)
+                break
+        if not matched:
+            db_errors.append(f"No email '{target_subj}' to {target_to} found (checked {len(email_rows)})")
+        else:
+            body_l = (matched[2] or "").lower()
+            if "discount" not in body_l or "segment" not in body_l:
+                db_errors.append("Email body must mention 'discount' and 'segment'")
     except Exception as e:
         db_errors.append(f"Email check error: {e}")
 
@@ -126,18 +185,20 @@ def main():
 def _print_and_exit(file_errors, db_errors):
     print(f"\n=== SUMMARY ===")
     print(f"  File errors: {len(file_errors)}")
-    print(f"  DB errors:   {len(db_errors)} (not blocking)")
+    print(f"  DB errors:   {len(db_errors)}")
     if db_errors:
         for e in db_errors[:10]:
             print(f"    [DB] {e}")
     if file_errors:
         for e in file_errors[:10]:
             print(f"    [FILE] {e}")
-        print(f"  Overall: FAIL")
-        sys.exit(1)
-    else:
+    total_errors = len(file_errors) + len(db_errors)
+    if total_errors == 0:
         print(f"  Overall: PASS")
         sys.exit(0)
+    else:
+        print(f"  Overall: FAIL")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

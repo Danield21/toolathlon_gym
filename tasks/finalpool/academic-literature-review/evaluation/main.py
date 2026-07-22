@@ -106,11 +106,25 @@ def main():
     check("Document has conclusion/summary section", has_conclusion,
           "No 'conclusion' or 'summary' found in text")
 
-    # Summary
-    total = PASS_COUNT + FAIL_COUNT
-    print(f"\nResults: {PASS_COUNT}/{total} passed, {FAIL_COUNT} failed")
+    # Check 7: Reverse validation — distractor (non-RAG) papers must NOT appear.
+    # The preprocess injects these unrelated papers; agent must filter them out.
+    distractor_titles = [
+        "Deep Learning Approaches for Medical Image Segmentation",
+        "Quantum Computing Foundations and Error Correction",
+        "Reinforcement Learning for Robotic Manipulation in Cluttered Environments",
+        "Graph Neural Networks for Social Network Analysis",
+    ]
+    for dtitle in distractor_titles:
+        check(f"Distractor NOT present: {dtitle[:50]}...",
+              dtitle.lower() not in normalized,
+              f"Unrelated distractor paper leaked into review: {dtitle}")
 
-    sys.exit(0 if FAIL_COUNT == 0 else 1)
+    # Summary with threshold-based pass (80%)
+    total = PASS_COUNT + FAIL_COUNT
+    accuracy = (PASS_COUNT / total * 100) if total > 0 else 0
+    print(f"\nResults: {PASS_COUNT}/{total} passed, {FAIL_COUNT} failed ({accuracy:.1f}%)")
+
+    sys.exit(0 if accuracy >= 80 else 1)
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ import psycopg2
 
 DB_CONN = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -328,7 +328,16 @@ async def setup_mock_server():
         f"nohup python3 -m http.server {MOCK_PORT} --directory {serve_dir} "
         f"> {serve_dir}/server.log 2>&1 &"
     )
-    await asyncio.sleep(1)
+    # Poll until the server is ready (max 10 seconds)
+    import urllib.request
+    for _ in range(20):
+        await asyncio.sleep(0.5)
+        try:
+            with urllib.request.urlopen(f"http://localhost:{MOCK_PORT}/", timeout=1) as resp:
+                if resp.status == 200:
+                    break
+        except Exception:
+            continue
     print(f"[preprocess] Mock server running at http://localhost:{MOCK_PORT}")
 
 

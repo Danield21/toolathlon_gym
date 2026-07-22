@@ -303,26 +303,20 @@ def check_notion(expected):
 
     print(f"[check_notion] Found {len(pages)} Notion pages.")
 
-    # Look for a page with FFF or at-risk or finance in title
+    # Strict: require the exact course code substring 'FFF-2014J' (case-insensitive)
+    # AND an at-risk indicator in title/properties to avoid matching unrelated pages.
     found_page = None
     for page_id, props in pages:
         props_str = json.dumps(props).lower() if props else ""
-        if ("fff" in props_str and "at-risk" in props_str) or \
-           ("fff-2014j" in props_str) or \
-           ("at-risk students" in props_str and "fff" in props_str):
+        has_code = "fff-2014j" in props_str
+        has_risk = ("at-risk" in props_str) or ("at risk" in props_str)
+        if has_code and has_risk:
             found_page = (page_id, props)
             break
 
-    if found_page is None:
-        # Broader search
-        for page_id, props in pages:
-            props_str = json.dumps(props).lower() if props else ""
-            if "fff" in props_str or "finance" in props_str or "at-risk" in props_str:
-                found_page = (page_id, props)
-                break
-
-    record("Notion page for at-risk students exists", found_page is not None,
-           f"No page with FFF/at-risk/finance found among {len(pages)} pages")
+    record("Notion page titled with 'FFF-2014J' and at-risk exists",
+           found_page is not None,
+           f"No page with 'FFF-2014J' + at-risk among {len(pages)} pages")
 
     if found_page:
         page_id = found_page[0]
@@ -425,6 +419,39 @@ def check_gcal():
                     record(f"gcal {expected_date}: description mentions tutoring or finance",
                            "tutor" in desc_lower or "finance" in desc_lower or "at-risk" in desc_lower,
                            f"Description: {(description or '')[:100]}")
+
+                    # Precise: 15:00 ET start on the expected_date in America/New_York
+                    try:
+                        from zoneinfo import ZoneInfo
+                        import datetime as _dt
+                        ny = ZoneInfo("America/New_York")
+                        sd = start_dt
+                        if sd.tzinfo is None:
+                            # Naive timestamps in DB are UTC
+                            sd = sd.replace(tzinfo=_dt.timezone.utc)
+                        sd_ny = sd.astimezone(ny)
+                        record(f"gcal {expected_date}: starts 15:00 ET on {expected_date}",
+                               (sd_ny.strftime("%Y-%m-%d") == expected_date
+                                and sd_ny.hour == 15 and sd_ny.minute == 0),
+                               f"NY local: {sd_ny}")
+                        if end_dt is not None:
+                            ed = end_dt
+                            if ed.tzinfo is None:
+                                ed = ed.replace(tzinfo=_dt.timezone.utc)
+                            ed_ny = ed.astimezone(ny)
+                            record(f"gcal {expected_date}: ends 16:00 ET",
+                                   (ed_ny.hour == 16 and ed_ny.minute == 0),
+                                   f"NY local end: {ed_ny}")
+                    except ImportError:
+                        # Fallback to naive hour check
+                        record(f"gcal {expected_date}: start hour 15 or UTC 19/20",
+                               start_dt.hour in (15, 19, 20),
+                               f"Got start hour: {start_dt.hour}")
+                        if end_dt is not None:
+                            duration_min = (end_dt - start_dt).total_seconds() / 60
+                            record(f"gcal {expected_date}: duration 60 min",
+                                   abs(duration_min - 60) <= 1,
+                                   f"Got {duration_min} min")
                     break
 
         if not found:

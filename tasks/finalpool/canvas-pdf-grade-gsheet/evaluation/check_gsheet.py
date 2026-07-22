@@ -110,58 +110,67 @@ def check_gsheet():
         errors.append("No cells found in the Grades sheet")
         return passed, failed, errors
 
-    # Build a row-indexed data structure
-    # Find max row and col
     max_row = max(r for r, c in cells.keys())
     max_col = max(c for r, c in cells.keys())
 
-    # Data rows start at row 1 (row 0 is header)
-    # We need to find the Course_Code column
-    # Try to match by looking for course codes in the data
-    data_rows = {}
-    for row_idx in range(1, max_row + 1):
-        row_vals = []
-        for col_idx in range(0, max_col + 1):
-            row_vals.append(cells.get((row_idx, col_idx), ""))
-        # Find course code in this row
-        for val in row_vals:
-            if val and "2014B" in str(val):
-                data_rows[str(val).strip()] = row_vals
+    header_vals = {}
+    for col_idx in range(0, max_col + 1):
+        header_vals[col_idx] = str(cells.get((0, col_idx), "") or "").strip().lower()
+
+    # NEW: Validate header order and exact values (case-insensitive, _/space interchangeable)
+    expected_lower = [h.lower().replace("_", " ") for h in EXPECTED_HEADERS]
+    actual_headers_ordered = [header_vals.get(i, "").replace("_", " ").strip() for i in range(len(EXPECTED_HEADERS))]
+    header_order_ok = actual_headers_ordered == expected_lower
+    if not header_order_ok:
+        failed += 1
+        errors.append(
+            f"GSheet header order/exact mismatch: expected {EXPECTED_HEADERS}, got {actual_headers_ordered}"
+        )
+        return passed, failed, errors
+    passed += 1
+
+    col_indices = {}
+    for exp_header in EXPECTED_HEADERS:
+        key = exp_header.lower().replace("_", " ")
+        for col_idx, hv in header_vals.items():
+            hv_norm = hv.replace("_", " ")
+            if hv_norm == key or key == hv_norm.strip():
+                col_indices[exp_header] = col_idx
                 break
 
-    # Check each expected row
+    missing_headers = [h for h in EXPECTED_HEADERS if h not in col_indices]
+    if missing_headers:
+        failed += 1
+        errors.append(f"GSheet missing headers: {missing_headers}. Found: {list(header_vals.values())}")
+        return passed, failed, errors
+    passed += 1
+
+    data_rows = {}
+    for row_idx in range(1, max_row + 1):
+        code_val = cells.get((row_idx, col_indices["Course_Code"]), "")
+        if code_val and "2014B" in str(code_val):
+            data_rows[str(code_val).strip()] = {h: cells.get((row_idx, col_indices[h]), "") for h in EXPECTED_HEADERS}
+
     for exp_code, exp_avg, exp_grade, exp_dist, exp_prob in EXPECTED_ROWS:
         if exp_code not in data_rows:
             failed += 1
             errors.append(f"GSheet: Course {exp_code} not found")
             continue
 
-        row_vals = data_rows[exp_code]
+        row_data = data_rows[exp_code]
         row_ok = True
-
-        # Find the class average value in this row
-        avg_found = False
-        grade_found = False
-        dist_found = False
-        prob_found = False
-
-        for val in row_vals:
-            val_str = str(val).strip()
-            if num_close(val_str, exp_avg, 0.5):
-                avg_found = True
-            if str_match(val_str, exp_grade):
-                grade_found = True
-            if str_match(val_str, exp_dist) and val_str.lower() in ("yes", "no"):
-                dist_found = True
-            if str_match(val_str, exp_prob) and val_str.lower() in ("yes", "no"):
-                prob_found = True
-
-        if not avg_found:
+        if not num_close(row_data["Class_Average"], exp_avg, 0.5):
             row_ok = False
-            errors.append(f"GSheet {exp_code}: class average {exp_avg} not found")
-        if not grade_found:
+            errors.append(f"GSheet {exp_code}: class average expected {exp_avg}, got {row_data['Class_Average']}")
+        if not str_match(row_data["Letter_Grade"], exp_grade):
             row_ok = False
-            errors.append(f"GSheet {exp_code}: letter grade {exp_grade} not found")
+            errors.append(f"GSheet {exp_code}: letter grade expected {exp_grade}, got {row_data['Letter_Grade']}")
+        if not str_match(row_data["Distinction"], exp_dist):
+            row_ok = False
+            errors.append(f"GSheet {exp_code}: distinction expected {exp_dist}, got {row_data['Distinction']}")
+        if not str_match(row_data["Probation"], exp_prob):
+            row_ok = False
+            errors.append(f"GSheet {exp_code}: probation expected {exp_prob}, got {row_data['Probation']}")
 
         if row_ok:
             passed += 1

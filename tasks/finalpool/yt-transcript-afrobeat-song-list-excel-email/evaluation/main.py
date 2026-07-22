@@ -3,13 +3,14 @@ Evaluation for yt-transcript-afrobeat-song-list-excel-email task.
 
 Checks:
 1. Afrobeat_Tracklist.xlsx exists in agent_workspace
-2. "Tracklist" sheet has >= 8 data rows
+2. "Tracklist" sheet has >= 10 data rows
 3. "Tracklist" sheet has Track_Number, Song_Title, Artist columns
 4. "Artist_Summary" sheet exists with >= 4 rows
-5. Curator_Notes.docx exists with >= 3 headings
+5. Curator_Notes.docx exists with >= 3 headings; required section titles
 6. Curator_Notes.docx contains music-related keywords
-7. Notion page exists with "Afrobeat" or "Mix" in title
-8. Email sent to music@label.com
+7. Notion page exists with "Afrobeat"/"Mix"/"Tracklist" in title
+8. Email sent to music@label.com with required subject and body
+9. Per-row validation: >=80% Tracklist rows match GT, >=80% Artist_Summary artists match
 """
 import json
 import os
@@ -66,7 +67,7 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
            f"No matching xlsx found in {agent_workspace}")
 
     if not xlsx_path:
-        record("Tracklist sheet has >= 8 data rows", False, "xlsx not found")
+        record("Tracklist sheet has >= 10 data rows", False, "xlsx not found")
         record("Tracklist sheet has required columns", False, "xlsx not found")
         record("Artist_Summary sheet has >= 4 rows", False, "xlsx not found")
         return
@@ -87,8 +88,8 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         if tracklist_sheet:
             data_rows = [r for r in tracklist_sheet.iter_rows(min_row=2, values_only=True)
                          if any(c is not None for c in r)]
-            record("Tracklist sheet has >= 8 data rows", len(data_rows) >= 8,
-                   f"Found {len(data_rows)} data rows")
+            record("Tracklist sheet has >= 10 data rows", len(data_rows) >= 10,
+                   f"Found {len(data_rows)} data rows, expected at least 10")
 
             headers = [str(c.value).strip() if c.value else "" for c in next(tracklist_sheet.iter_rows(max_row=1))]
             headers_lower = [h.lower() for h in headers]
@@ -99,7 +100,7 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
                    has_track_num and has_song and has_artist,
                    f"Headers found: {headers}")
         else:
-            record("Tracklist sheet has >= 8 data rows", False, "No Tracklist sheet found")
+            record("Tracklist sheet has >= 10 data rows", False, "No Tracklist sheet found")
             record("Tracklist sheet has required columns", False, "No Tracklist sheet found")
 
         # Check Artist_Summary sheet
@@ -136,30 +137,103 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
                     continue
                 gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
                 a_rows = [r for r in a_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-                record(f"GT '{gt_sname}' row count", len(a_rows) == len(gt_rows),
-                       f"Expected {len(gt_rows)}, got {len(a_rows)}")
-                for ri in range(min(3, len(gt_rows))):
-                    if ri >= len(a_rows):
-                        break
-                    ok = True
-                    for ci in range(min(len(gt_rows[ri]), len(a_rows[ri]))):
-                        gv, av = gt_rows[ri][ci], a_rows[ri][ci]
-                        if gv is None:
+                # Tracklist: extracted song count is fuzzy; allow >= GT row count for Tracklist; Artist_Summary should match GT
+                if "track" in gt_sname.lower():
+                    record(f"GT '{gt_sname}' row count >= {len(gt_rows)}",
+                           len(a_rows) >= max(10, len(gt_rows) - 2),
+                           f"Expected at least {max(10, len(gt_rows) - 2)}, got {len(a_rows)}")
+                else:
+                    record(f"GT '{gt_sname}' row count >= {len(gt_rows) - 2}",
+                           len(a_rows) >= max(4, len(gt_rows) - 2),
+                           f"Expected at least {max(4, len(gt_rows) - 2)}, got {len(a_rows)}")
+                # For Tracklist (fuzzy from transcript extraction): require >= 80% of GT
+                # tracks to appear in agent output (matched by Track_Number OR Song_Title).
+                # For Artist_Summary (deterministic from tracklist): require ALL GT artists to
+                # appear with correct Song_Count and Total_Duration_Sec.
+                if "track" in gt_sname.lower():
+                    a_by_num = {}
+                    a_by_song = {}
+                    for ar in a_rows:
+                        if ar and len(ar) > 0 and ar[0] is not None:
+                            try:
+                                a_by_num[int(ar[0])] = ar
+                            except (TypeError, ValueError):
+                                pass
+                        if ar and len(ar) > 1 and ar[1] is not None:
+                            a_by_song[str(ar[1]).strip().lower()] = ar
+                    matched_count = 0
+                    for gr in gt_rows:
+                        if not gr or len(gr) < 2:
                             continue
-                        if isinstance(gv, (int, float)):
-                            if not num_close(av, gv, max(abs(gv) * 0.1, 1.0)):
-                                ok = False
-                                break
-                        else:
-                            if not str_match(av, gv):
-                                ok = False
-                                break
-                    record(f"GT '{gt_sname}' row {ri+1} values", ok,
-                           f"gt={gt_rows[ri][:4]}, agent={a_rows[ri][:4] if ri < len(a_rows) else 'missing'}")
+                        gnum = gr[0]
+                        gsong = str(gr[1]).strip().lower() if gr[1] is not None else ""
+                        ar = None
+                        try:
+                            ar = a_by_num.get(int(gnum)) if gnum is not None else None
+                        except (TypeError, ValueError):
+                            ar = None
+                        if ar is None and gsong:
+                            ar = a_by_song.get(gsong)
+                        # Tighter song match: substring match only when the
+                        # shorter string is at least 5 chars (avoid 'love' matching
+                        # 'lovely', 'on' matching anything).
+                        if ar is None and gsong and len(gsong) >= 5:
+                            for asong, arow in a_by_song.items():
+                                if not asong or len(asong) < 5:
+                                    continue
+                                shorter = gsong if len(gsong) <= len(asong) else asong
+                                longer = asong if shorter == gsong else gsong
+                                if len(shorter) >= 5 and shorter in longer:
+                                    ar = arow
+                                    break
+                        if ar is not None:
+                            matched_count += 1
+                    threshold = max(int(len(gt_rows) * 0.8), 8)
+                    record(f"GT '{gt_sname}' >= {threshold}/{len(gt_rows)} rows matched in agent",
+                           matched_count >= threshold,
+                           f"matched {matched_count}/{len(gt_rows)}")
+                else:
+                    # Artist_Summary
+                    a_by_artist = {}
+                    for ar in a_rows:
+                        if ar and ar[0] is not None:
+                            a_by_artist[str(ar[0]).strip().lower()] = ar
+                    artist_match_count = 0
+                    artist_value_match = 0
+                    for gr in gt_rows:
+                        if not gr or gr[0] is None:
+                            continue
+                        gkey = str(gr[0]).strip().lower()
+                        ar = a_by_artist.get(gkey)
+                        if ar is None:
+                            continue
+                        artist_match_count += 1
+                        all_ok = True
+                        for ci in range(min(len(gr), len(ar))):
+                            gv, av = gr[ci], ar[ci]
+                            if gv is None:
+                                continue
+                            if isinstance(gv, (int, float)):
+                                if not num_close(av, gv, max(abs(gv) * 0.10, 1.0)):
+                                    all_ok = False
+                                    break
+                            else:
+                                if not str_match(av, gv):
+                                    all_ok = False
+                                    break
+                        if all_ok:
+                            artist_value_match += 1
+                    artist_threshold = max(int(len(gt_rows) * 0.8), 4)
+                    record(f"GT '{gt_sname}' >= {artist_threshold}/{len(gt_rows)} artists present in agent",
+                           artist_match_count >= artist_threshold,
+                           f"matched {artist_match_count}/{len(gt_rows)}")
+                    record(f"GT '{gt_sname}' matched artist rows have correct values (>= 80%)",
+                           artist_value_match >= artist_threshold,
+                           f"value-match {artist_value_match}/{len(gt_rows)}")
             gt_wb.close()
 
     except Exception as e:
-        record("Tracklist sheet has >= 8 data rows", False, str(e))
+        record("Tracklist sheet has >= 10 data rows", False, str(e))
         record("Tracklist sheet has required columns", False, str(e))
         record("Artist_Summary sheet exists", False, str(e))
         record("Artist_Summary sheet has >= 4 data rows", False, str(e))
@@ -168,14 +242,16 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
 def check_word(agent_workspace):
     print("\n=== Check 5-6: Curator_Notes.docx ===")
     docx_path = None
+    # Strict filename match first.
     for fname in os.listdir(agent_workspace):
-        if fname.lower().endswith(".docx") and ("curator" in fname.lower() or "notes" in fname.lower()):
+        if fname.lower() == "curator_notes.docx":
             docx_path = os.path.join(agent_workspace, fname)
             break
     if not docx_path:
-        # Try any docx
+        # Permissive fallback: filename must contain BOTH 'curator' AND 'notes'.
         for fname in os.listdir(agent_workspace):
-            if fname.lower().endswith(".docx"):
+            fl = fname.lower()
+            if fl.endswith(".docx") and "curator" in fl and "notes" in fl:
                 docx_path = os.path.join(agent_workspace, fname)
                 break
 
@@ -194,9 +270,23 @@ def check_word(agent_workspace):
         record("Word doc has >= 3 headings", len(headings) >= 3,
                f"Found {len(headings)} headings")
 
-        full_text = " ".join(p.text for p in doc.paragraphs).lower()
+        # Validate the three specific section titles required by task.md
+        all_para_text = " ".join(p.text for p in doc.paragraphs).lower()
+        heading_text = " ".join(p.text for p in headings).lower()
+        # Allow the section to appear either as a heading or as text in body
+        # Required: main title 'Afrobeat Mix 2024 - Curator Notes' (heading), 'Notable Tracks', 'Genre Analysis'
+        has_main = "afrobeat mix 2024" in all_para_text and "curator notes" in all_para_text
+        has_notable = "notable tracks" in all_para_text
+        has_genre = "genre analysis" in all_para_text
+        record("Word doc has 'Afrobeat Mix 2024 - Curator Notes' title",
+               has_main, f"Heading text: {heading_text[:200]}")
+        record("Word doc has 'Notable Tracks' section",
+               has_notable, f"Found in text: {has_notable}")
+        record("Word doc has 'Genre Analysis' section",
+               has_genre, f"Found in text: {has_genre}")
+
         keywords = ["track", "song", "artist", "afrobeat", "mix", "music"]
-        found = [k for k in keywords if k in full_text]
+        found = [k for k in keywords if k in all_para_text]
         record("Word doc contains music-related keywords", len(found) >= 3,
                f"Found keywords: {found}")
     except Exception as e:
@@ -205,7 +295,7 @@ def check_word(agent_workspace):
 
 
 def check_notion():
-    print("\n=== Check 7: Notion page with Afrobeat/Mix in title ===")
+    print("\n=== Check 7: Notion page 'Afrobeat Mix 2024 Tracklist' ===")
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     cur.execute("""
@@ -213,16 +303,54 @@ def check_notion():
         ORDER BY created_time DESC
     """)
     rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    found = False
+
+    # Title must contain BOTH 'afrobeat' AND 'tracklist' (mix optional but expected).
+    matched_id = None
     for row_id, props in rows:
         props_str = json.dumps(props).lower() if props else ""
-        if any(k in props_str for k in ["afrobeat", "mix", "tracklist"]):
-            found = True
+        if "afrobeat" in props_str and "tracklist" in props_str:
+            matched_id = row_id
             break
-    record("Notion page exists with Afrobeat/Mix/Tracklist in title",
-           found, f"Total notion pages: {len(rows)}")
+    record(
+        "Notion page exists with title containing 'Afrobeat' AND 'Tracklist'",
+        matched_id is not None,
+        f"Total notion pages: {len(rows)}",
+    )
+
+    if matched_id is not None:
+        # Validate content blocks: must reference at least 5 tracks (track number,
+        # song title, or artist) so that the page contains the actual tracklist
+        # rather than an empty stub.
+        try:
+            cur.execute(
+                """
+                SELECT COALESCE(
+                    string_agg(block_data::text, ' '),
+                    ''
+                )
+                FROM notion.blocks
+                WHERE parent_id = %s
+                """,
+                (matched_id,),
+            )
+            block_text = (cur.fetchone() or [""])[0] or ""
+        except Exception:
+            block_text = ""
+        block_text_lower = block_text.lower()
+        # Count distinct track-like tokens. We expect at least track numbers 1..5
+        # to appear AND at least 3 of these keywords: "track", "song", "artist".
+        has_track_numbers = sum(
+            1 for n in range(1, 11) if f"{n}." in block_text or f"track {n}" in block_text_lower
+        )
+        keyword_hits = sum(1 for k in ["track", "song", "artist"] if k in block_text_lower)
+        record(
+            "Notion page content references multiple tracks (>=5 numbered + >=2 keywords)",
+            has_track_numbers >= 5 and keyword_hits >= 2,
+            f"Numbered tracks found: {has_track_numbers}, keywords: {keyword_hits}, content len: {len(block_text)}",
+        )
+
+    cur.close()
+    conn.close()
 
 
 def check_email():
@@ -252,12 +380,18 @@ def check_email():
     record("Email sent to music@label.com", matching is not None,
            f"Total messages found: {len(messages)}")
     if matching:
-        subj = matching[0] or ""
+        subj = (matching[0] or "").lower()
         body = matching[3] or ""
-        has_content = any(k in (subj + " " + body).lower()
-                          for k in ["afrobeat", "tracklist", "track", "artist", "mix"])
-        record("Email mentions Afrobeat/tracklist content", has_content,
-               f"Subject: {subj}")
+        # Subject must contain 'Afrobeat Mix 2024 Tracklist Ready' or close approximation
+        subj_ok = ("afrobeat" in subj) and ("tracklist" in subj) and ("2024" in subj or "ready" in subj)
+        record("Email subject 'Afrobeat Mix 2024 Tracklist Ready'", subj_ok,
+               f"Subject: {matching[0]}")
+        # Body must mention number of tracks and reference spreadsheet/curator notes
+        body_lower = body.lower()
+        body_ok = ("track" in body_lower) and ("spreadsheet" in body_lower or "xlsx" in body_lower or
+                                                "curator" in body_lower or "notes" in body_lower)
+        record("Email body mentions tracks + spreadsheet/curator notes", body_ok,
+               f"Body excerpt: {body[:200]}")
 
 
 def main():
@@ -293,11 +427,11 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:
-        print("FAIL")
+        print(f"FAIL ({FAIL_COUNT} failed checks)")
         sys.exit(1)
 
 

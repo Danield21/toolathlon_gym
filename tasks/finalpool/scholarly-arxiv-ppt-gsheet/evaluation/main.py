@@ -56,31 +56,57 @@ def check_pptx(agent_workspace):
     record("PPT file readable", True)
 
     num_slides = len(prs.slides)
-    record("PPT has at least 5 slides", num_slides >= 5, f"Found {num_slides} slides")
+    # Task implies 5 slides (title + 3 papers + summary). Allow 5-6 for tolerance, but bound noise.
+    record("PPT has 5-6 slides", 5 <= num_slides <= 6, f"Found {num_slides} slides")
 
-    # Gather all text from slides
-    all_text = []
+    # Per-slide text extraction
+    slide_texts = []
     for slide in prs.slides:
+        slide_text = []
         for shape in slide.shapes:
             if hasattr(shape, "text"):
-                all_text.append(shape.text.lower())
-    full_text = " ".join(all_text)
+                slide_text.append(shape.text.lower())
+        slide_texts.append(" ".join(slide_text))
+    full_text = " ".join(slide_texts)
 
-    # Check title slide
-    has_title = "survey" in full_text and ("reasoning" in full_text or "llm" in full_text.lower())
-    record("PPT contains survey/reasoning title content", has_title, "Looked for 'survey' and 'reasoning'")
+    # Check FIRST slide title contains 'survey' AND 'reasoning'
+    if slide_texts:
+        first = slide_texts[0]
+        first_ok = ("survey" in first) and ("reasoning" in first) and ("llm" in first or "language" in first)
+        record("PPT first slide titled 'Survey of LLM Reasoning Methods'", first_ok,
+               f"First slide text: {first[:200]}")
+    else:
+        record("PPT first slide titled 'Survey of LLM Reasoning Methods'", False, "No slides")
 
-    # Check paper content
-    has_chain = any(kw in full_text for kw in ["chain-of-thought", "chain of thought"])
-    has_self_consistency = "self-consistency" in full_text or "self consistency" in full_text
-    has_tree = "tree of thoughts" in full_text or "tree of thought" in full_text
-    record("PPT mentions chain-of-thought paper", has_chain)
-    record("PPT mentions self-consistency paper", has_self_consistency)
-    record("PPT mentions tree of thoughts paper", has_tree)
+    # Check paper content - must each appear on a dedicated slide
+    paper_keywords = [
+        ("chain-of-thought paper", ["chain-of-thought", "chain of thought"]),
+        ("self-consistency paper", ["self-consistency", "self consistency"]),
+        ("tree of thoughts paper", ["tree of thoughts", "tree of thought"]),
+    ]
+    for label, kws in paper_keywords:
+        # at least one body slide (not first/last) contains this paper
+        found_in_slide = False
+        for st in slide_texts[1:-1] if len(slide_texts) >= 3 else slide_texts:
+            if any(kw in st for kw in kws):
+                found_in_slide = True
+                break
+        # fallback: also accept if appears in any non-first slide
+        if not found_in_slide:
+            for st in slide_texts[1:]:
+                if any(kw in st for kw in kws):
+                    found_in_slide = True
+                    break
+        record(f"PPT has dedicated slide for {label}", found_in_slide)
 
-    # Check summary slide
-    has_summary = "summary" in full_text or "comparison" in full_text or "conclusion" in full_text
-    record("PPT has a summary/conclusion slide", has_summary)
+    # Check summary slide (last slide should mention summary/comparison/conclusion)
+    if slide_texts:
+        last = slide_texts[-1]
+        has_summary_last = any(k in last for k in ["summary", "comparison", "conclusion", "compare"])
+        record("PPT last slide is summary/comparison", has_summary_last,
+               f"Last slide text: {last[:200]}")
+    else:
+        record("PPT last slide is summary/comparison", False, "No slides")
 
 
 def check_gsheet():
@@ -117,13 +143,26 @@ def check_gsheet():
 
         sheet_id = sheets[0][0]
 
-        # Count data rows (exclude header)
+        # Count data rows (exclude header). Task expects 3 papers; allow 3-4 only.
         cur.execute("""
             SELECT COUNT(DISTINCT row_index) FROM gsheet.cells
             WHERE spreadsheet_id = %s AND sheet_id = %s AND row_index > 0
         """, (target_ss, sheet_id))
         data_rows = cur.fetchone()[0]
-        record("GSheet has at least 3 data rows", data_rows >= 3, f"Found {data_rows} data rows")
+        record("GSheet has 3-4 data rows (3 expected)", 3 <= data_rows <= 4, f"Found {data_rows} data rows")
+
+        # Check column headers (row_index = 0)
+        cur.execute("""
+            SELECT LOWER(value) FROM gsheet.cells
+            WHERE spreadsheet_id = %s AND sheet_id = %s AND row_index = 0
+        """, (target_ss, sheet_id))
+        header_values = [row[0] for row in cur.fetchall() if row[0]]
+        header_text = " ".join(header_values)
+        required_headers = ["title", "author", "arxiv", "publish", "key_method"]
+        missing_headers = [h for h in required_headers if h not in header_text and h.replace("_", " ") not in header_text]
+        record("GSheet has required column headers (Title/Authors/ArXiv_ID/Published_Date/Key_Method)",
+               len(missing_headers) == 0,
+               f"Missing: {missing_headers}; Found headers: {header_values}")
 
         # Check that paper titles appear in cells
         cur.execute("""
@@ -139,6 +178,28 @@ def check_gsheet():
         record("GSheet contains chain-of-thought paper entry", has_chain)
         record("GSheet contains self-consistency paper entry", has_self)
         record("GSheet contains tree of thoughts paper entry", has_tree)
+
+        # Verify GSheet contains correct ArXiv IDs (cross-reference with scholarly DB)
+        # Only the 3 RELEVANT paper IDs should be present
+        for arxiv_id, label in [("2301.00234", "chain-of-thought"),
+                                 ("2302.11382", "self-consistency"),
+                                 ("2305.10601", "tree of thoughts")]:
+            record(f"GSheet contains arxiv id {arxiv_id} ({label})",
+                   arxiv_id in all_cells_text)
+
+        # Verify per-paper authors appear in GSheet
+        for author, label in [("jason wei", "chain-of-thought author"),
+                              ("xuezhi wang", "self-consistency author"),
+                              ("shunyu yao", "tree of thoughts author")]:
+            record(f"GSheet contains {label} '{author}'",
+                   author in all_cells_text)
+
+        # Verify NOISE arxiv IDs are NOT included (no irrelevant papers)
+        noise_ids_present = [nid for nid in ("2301.11093", "2302.05543", "2304.09842")
+                             if nid in all_cells_text]
+        record("GSheet excludes noise paper arXiv IDs",
+               len(noise_ids_present) == 0,
+               f"unexpected noise: {noise_ids_present}")
 
         conn.close()
     except Exception as e:

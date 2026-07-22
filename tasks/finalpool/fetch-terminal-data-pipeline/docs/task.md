@@ -1,6 +1,6 @@
 The data engineering team recently received raw API response dumps from two internal systems. The files sales_api_response.json and inventory_api_response.json are already in your workspace. The sales file contains order records with fields like order_id, product_id, product_name, quantity, unit_price, and order_date. The inventory file contains product stock records with product_id, product_name, current_stock, reorder_point, and warehouse. Both files may have duplicate entries and inconsistent capitalization in product names.
 
-Your workspace also has an empty memory file at memory/memory.json for tracking progress.
+Your workspace also has an empty memory file at memory/memory.json for tracking progress. Use this file as a JSON object; at minimum include the keys "unique_sales_count", "unique_inventory_count", "low_stock_count", and a short "summary" string describing what was done. If any field is missing from the source data, substitute 0 for numeric fields and an empty string for text fields rather than leaving them absent.
 
 Complete the following steps.
 

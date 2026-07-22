@@ -1,38 +1,32 @@
 [
   {
-    "Quarter": "2024-Q1",
-    "Video_Count": 6,
-    "Total_Views": 7076664,
-    "Avg_Engagement_Rate": 4.03
-  },
-  {
     "Quarter": "2024-Q2",
-    "Video_Count": 11,
-    "Total_Views": 11525169,
-    "Avg_Engagement_Rate": 4.001
+    "Video_Count": 9,
+    "Total_Views": 7309503,
+    "Avg_Engagement_Rate": 4.265
   },
   {
     "Quarter": "2024-Q3",
-    "Video_Count": 15,
-    "Total_Views": 20838553,
-    "Avg_Engagement_Rate": 4.094
+    "Video_Count": 26,
+    "Total_Views": 31315832,
+    "Avg_Engagement_Rate": 4.35
   },
   {
     "Quarter": "2024-Q4",
-    "Video_Count": 14,
-    "Total_Views": 16110202,
-    "Avg_Engagement_Rate": 3.885
+    "Video_Count": 23,
+    "Total_Views": 23976433,
+    "Avg_Engagement_Rate": 3.987
   },
   {
     "Quarter": "2025-Q1",
-    "Video_Count": 24,
-    "Total_Views": 37546490,
-    "Avg_Engagement_Rate": 3.811
+    "Video_Count": 27,
+    "Total_Views": 41785933,
+    "Avg_Engagement_Rate": 3.806
   },
   {
     "Quarter": "2025-Q2",
-    "Video_Count": 13,
-    "Total_Views": 11648311,
-    "Avg_Engagement_Rate": 3.415
+    "Video_Count": 19,
+    "Total_Views": 17499116,
+    "Avg_Engagement_Rate": 3.53
   }
 ]

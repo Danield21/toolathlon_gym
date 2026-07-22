@@ -41,28 +41,39 @@ def check_excel(agent_workspace, gt_data):
                 key = m["name"][:30].lower()
                 gt_by_name[key] = m
 
+            def _normalize(s):
+                return "".join(ch.lower() for ch in (s or "") if ch.isalnum())
+            # Build gt lookup keyed by normalized token shards
             matched_count = 0
             for r in data_rows:
                 if not r[0]:
                     continue
-                name_key = str(r[0])[:30].lower()
+                name_norm = _normalize(str(r[0]))
+                best_match = None
                 for gt_key, gt_val in gt_by_name.items():
-                    if gt_key[:20] in name_key or name_key[:20] in gt_key:
-                        matched_count += 1
-                        # Check our price
-                        if r[1] is not None:
-                            try:
-                                our_p = float(r[1])
-                                if abs(our_p - gt_val["our_price"]) > gt_val["our_price"] * 0.05:
-                                    errors.append(f"Our price for '{str(r[0])[:40]}' = {our_p}, expected ~{gt_val['our_price']}")
-                            except (ValueError, TypeError):
-                                pass
-                        # Check status
-                        if r[5] is not None:
-                            status = str(r[5]).strip()
-                            if status.lower() != gt_val["status"].lower():
-                                errors.append(f"Status for '{str(r[0])[:40]}' = {status}, expected {gt_val['status']}")
-                        break
+                    gt_norm = _normalize(gt_val["name"])
+                    # Multi-strategy: (1) prefix 20 chars (2) prefix 30 chars overlap (3) 15-char substring bidirectional
+                    if gt_norm[:20] in name_norm or name_norm[:20] in gt_norm:
+                        best_match = gt_val; break
+                    if gt_norm[:15] in name_norm or name_norm[:15] in gt_norm:
+                        best_match = gt_val; break
+                if best_match is None:
+                    continue
+                matched_count += 1
+                gt_val = best_match
+                # Check our price
+                if r[1] is not None:
+                    try:
+                        our_p = float(r[1])
+                        if abs(our_p - gt_val["our_price"]) > gt_val["our_price"] * 0.05:
+                            errors.append(f"Our price for '{str(r[0])[:40]}' = {our_p}, expected ~{gt_val['our_price']}")
+                    except (ValueError, TypeError):
+                        pass
+                # Check status
+                if r[5] is not None:
+                    status = str(r[5]).strip()
+                    if status.lower() != gt_val["status"].lower():
+                        errors.append(f"Status for '{str(r[0])[:40]}' = {status}, expected {gt_val['status']}")
 
             if matched_count < expected - 3:
                 errors.append(f"Only {matched_count} products matched groundtruth names")
@@ -125,6 +136,24 @@ def check_word(agent_workspace):
         # Check for tables
         if len(doc.tables) < 1:
             errors.append("Word doc should contain at least one table of overpriced products")
+        else:
+            # Verify table contains at least one overpriced product name
+            gt_data_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                        "files", "groundtruth_data.json")
+            try:
+                with open(gt_data_path) as f:
+                    gt_data = json.load(f)
+                overpriced_names = [m["name"].lower() for m in gt_data.get("matches", [])
+                                    if m.get("status", "").lower() == "overpriced"]
+                table_text = ""
+                for t in doc.tables:
+                    table_text += " ".join(cell.text for row in t.rows for cell in row.cells) + " "
+                table_text_lc = table_text.lower()
+                matches_found = sum(1 for n in overpriced_names if n[:20] in table_text_lc)
+                if overpriced_names and matches_found < 1:
+                    errors.append(f"Word table missing overpriced product names (matched {matches_found}/{len(overpriced_names)})")
+            except Exception as e:
+                print(f"  [WARN] Could not load groundtruth data for table check: {e}")
 
     except Exception as e:
         errors.append(f"Error reading Word doc: {e}")

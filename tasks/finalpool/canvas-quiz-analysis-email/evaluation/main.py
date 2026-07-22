@@ -164,19 +164,12 @@ def check_email(expected):
     cur.execute("SELECT subject, from_addr, to_addr, body_text FROM email.messages")
     messages = cur.fetchall()
 
-    # Also check sent_log
-    cur.execute("SELECT COUNT(*) FROM email.sent_log")
-    sent_count = cur.fetchone()[0]
-
-    # Also check drafts
-    cur.execute("SELECT subject, from_addr, to_addr, body_text FROM email.drafts")
-    drafts = cur.fetchall()
-
     conn.close()
 
-    all_items = list(messages) + list(drafts)
-    check("At least one email message or draft exists", len(all_items) > 0,
-          f"Found {len(messages)} messages, {len(drafts)} drafts")
+    # Per task.md: must send a real email (not draft). Only check email.messages.
+    all_items = list(messages)
+    check("At least one sent email message exists", len(all_items) > 0,
+          f"Found {len(messages)} messages")
 
     found_email = False
     for item in all_items:
@@ -184,6 +177,13 @@ def check_email(expected):
         if "quiz" in subj and "performance" in subj:
             found_email = True
             check("Email subject contains 'Quiz Performance'", True)
+
+            # Check from_addr = coordinator@university.edu
+            from_addr = item[1]
+            from_str = json.dumps(from_addr).lower() if isinstance(from_addr, (list, dict)) else str(from_addr or "").lower()
+            check("Email sent from coordinator@university.edu",
+                  "coordinator@university.edu" in from_str,
+                  f"From: {from_str}")
 
             # Check recipient
             to_addr = item[2]
@@ -198,11 +198,46 @@ def check_email(expected):
             body = str(item[3] or "")
             check("Email body is not empty", len(body) > 20,
                   f"Body length: {len(body)}")
+            # Lowest-pass-rate quiz title in body
+            if expected and expected.get("quizzes"):
+                try:
+                    quizzes = expected["quizzes"]
+                    # quiz tuple is (title, points_possible, avg_score, pass_rate, student_count)
+                    quizzes_sorted = sorted(
+                        quizzes,
+                        key=lambda q: float(q[3]) if q[3] is not None else 100.0,
+                    )
+                    if quizzes_sorted:
+                        lowest_title = str(quizzes_sorted[0][0] or "").strip()
+                        if lowest_title:
+                            check("Email body mentions lowest pass-rate quiz title",
+                                  lowest_title.lower() in body.lower(),
+                                  f"Expected '{lowest_title}' in body")
+                except Exception as e:
+                    check("Lowest pass-rate quiz check", True, f"skip: {e}")
             break
 
     if not found_email:
         check("Quiz Performance email found", False,
               f"Subjects: {[str(i[0]) for i in all_items]}")
+
+    # Reverse validation: noise subject/body should not be present in the
+    # Quiz Performance email that the agent sends.
+    noise_phrases = [
+        "weekly all-hands agenda",
+        "it security reminder",
+        "cafeteria menu update",
+    ]
+    for item in all_items:
+        subj = str(item[0] or "").lower()
+        body = str(item[3] or "").lower()
+        if "quiz" in subj and "performance" in subj:
+            for phrase in noise_phrases:
+                check(
+                    f"Quiz Performance email does not reuse noise phrase '{phrase}'",
+                    phrase not in subj and phrase not in body,
+                    f"Noise phrase leaked into output email",
+                )
 
 
 def check_excel_gt(agent_workspace, groundtruth_workspace):

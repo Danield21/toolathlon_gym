@@ -4,4 +4,4 @@ Create an Excel file called WC_Review_Summary.xlsx with two sheets. The "Review 
 
 The "Summary" sheet should have Products_With_Reviews count, Total_Reviews, Overall_Avg_Rating as a weighted average rounded to 2 decimals, and Top_Rated_Product name.
 
-Also create a Notion page titled "Product Review Dashboard" summarizing the top-rated and lowest-rated products.
+Also create a knowledge base page titled "Product Review Dashboard" summarizing the top-rated and lowest-rated products.

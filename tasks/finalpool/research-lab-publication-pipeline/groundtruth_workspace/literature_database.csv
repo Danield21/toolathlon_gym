@@ -1,0 +1,13 @@
+title,author,year,journal,keywords,relevance_to_lab,source
+Novel Approaches to Complex Problems,"Smith, John A.; Johnson, Emily R.",2022,Journal of Science and Research,complex systems,high,arxiv
+Methodological Advances in Empirical Research,"Chen, Wei; Johnson, Karen L.",2021,Research Methods Quarterly,methods,medium,journal
+Foundations of Modern AI Architecture,"Anderson, Lee",2024,AI Frontiers,AI architecture,high,arxiv
+Ethics in Computational Research,"Martinez, Carlos",2023,Ethics Quarterly,ethics,low,journal
+Reproducibility in Machine Learning Studies,"Patel, Rina; Wong, Anna",2023,ML Reviews,reproducibility,high,arxiv
+Adversarial Robustness in Neural Networks,"Gao, Wei; Liu, Hao",2022,Neural Computation,adversarial,high,journal
+Self-Supervised Learning Survey,"Kim, Soo; Park, Min",2024,Annual ML Review,self-supervised,high,arxiv
+Causal Inference Methods Update,"Brown, Sarah; White, James",2023,Statistics in Practice,causal inference,medium,journal
+Federated Learning Privacy Frameworks,"Zhang, Hua; Liu, Bin",2024,Distributed Systems,federated learning,high,arxiv
+Benchmarking LLM Reasoning Capabilities,"Nguyen, Tuan; Patel, Anil",2025,NeurIPS Workshop,llm reasoning,high,arxiv
+Emerging Trends in Embodied AI,"Lopez, Maria; Singh, Raj",2025,Robotics Today,embodied ai,high,journal
+Open-Source Tools for Replicable Research,"Tan, Jia; Park, Daniel",2024,Software Engineering,open source,medium,journal

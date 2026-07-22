@@ -131,10 +131,21 @@ def check_excel(agent_workspace, groundtruth_workspace):
                     if len(ar) > 4 and len(gr) > 4 and ar[4] is not None:
                         check(f"{sym} Trailing_PE", num_close(ar[4], gr[4], 0.5),
                               f"Agent={ar[4]}, GT={gr[4]}")
-                    # YTD Return (col 10, tol 0.5)
+                    # YTD Return (col 10, tol 0.2)
                     if len(ar) > 10 and len(gr) > 10 and ar[10] is not None:
-                        check(f"{sym} YTD_Return_Pct", num_close(ar[10], gr[10], 0.5),
+                        check(f"{sym} YTD_Return_Pct", num_close(ar[10], gr[10], 0.2),
                               f"Agent={ar[10]}, GT={gr[10]}")
+                    # Beta (col 6) and Latest_Close (col 9)
+                    if len(ar) > 6 and len(gr) > 6 and ar[6] is not None:
+                        check(f"{sym} Beta", num_close(ar[6], gr[6], 0.05),
+                              f"Agent={ar[6]}, GT={gr[6]}")
+                    if len(ar) > 9 and len(gr) > 9 and ar[9] is not None:
+                        check(f"{sym} Latest_Close", num_close(ar[9], gr[9], 0.5),
+                              f"Agent={ar[9]}, GT={gr[9]}")
+                    # Sector exact match
+                    if len(ar) > 2 and len(gr) > 2 and ar[2] is not None:
+                        check(f"{sym} Sector", str(ar[2]).strip().lower() == str(gr[2]).strip().lower(),
+                              f"Agent={ar[2]}, GT={gr[2]}")
 
     # --- Sheet 2: Financial Comparison ---
     ws2 = None
@@ -154,20 +165,41 @@ def check_excel(agent_workspace, groundtruth_workspace):
         data_rows2 = [r for r in rows2 if r and r[0] is not None]
         check("Financial Comparison has 5 rows", len(data_rows2) == 5, f"Got {len(data_rows2)}")
 
-        # Compare revenue for spot check
+        # Sorted by Symbol
+        sym_list2 = [str(r[0]).strip().upper() for r in data_rows2 if r and r[0]]
+        check("Financial Comparison sorted alphabetically",
+              sym_list2 == sorted(sym_list2), f"Order: {sym_list2}")
+
+        # Verify ALL 4 financial metrics for each of 5 symbols
         gt_rows2 = load_gt_sheet(groundtruth_workspace, "Financial Comparison")
         if gt_rows2:
             gt_fin = {str(r[0]).strip().upper(): r for r in gt_rows2[1:] if r and r[0]}
             agent_fin = {str(r[0]).strip().upper(): r for r in data_rows2 if r and r[0]}
-            for sym in ["AMZN", "GOOGL"]:
+            cols = [(1, "Revenue"), (2, "Net_Income"), (3, "Total_Assets"), (4, "Free_Cash_Flow")]
+            for sym in ["AMZN", "GOOGL", "JNJ", "JPM", "XOM"]:
                 if sym in agent_fin and sym in gt_fin:
                     ar = agent_fin[sym]
                     gr = gt_fin[sym]
-                    # Revenue (col 1, relative tolerance 5%)
-                    if len(ar) > 1 and len(gr) > 1 and ar[1] is not None and gr[1] is not None:
-                        rel_err = abs(float(ar[1]) - float(gr[1])) / float(gr[1]) if float(gr[1]) != 0 else 1
-                        check(f"{sym} Revenue within 5%", rel_err < 0.05,
-                              f"Agent={ar[1]}, GT={gr[1]}, err={rel_err:.4f}")
+                    for col, name in cols:
+                        if len(ar) > col and len(gr) > col and gr[col] is not None:
+                            try:
+                                exp = float(gr[col])
+                                act = float(ar[col]) if ar[col] is not None else None
+                            except (TypeError, ValueError):
+                                check(f"{sym} {name} numeric", False,
+                                      f"Agent={ar[col]}, GT={gr[col]}")
+                                continue
+                            if act is None:
+                                check(f"{sym} {name} present", False, "missing")
+                                continue
+                            # Use 5% relative tolerance for large numbers
+                            tol = max(abs(exp) * 0.05, 1e6)
+                            ok = abs(act - exp) <= tol
+                            check(f"{sym} {name} within 5%", ok,
+                                  f"Agent={act}, GT={exp}")
+                else:
+                    check(f"{sym} present in Financial Comparison",
+                          sym in agent_fin, f"Missing")
 
     # --- Sheet 3: Scoring ---
     ws3 = None
@@ -182,18 +214,33 @@ def check_excel(agent_workspace, groundtruth_workspace):
         data_rows3 = [r for r in rows3 if r and r[0] is not None]
         check("Scoring has 5 rows", len(data_rows3) == 5, f"Got {len(data_rows3)}")
 
+        # Sorted by Symbol
+        sym_list3 = [str(r[0]).strip().upper() for r in data_rows3 if r and r[0]]
+        check("Scoring sorted alphabetically",
+              sym_list3 == sorted(sym_list3), f"Order: {sym_list3}")
+
         gt_rows3 = load_gt_sheet(groundtruth_workspace, "Scoring")
         if gt_rows3:
             gt_score = {str(r[0]).strip().upper(): r for r in gt_rows3[1:] if r and r[0]}
             agent_score = {str(r[0]).strip().upper(): r for r in data_rows3 if r and r[0]}
 
+            rank_cols = [(1, "Valuation_Rank"), (2, "Growth_Rank"), (3, "Income_Rank"),
+                         (4, "Risk_Rank"), (5, "Momentum_Rank")]
             for sym in ["AMZN", "GOOGL", "JNJ", "JPM", "XOM"]:
                 if sym in agent_score and sym in gt_score:
                     ar = agent_score[sym]
                     gr = gt_score[sym]
-                    # Weighted Score (col 6, tol 0.5)
+                    # Per-dimension ranks: integer, exact match
+                    for col, name in rank_cols:
+                        if len(gr) > col and gr[col] is not None:
+                            exp_rank = gr[col]
+                            act_rank = ar[col] if len(ar) > col else None
+                            check(f"{sym} {name}",
+                                  num_close(act_rank, exp_rank, 0),
+                                  f"Agent={act_rank}, GT={exp_rank}")
+                    # Weighted Score (col 6, tighter tol 0.1)
                     if len(ar) > 6 and len(gr) > 6 and ar[6] is not None:
-                        check(f"{sym} Weighted_Score", num_close(ar[6], gr[6], 0.5),
+                        check(f"{sym} Weighted_Score", num_close(ar[6], gr[6], 0.1),
                               f"Agent={ar[6]}, GT={gr[6]}")
                     # Overall Rating (col 7, exact match)
                     if len(ar) > 7 and len(gr) > 7 and ar[7] is not None:
@@ -201,6 +248,9 @@ def check_excel(agent_workspace, groundtruth_workspace):
                         gt_rating = str(gr[7]).strip().lower()
                         check(f"{sym} Overall_Rating", agent_rating == gt_rating,
                               f"Agent='{ar[7]}', GT='{gr[7]}'")
+                else:
+                    check(f"{sym} present in Scoring",
+                          sym in agent_score, "Missing")
 
 
 def check_pptx(agent_workspace):
@@ -220,58 +270,119 @@ def check_pptx(agent_workspace):
     slide_count = len(prs.slides)
     check("PPTX has >= 6 slides", slide_count >= 6, f"Got {slide_count} slides")
 
-    # Check for key content in slides
-    all_text = ""
+    # Build per-slide text and overall text
+    slide_texts = []
     for slide in prs.slides:
+        parts = []
         for shape in slide.shapes:
             if shape.has_text_frame:
-                all_text += shape.text_frame.text.lower() + " "
+                parts.append(shape.text_frame.text.lower())
+        slide_texts.append(" ".join(parts))
+    all_text = " ".join(slide_texts)
 
-    check("PPTX contains 'peer' or 'comparison'",
-          "peer" in all_text or "comparison" in all_text,
-          f"Text sample: {all_text[:200]}")
-    check("PPTX mentions company symbols",
-          "amzn" in all_text or "amazon" in all_text,
-          f"Text sample: {all_text[:200]}")
-    check("PPTX contains scoring or recommendation content",
-          "score" in all_text or "rank" in all_text or "recommendation" in all_text or "buy" in all_text or "hold" in all_text,
-          f"Text sample: {all_text[:200]}")
+    # All 5 symbols (or full company names)
+    sym_aliases = {
+        "AMZN": ["amzn", "amazon"],
+        "GOOGL": ["googl", "alphabet", "google"],
+        "JNJ": ["jnj", "johnson"],
+        "JPM": ["jpm", "morgan", "jp morgan"],
+        "XOM": ["xom", "exxon"],
+    }
+    for sym, aliases in sym_aliases.items():
+        ok = any(a in all_text for a in aliases)
+        check(f"PPTX mentions {sym} (or alias)", ok,
+              f"None of {aliases} found")
+
+    # Each topic must appear on at least one DEDICATED slide (not aggregated across slides);
+    # we require a single slide to contain at least one alt phrase, enforcing per-slide
+    # structure so a one-slide-with-everything deck cannot satisfy multiple topics.
+    topic_phrases = {
+        "market overview": ["market overview", "companies and sectors"],
+        "company profiles": ["company profile", "profiles", "key metrics"],
+        "financial comparison": ["financial comparison", "annual financials", "revenue", "net income"],
+        "scoring": ["scoring", "weighted score", "peer scoring"],
+        "recommendations": ["recommendation", "recommended actions", "buy", "hold", "sell"],
+    }
+    used_slides = set()
+    for topic, alts in topic_phrases.items():
+        # Find first slide that matches and has not been claimed by another topic.
+        matched_idx = None
+        for idx, st in enumerate(slide_texts):
+            if idx in used_slides:
+                continue
+            if any(a in st for a in alts):
+                matched_idx = idx
+                break
+        ok = matched_idx is not None
+        if ok:
+            used_slides.add(matched_idx)
+        check(
+            f"PPTX has dedicated slide for '{topic}'",
+            ok,
+            f"alts={alts}; used_slides={sorted(used_slides)}",
+        )
 
 
 def check_emails():
     print("\n=== Checking Emails ===")
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+    except Exception as e:
+        check("Email DB connection", False, str(e), db=True)
+        return
 
-    # Check email to portfolio_managers@firm.com
-    cur.execute("""
-        SELECT subject, to_addr FROM email.messages
-        WHERE to_addr::text ILIKE '%portfolio_managers@firm.com%'
-        ORDER BY id DESC LIMIT 5
-    """)
-    pm_rows = cur.fetchall()
-    check("Email to portfolio_managers@firm.com", len(pm_rows) > 0,
-          "No email found", db=True)
+    def _check_email(addr, expected_subject, body_phrases, label):
+        cur.execute("""
+            SELECT subject, to_addr, body_text FROM email.messages
+            WHERE to_addr::text ILIKE %s
+            ORDER BY id DESC LIMIT 5
+        """, (f"%{addr}%",))
+        rows = cur.fetchall()
+        check(f"Email to {addr}", len(rows) > 0, "No email found", db=True)
+        if not rows:
+            check(f"{label} subject is exactly '{expected_subject}'", False,
+                  "no email", db=True)
+            check(f"{label} body has expected content", False,
+                  "no email", db=True)
+            return
+        # Find the one with matching exact subject if possible
+        chosen = None
+        for r in rows:
+            if r[0] and r[0].strip().lower() == expected_subject.lower():
+                chosen = r
+                break
+        if chosen is None:
+            chosen = rows[0]
+        subj_ok = (chosen[0] or "").strip().lower() == expected_subject.lower()
+        check(f"{label} subject is exactly '{expected_subject}'", subj_ok,
+              f"Got: {chosen[0]!r}", db=True)
+        body = (chosen[2] or "").lower()
+        for phrase in body_phrases:
+            ok = phrase.lower() in body
+            check(f"{label} body mentions '{phrase}'", ok,
+                  f"body excerpt: {body[:200]}", db=True)
 
-    # Check email to research_team@firm.com
-    cur.execute("""
-        SELECT subject, to_addr FROM email.messages
-        WHERE to_addr::text ILIKE '%research_team@firm.com%'
-        ORDER BY id DESC LIMIT 5
-    """)
-    rt_rows = cur.fetchall()
-    check("Email to research_team@firm.com", len(rt_rows) > 0,
-          "No email found", db=True)
-
-    # Check email to compliance@firm.com
-    cur.execute("""
-        SELECT subject, to_addr FROM email.messages
-        WHERE to_addr::text ILIKE '%compliance@firm.com%'
-        ORDER BY id DESC LIMIT 5
-    """)
-    comp_rows = cur.fetchall()
-    check("Email to compliance@firm.com", len(comp_rows) > 0,
-          "No email found", db=True)
+    _check_email(
+        "portfolio_managers@firm.com",
+        "Peer Comparison Summary",
+        body_phrases=["buy", "hold"],
+        label="Portfolio Managers"
+    )
+    _check_email(
+        "research_team@firm.com",
+        "Peer Comparison Detailed Findings",
+        body_phrases=["score", "revenue"],
+        label="Research Team"
+    )
+    # Compliance/risk email: must mention beta + risk language and at least one
+    # high-beta ticker that's specifically flagged in GT (AMZN beta=1.42 > 1).
+    _check_email(
+        "compliance@firm.com",
+        "Peer Comparison Risk Review",
+        body_phrases=["beta", "risk", "amzn"],
+        label="Compliance"
+    )
 
     cur.close()
     conn.close()
@@ -294,21 +405,19 @@ def main():
 
     total_pass = FILE_PASS + DB_PASS
     total_fail = FILE_FAIL + DB_FAIL
-    file_ok = FILE_FAIL == 0
+    overall_ok = FILE_FAIL == 0 and DB_FAIL == 0
 
     print(f"\n=== SUMMARY ===")
     print(f"  File checks - Passed: {FILE_PASS}, Failed: {FILE_FAIL}")
     print(f"  DB checks   - Passed: {DB_PASS}, Failed: {DB_FAIL}")
-    if DB_FAIL > 0:
-        print(f"  WARNING: {DB_FAIL} DB checks failed (not blocking)")
-    print(f"  Overall: {'PASS' if file_ok else 'FAIL'}")
+    print(f"  Overall: {'PASS' if overall_ok else 'FAIL'}")
 
     if args.res_log_file:
-        result = {"passed": total_pass, "failed": total_fail, "success": file_ok}
+        result = {"passed": total_pass, "failed": total_fail, "success": overall_ok}
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    sys.exit(0 if file_ok else 1)
+    sys.exit(0 if overall_ok else 1)
 
 
 if __name__ == "__main__":

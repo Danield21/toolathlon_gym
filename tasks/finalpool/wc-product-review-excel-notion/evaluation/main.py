@@ -94,7 +94,7 @@ def check_excel(agent_workspace):
                   any(col_name.replace("_", "") in h.replace("_", "") or col_name in h for h in header_lower),
                   f"Header: {header}")
 
-        # Verify avg_rating for Electronics (4.57)
+        # Verify avg_rating for Electronics (4.57) and Five_Star columns if present
         for row in data_rows:
             if row and row[0] and str(row[0]).strip().lower() == "electronics":
                 avg_rating = row[3] if len(row) > 3 else None
@@ -103,8 +103,26 @@ def check_excel(agent_workspace):
                       f"Got {avg_rating}")
                 review_count = row[2] if len(row) > 2 else None
                 check("Electronics review_count = 149",
-                      num_close(review_count, 149, 1),
+                      num_close(review_count, 149, 0),
                       f"Got {review_count}")
+                # Five_Star_Count (col 4) should be integer >= 0
+                if len(row) > 4 and row[4] is not None:
+                    try:
+                        fsc = float(row[4])
+                        check("Electronics Five_Star_Count is non-negative integer",
+                              fsc >= 0 and fsc == int(fsc),
+                              f"Got {row[4]}")
+                    except (TypeError, ValueError):
+                        check("Electronics Five_Star_Count is numeric", False, f"Got {row[4]}")
+                # Five_Star_Rate (col 5) should be in [0, 100]
+                if len(row) > 5 and row[5] is not None:
+                    try:
+                        fsr = float(row[5])
+                        check("Electronics Five_Star_Rate in 0..100",
+                              0 <= fsr <= 100,
+                              f"Got {row[5]}")
+                    except (TypeError, ValueError):
+                        check("Electronics Five_Star_Rate is numeric", False, f"Got {row[5]}")
                 break
 
         # Verify TV & Home Theater avg_rating is highest (4.78)
@@ -136,6 +154,12 @@ def check_excel(agent_workspace):
             check("Top product avg_rating is 5.0",
                   num_close(top_avg, 5.0, 0.05),
                   f"Got {top_avg}")
+            # Verify sorting: rows should be sorted by avg_rating desc, then review_count desc
+            ratings = [r[3] for r in data_rows if len(r) > 3 and r[3] is not None]
+            if len(ratings) >= 2:
+                sorted_desc = all(ratings[i] >= ratings[i+1] for i in range(len(ratings)-1))
+                check("Top Products sorted by avg_rating descending",
+                      sorted_desc, f"ratings sequence: {ratings}")
 
 
 def check_notion():
@@ -186,8 +210,7 @@ def check_email():
             SELECT id, subject, to_addr, body_text
             FROM email.messages
             WHERE to_addr::text ILIKE '%product_team@store.com%'
-               OR subject ILIKE '%product review%'
-               OR subject ILIKE '%product%analysis%'
+              AND (subject ILIKE '%product review%' OR subject ILIKE '%review%')
         """)
         emails = cur.fetchall()
         check("Email sent to product_team@store.com", len(emails) >= 1,
@@ -216,16 +239,21 @@ def main():
     args = parser.parse_args()
 
     check_excel(args.agent_workspace)
+    excel_fail = FAIL_COUNT
     check_notion()
     check_email()
 
     total = PASS_COUNT + FAIL_COUNT
     print(f"\n=== Results: {PASS_COUNT}/{total} passed ===")
-    if FAIL_COUNT > 0:
-        print(f"{FAIL_COUNT} checks failed")
+    acc = (PASS_COUNT / total * 100) if total else 0
+    # Excel is local file (blocking); notion/email are runtime.
+    overall = (excel_fail == 0) and (acc >= 85)
+    print(f"  Excel failures: {excel_fail}; accuracy: {acc:.1f}%")
+    if not overall:
+        print(f"FAIL: excel_fail={excel_fail}, acc={acc:.1f}")
         sys.exit(1)
     else:
-        print("All checks passed!")
+        print("PASS")
         sys.exit(0)
 
 

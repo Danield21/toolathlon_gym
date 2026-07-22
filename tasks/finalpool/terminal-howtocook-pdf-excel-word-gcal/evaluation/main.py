@@ -247,6 +247,17 @@ def check_reverse_validation(workspace):
         bad_events = cur.fetchone()[0]
         check("No food festival prep events outside March 9-13", bad_events == 0,
               f"Found {bad_events} events outside range")
+
+        # Reverse: noise events should still be present
+        noise_summaries = ["Weekly Team Standup", "Budget Review Meeting",
+                           "Facilities Maintenance", "Vendor Contract Review",
+                           "Post-Event Debrief"]
+        cur.execute("SELECT summary FROM gcal.events")
+        all_summaries = {r[0] for r in cur.fetchall()}
+        preserved = sum(1 for s in noise_summaries if s in all_summaries)
+        check("Reverse: noise events preserved (not deleted)",
+              preserved >= 4,
+              f"Only {preserved}/5 noise events remain")
         cur.close()
         conn.close()
     except Exception:

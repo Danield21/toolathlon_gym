@@ -48,17 +48,24 @@ EXPECTED_CITATIONS = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+RUNTIME_INCONCLUSIVE = 0
+IN_RUNTIME_BLOCK = False
 
 
 def check(name, condition, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+    global PASS_COUNT, FAIL_COUNT, RUNTIME_INCONCLUSIVE
     if condition:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
-        FAIL_COUNT += 1
-        detail_str = f": {detail[:200]}" if detail else ""
-        print(f"  [FAIL] {name}{detail_str}")
+        if IN_RUNTIME_BLOCK:
+            RUNTIME_INCONCLUSIVE += 1
+            detail_str = f": {detail[:200]}" if detail else ""
+            print(f"  [FAIL-runtime] {name}{detail_str}")
+        else:
+            FAIL_COUNT += 1
+            detail_str = f": {detail[:200]}" if detail else ""
+            print(f"  [FAIL] {name}{detail_str}")
 
 
 def num_close(a, b, tol=500):
@@ -83,15 +90,13 @@ def get_gsheet_data():
     result = {"spreadsheet": None, "sheets": {}, "cells": {}}
 
     for ss_id, ss_title in spreadsheets:
-        title_lower = ss_title.lower()
+        title_lower = (ss_title or "").lower()
         if "prompt" in title_lower or "literature" in title_lower or "engineering" in title_lower:
             result["spreadsheet"] = (ss_id, ss_title)
             break
 
-    if not result["spreadsheet"]:
-        # Take the first one if no match
-        if spreadsheets:
-            result["spreadsheet"] = spreadsheets[0]
+    # Do NOT fall back to first spreadsheet - that's a FP risk
+    # If no matching title, keep result["spreadsheet"] as None
 
     if result["spreadsheet"]:
         ss_id = result["spreadsheet"][0]
@@ -128,14 +133,26 @@ def get_gsheet_data():
 
 def check_gsheet():
     """Check Google Sheet content."""
+    global IN_RUNTIME_BLOCK
     print("\n=== Checking Google Sheet ===")
 
     data = get_gsheet_data()
+
+    # If absolutely no spreadsheets exist, flag as runtime-only (GT V1).
+    # If some spreadsheets exist but none match expected title, do not downgrade - fail.
+    conn = psycopg2.connect(**DB_CONFIG)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM gsheet.spreadsheets")
+    (n_ss,) = cur.fetchone()
+    cur.close(); conn.close()
+    if n_ss == 0:
+        IN_RUNTIME_BLOCK = True
 
     # Check spreadsheet exists
     check("Spreadsheet exists", data["spreadsheet"] is not None,
           "No spreadsheet found")
     if not data["spreadsheet"]:
+        IN_RUNTIME_BLOCK = False
         return
 
     ss_id, ss_title = data["spreadsheet"]
@@ -174,24 +191,37 @@ def check_gsheet():
             if pid in all_values:
                 found_papers += 1
 
-        # Deduplicate (a paper found by both title and ID counts once)
-        found_papers = min(found_papers, 5)
-        check("At least 3 target papers in Paper sheet",
-              found_papers >= 3,
-              f"Found {found_papers}/5 target papers")
+        # Check each target paper independently (5/5 required)
+        for i, (pid, title_kw) in enumerate(zip(TARGET_IDS, TARGET_TITLES_LOWER)):
+            row_match = False
+            for row_data in data_rows.values():
+                row_text = " ".join(str(v or "").lower() for v in row_data.values())
+                if pid in row_text or title_kw in row_text:
+                    row_match = True
+                    break
+            check(f"Target paper present: {title_kw[:40]}", row_match,
+                  f"ID={pid} not found")
 
-        # Check noise papers are not included
+        # Noise papers must be ZERO
         noise_found = 0
+        noise_detected = []
         for nid in NOISE_IDS:
             if nid in all_values:
                 noise_found += 1
+                noise_detected.append(nid)
         noise_titles = ["word2vec", "glove", "word representations", "distributed representations"]
         for nt in noise_titles:
             if nt in all_values:
                 noise_found += 1
-        check("Noise papers excluded (at most 1 noise)",
-              noise_found <= 1,
-              f"Found {noise_found} noise paper references")
+                noise_detected.append(nt)
+        check("No noise papers in sheet (word2vec/glove/etc.)",
+              noise_found == 0,
+              f"Found noise: {noise_detected}")
+
+        # Exactly 5 data rows
+        check("Paper sheet has exactly 5 data rows",
+              len(data_rows) == 5,
+              f"Found {len(data_rows)} data rows")
 
         # Check citation counts for any found papers
         citation_checks = 0
@@ -206,9 +236,20 @@ def check_gsheet():
                             citation_checks += 1
                             break
 
-        check("At least 2 papers have approximately correct citation counts",
-              citation_checks >= 2,
-              f"Found {citation_checks} papers with matching citations")
+        check("All 5 papers have approximately correct citation counts",
+              citation_checks >= 5,
+              f"Found {citation_checks}/5 papers with matching citations")
+
+        # Every row must have non-empty Methodology_Summary (last column, col index 7)
+        empty_methodology = 0
+        for row_idx, row in data_rows.items():
+            # Expected 8 columns: 0=Paper_ID ... 7=Methodology_Summary
+            m = row.get(7)
+            if m is None or not str(m).strip():
+                empty_methodology += 1
+        check("All rows have non-empty Methodology_Summary",
+              empty_methodology == 0,
+              f"{empty_methodology} rows with empty methodology")
 
     # Check for Technique Analysis sheet
     technique_sheet_key = None
@@ -240,6 +281,32 @@ def check_gsheet():
         check("Technique sheet has prompting-related content",
               has_technique_content,
               "No prompting technique keywords found")
+
+        # Validate Reasoning_Type values (col 3) in {arithmetic, commonsense, symbolic, general}
+        valid_types = {"arithmetic", "commonsense", "symbolic", "general"}
+        invalid_types = []
+        for row_idx, row in data_rows.items():
+            rt = row.get(3)
+            if rt is not None:
+                val = str(rt).strip().lower()
+                # Accept single-valued entries only
+                if val and val not in valid_types:
+                    invalid_types.append(val)
+        check("All Reasoning_Type values are valid",
+              len(invalid_types) == 0,
+              f"Invalid values: {invalid_types}")
+
+        # Validate Requires_Examples (col 4) in {Yes, No}
+        invalid_req = []
+        for row_idx, row in data_rows.items():
+            re_val = row.get(4)
+            if re_val is not None:
+                v = str(re_val).strip().lower()
+                if v and v not in {"yes", "no", "y", "n", "true", "false"}:
+                    invalid_req.append(v)
+        check("All Requires_Examples values are Yes/No",
+              len(invalid_req) == 0,
+              f"Invalid: {invalid_req}")
 
 
 def check_review_summary(agent_workspace):

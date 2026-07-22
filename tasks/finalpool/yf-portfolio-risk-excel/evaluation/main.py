@@ -129,42 +129,104 @@ def check_excel(agent_workspace):
               abs(data_rows - expected_rows) <= 5,
               f"Found {data_rows} rows, expected ~{expected_rows}")
 
-    # Risk Metrics
+    def _rows_to_dicts(ws):
+        rows = list(ws.iter_rows(values_only=True))
+        if len(rows) < 2:
+            return []
+        hdr = [str(h).strip().lower() if h is not None else "" for h in rows[0]]
+        result = []
+        for r in rows[1:]:
+            if r and any(v is not None for v in r):
+                result.append({hdr[i]: r[i] for i in range(len(hdr))})
+        return result
+
+    def _find_col(d, candidates):
+        keys_lower = list(d.keys())
+        for cand in candidates:
+            cl = cand.lower()
+            for k in keys_lower:
+                if cl == k:
+                    return k
+        for cand in candidates:
+            cl = cand.lower()
+            for k in keys_lower:
+                if cl in k or k in cl:
+                    return k
+        return None
+
+    STAT_ALIASES = {
+        "avg": ["average close price", "average close", "average", "avg price", "avg_price", "avg"],
+        "std": ["standard deviation", "std deviation", "std_dev", "stdev", "std"],
+        "min": ["minimum close", "minimum", "min price", "min_price", "min"],
+        "max": ["maximum close", "maximum", "max price", "max_price", "max"],
+    }
+    CATEGORY_ALIASES = ["risk category", "risk_category", "category", "risk"]
+
+    # Risk Metrics — row-structured per-ticker comparison
     ws_rm = find_sheet(["risk", "metric"])
     if not ws_rm:
         ws_rm = find_sheet(["metric"])
     check("Risk Metrics sheet exists", ws_rm is not None, f"Sheets: {wb.sheetnames}")
     if ws_rm:
-        all_text = ""
-        for row in ws_rm.iter_rows(values_only=True):
-            all_text += " ".join(str(c) for c in row if c is not None) + " "
-
+        rm_rows = _rows_to_dicts(ws_rm)
+        rm_lookup = {}
+        for r in rm_rows:
+            tk_key = _find_col(r, ["ticker", "symbol"])
+            if tk_key and r[tk_key]:
+                rm_lookup[str(r[tk_key]).strip().upper()] = r
         for ticker in TICKERS:
             s = expected_stats[ticker]
-            check(f"Risk Metrics: {ticker} present", ticker in all_text)
-            check(f"Risk Metrics: {ticker} avg ~{s['avg']}",
-                  str(s["avg"]) in all_text,
-                  f"Expected {s['avg']}")
+            if ticker not in rm_lookup:
+                check(f"Risk Metrics: {ticker} row present", False,
+                      f"Available: {list(rm_lookup.keys())}")
+                continue
+            check(f"Risk Metrics: {ticker} row present", True)
+            r = rm_lookup[ticker]
+            for stat_name, tol in (("avg", 0.02), ("std", 0.05), ("min", 0.02), ("max", 0.02)):
+                col = _find_col(r, STAT_ALIASES[stat_name])
+                if col is None:
+                    check(f"Risk Metrics {ticker}.{stat_name} column present", False,
+                          f"Columns: {list(r.keys())}")
+                    continue
+                try:
+                    actual = float(r[col])
+                    expected = float(s[stat_name])
+                    ok = abs(actual - expected) <= abs(expected) * tol + 0.01
+                    check(f"Risk Metrics {ticker}.{stat_name}", ok,
+                          f"Expected {expected}, got {actual}")
+                except (TypeError, ValueError):
+                    check(f"Risk Metrics {ticker}.{stat_name}", False,
+                          f"Cannot parse: {r[col]}")
 
-    # Risk Assessment
+    # Risk Assessment — row-structured per-ticker category comparison
     ws_ra = find_sheet(["risk", "assess"])
     if not ws_ra:
         ws_ra = find_sheet(["assess"])
     check("Risk Assessment sheet exists", ws_ra is not None, f"Sheets: {wb.sheetnames}")
     if ws_ra:
-        all_text = ""
-        for row in ws_ra.iter_rows(values_only=True):
-            all_text += " ".join(str(c) for c in row if c is not None) + " "
-        all_lower = all_text.lower()
-
+        ra_rows = _rows_to_dicts(ws_ra)
+        ra_lookup = {}
+        for r in ra_rows:
+            tk_key = _find_col(r, ["ticker", "symbol"])
+            if tk_key and r[tk_key]:
+                ra_lookup[str(r[tk_key]).strip().upper()] = r
         for ticker in TICKERS:
             s = expected_stats[ticker]
-            check(f"Risk Assessment: {ticker} present", ticker in all_text)
-            cat_lower = s["category"].lower()
-            # Check category appears somewhere
-            check(f"Risk Assessment: {ticker} category '{s['category']}'",
-                  cat_lower in all_lower,
-                  f"Category not found")
+            if ticker not in ra_lookup:
+                check(f"Risk Assessment: {ticker} row present", False,
+                      f"Available: {list(ra_lookup.keys())}")
+                continue
+            check(f"Risk Assessment: {ticker} row present", True)
+            r = ra_lookup[ticker]
+            cat_col = _find_col(r, CATEGORY_ALIASES)
+            if cat_col is None:
+                check(f"Risk Assessment {ticker}.category col present", False,
+                      f"Columns: {list(r.keys())}")
+                continue
+            actual_cat = str(r[cat_col]).strip().lower() if r[cat_col] else ""
+            check(f"Risk Assessment {ticker}.category == '{s['category']}'",
+                  s["category"].lower() == actual_cat,
+                  f"Got '{actual_cat}'")
 
 
 def main():

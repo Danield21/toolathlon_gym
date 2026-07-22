@@ -134,8 +134,15 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 50.0):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=50.0)")
+                # Tolerance proportional: 0.5% of GT value or 1.0 abs (min)
+                try:
+                    g_num = float(g_row[1])
+                    tol = max(1.0, abs(g_num) * 0.005)
+                    if not num_close(a_row[1], g_row[1], tol):
+                        errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol={tol:.2f})")
+                except (TypeError, ValueError):
+                    if not str_match(a_row[1], g_row[1]):
+                        errors.append(f"{key}.Value: '{a_row[1]}' vs '{g_row[1]}'")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -160,6 +167,22 @@ def main():
             _missing = [k for k in _kws if k not in _text and k not in _headings]
             if len(_missing) == len(_kws):
                 all_errors.append(f"Sales_Rankings_Brief.docx missing expected keywords: {_missing}")
+
+            # Check word doc mentions at least 2 of the top-3 product names from GT
+            g_pr_rows = load_sheet_rows(gt_wb, "Product Rankings")
+            if g_pr_rows and len(g_pr_rows) >= 4:
+                top3_names = [str(g_pr_rows[i][0]) for i in range(1, 4) if g_pr_rows[i] and g_pr_rows[i][0]]
+                # Use first 30 chars (truncated names) — products often have very long names
+                mentions = []
+                for nm in top3_names:
+                    snip = nm[:25].lower().strip()
+                    if snip and snip in _text:
+                        mentions.append(nm[:30])
+                if len(mentions) < 2:
+                    all_errors.append(
+                        f"Sales_Rankings_Brief.docx mentions only {len(mentions)} of top 3 products by name; expected >=2. "
+                        f"Top 3 prefixes: {[n[:30] for n in top3_names]}"
+                    )
         except ImportError:
             if os.path.getsize(docx_path) < 100:
                 all_errors.append("Sales_Rankings_Brief.docx too small")

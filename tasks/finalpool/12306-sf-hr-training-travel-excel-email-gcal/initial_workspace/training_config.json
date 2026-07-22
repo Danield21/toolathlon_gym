@@ -7,7 +7,5 @@
   ],
   "min_experience_years": 3,
   "max_employees": 5,
-  "seat_class": "二等座",
-  "outbound_train": "G11",
-  "return_train": "G2"
+  "seat_class": "二等座"
 }

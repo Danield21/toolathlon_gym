@@ -2,7 +2,7 @@ Our HR team wants to understand the impact of our online training courses on emp
 
 Please pull the employee data from the data warehouse focusing on performance ratings by department and experience level. Then check the learning management system for course information, enrollment counts, and average scores.
 
-Use the terminal to create and run a Python analysis script called training_impact.py in the workspace. The script should read employee_data.json and course_data.json (create both files first), analyze the relationship between training participation indicators and performance ratings, and output impact_analysis.json.
+Write and run a Python analysis script called training_impact.py in the workspace. The script should read employee_data.json and course_data.json (create both files first), analyze the relationship between training participation indicators and performance ratings, and output impact_analysis.json.
 
 Create an Excel file called Training_Impact_Analysis.xlsx with three sheets. The first sheet Department_Performance should have columns Department, Employee_Count, Avg_Performance_Rating (round to 2 decimals), Avg_Salary (round to 2 decimals), and Avg_Experience (round to 1 decimal), sorted alphabetically by Department. The second sheet Course_Overview should have columns Course_Name, Course_Code, Enrollment_Count, and Avg_Score (round to 1 decimal), sorted by Course_Name. The third sheet Impact_Summary should have Metric and Value columns with rows for Total_Employees, Total_Courses, Avg_Overall_Performance (round to 2 decimals), Highest_Performing_Dept, Lowest_Performing_Dept, and Most_Popular_Course.
 

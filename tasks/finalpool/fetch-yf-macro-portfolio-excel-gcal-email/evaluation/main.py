@@ -96,14 +96,18 @@ def check_excel(agent_workspace):
                     errors.append(f"Communication Services Action={comm[0][3]}, expected Overweight")
             else:
                 errors.append("Communication Services missing from Sector Sensitivity")
-            # Check Energy -> Hold
+            # Check Energy -> Low / Hold
             energy = [r for r in data_rows3 if r[0] and "energy" in str(r[0]).lower()]
             if energy:
+                if str(energy[0][2]).strip().lower() != "low":
+                    errors.append(f"Energy Rate_Sensitivity={energy[0][2]}, expected Low")
                 if str(energy[0][3]).strip().lower() != "hold":
                     errors.append(f"Energy Action={energy[0][3]}, expected Hold")
-            # Check Healthcare -> Hold
+            # Check Healthcare -> Low / Hold
             health = [r for r in data_rows3 if r[0] and "healthcare" in str(r[0]).lower()]
             if health:
+                if str(health[0][2]).strip().lower() != "low":
+                    errors.append(f"Healthcare Rate_Sensitivity={health[0][2]}, expected Low")
                 if str(health[0][3]).strip().lower() != "hold":
                     errors.append(f"Healthcare Action={health[0][3]}, expected Hold")
 
@@ -130,6 +134,14 @@ def check_gcal():
             summaries = [r[0].lower() if r[0] else "" for r in rows]
             if not any("portfolio" in s or "rebalancing" in s or "rebalance" in s for s in summaries):
                 errors.append(f"No portfolio rebalancing event (found: {[r[0] for r in rows]})")
+            # Check that event description lists all 5 stocks
+            STOCKS = ["AMZN", "GOOGL", "JNJ", "JPM", "XOM"]
+            portfolio_rows = [r for r in rows if r[0] and ("portfolio" in r[0].lower() or "rebalanc" in r[0].lower())]
+            if portfolio_rows:
+                desc = (portfolio_rows[0][1] or "").upper()
+                found_count = sum(1 for s in STOCKS if s in desc)
+                if found_count < 5:
+                    errors.append(f"GCal event description missing stocks: only {found_count}/5 found")
     except Exception as e:
         errors.append(f"Error checking GCal: {e}")
     return errors
@@ -154,8 +166,37 @@ def check_email():
             subjects = [r[0].lower() if r[0] else "" for r in rows]
             if not any("macro" in s or "portfolio" in s or "outlook" in s for s in subjects):
                 errors.append(f"Email subject doesn't match expected (found: {[r[0] for r in rows]})")
+            # Reverse validation: agent output must not contain noise content
+            noise_markers = ["bloomberg terminal", "benefits enrollment", "expense reports", "weekly market digest"]
+            for r in rows:
+                body = (r[1] or "").lower()
+                subj = (r[0] or "").lower()
+                for nm in noise_markers:
+                    if nm in body or nm in subj:
+                        errors.append(f"Agent email incorrectly references noise content: {nm}")
     except Exception as e:
         errors.append(f"Error checking email: {e}")
+    return errors
+
+
+def check_noise_preserved():
+    """Reverse validation: noise events/emails must still be present (not deleted)."""
+    errors = []
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM gcal.events WHERE id LIKE 'noise-evt-%'")
+        gcal_cnt = cur.fetchone()[0]
+        if gcal_cnt < 4:
+            errors.append(f"Noise gcal events missing: {gcal_cnt}/4 preserved")
+        cur.execute("SELECT COUNT(*) FROM email.messages WHERE message_id LIKE 'noise-msg-%'")
+        email_cnt = cur.fetchone()[0]
+        if email_cnt < 4:
+            errors.append(f"Noise emails missing: {email_cnt}/4 preserved")
+        cur.close()
+        conn.close()
+    except Exception as e:
+        errors.append(f"Error checking noise preservation: {e}")
     return errors
 
 
@@ -190,6 +231,15 @@ def main():
 
     print("  Checking email...")
     errs = check_email()
+    if errs:
+        all_errors.extend(errs)
+        for e in errs[:3]:
+            print(f"    ERROR: {e}")
+    else:
+        print("    PASS")
+
+    print("  Checking noise preservation...")
+    errs = check_noise_preserved()
     if errs:
         all_errors.extend(errs)
         for e in errs[:3]:

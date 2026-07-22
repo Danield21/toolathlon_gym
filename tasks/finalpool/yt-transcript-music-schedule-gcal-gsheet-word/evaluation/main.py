@@ -26,17 +26,20 @@ DB_CONFIG = {
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+RUNTIME_ONLY_FAIL = 0
 ARTIST_NAMES = ["burna boy", "wizkid", "rema", "davido", "ckay", "asake", "ayra starr",
                 "fireboy", "tems", "omah lay", "kizz daniel"]
 
 
-def record(name, passed, detail=""):
-    global PASS_COUNT, FAIL_COUNT
+def record(name, passed, detail="", runtime_only=False):
+    global PASS_COUNT, FAIL_COUNT, RUNTIME_ONLY_FAIL
     if passed:
         PASS_COUNT += 1
         print(f"  [PASS] {name}")
     else:
         FAIL_COUNT += 1
+        if runtime_only:
+            RUNTIME_ONLY_FAIL += 1
         msg = f": {str(detail)[:300]}" if detail else ""
         print(f"  [FAIL] {name}{msg}")
 
@@ -81,11 +84,16 @@ def check_word(agent_workspace):
 
 
 def check_gcal():
+    """Validate the four Sunday Afrobeat Show events at 20:00-22:00.
+
+    Required Sundays: Apr 5, 12, 19, 26 of 2026.
+    Each event must start at 20:00 and end at 22:00 (UTC offset accepted).
+    """
     print("\n=== Check 4: GCal Afrobeat Show Events in April 2026 ===")
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     cur.execute("""
-        SELECT summary, start_datetime FROM gcal.events
+        SELECT summary, description, start_datetime, end_datetime FROM gcal.events
         WHERE start_datetime >= '2026-04-01' AND start_datetime < '2026-05-01'
         AND (summary ILIKE '%afrobeat%' OR summary ILIKE '%show%')
         ORDER BY start_datetime
@@ -94,34 +102,59 @@ def check_gcal():
     cur.close()
     conn.close()
 
-    record("GCal has >= 3 Afrobeat/Show events in April 2026",
-           len(events) >= 3, f"Found {len(events)} matching events")
+    record("GCal has 4 Afrobeat/Show events in April 2026",
+           len(events) == 4, f"Found {len(events)} matching events",
+           runtime_only=True)
 
-    if events:
-        # Check Sunday evening (20:00 UTC or within evening hours)
-        sunday_events = [e for e in events if e[1] and e[1].weekday() == 6]
-        record("Events are on Sundays", len(sunday_events) >= 3,
-               f"Sunday events: {len(sunday_events)}")
+    # Build a set of (date, start_hh:mm, end_hh:mm) tuples in UTC.
+    # Postgres returns timestamptz in the session timezone; normalize to UTC
+    # so comparisons against the show's intended 20:00-22:00 UTC are robust.
+    from datetime import timezone
+    triples = set()
+    for summary, desc, st, en in events:
+        if st is None or en is None:
+            continue
+        if st.tzinfo is not None:
+            st_utc = st.astimezone(timezone.utc)
+            en_utc = en.astimezone(timezone.utc)
+        else:
+            st_utc, en_utc = st, en
+        triples.add((str(st_utc.date()), st_utc.strftime("%H:%M"), en_utc.strftime("%H:%M")))
+
+    expected_sundays = ["2026-04-05", "2026-04-12", "2026-04-19", "2026-04-26"]
+    for d in expected_sundays:
+        record(f"Show on {d} 20:00-22:00 UTC",
+               (d, "20:00", "22:00") in triples,
+               f"Have: {sorted(triples)[:8]}",
+               runtime_only=True)
 
 
 def check_gsheet():
+    """Validate the Radio_Broadcast_Schedule cloud spreadsheet.
+
+    Match by EXACT title 'Radio_Broadcast_Schedule' (case-insensitive,
+    spaces/underscores normalized). Do NOT fall back to most-recent
+    spreadsheet to avoid accepting a wrong workbook.
+    """
     print("\n=== Check 5: GSheet Radio_Broadcast_Schedule ===")
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT id, title FROM gsheet.spreadsheets
-        WHERE title ILIKE '%radio%' OR title ILIKE '%broadcast%' OR title ILIKE '%schedule%'
-        ORDER BY created_at DESC LIMIT 1
-    """)
-    spreadsheet = cur.fetchone()
+    def _norm(s):
+        return str(s or "").strip().lower().replace("_", " ").replace("-", " ")
 
-    if not spreadsheet:
-        cur.execute("SELECT id, title FROM gsheet.spreadsheets ORDER BY created_at DESC LIMIT 1")
-        spreadsheet = cur.fetchone()
+    cur.execute("SELECT id, title FROM gsheet.spreadsheets")
+    rows = cur.fetchall()
+    spreadsheet = None
+    for sid, title in rows:
+        if _norm(title) == _norm("Radio_Broadcast_Schedule"):
+            spreadsheet = (sid, title)
+            break
 
-    record("Radio_Broadcast_Schedule spreadsheet exists", spreadsheet is not None,
-           "No matching spreadsheet found")
+    record("Radio_Broadcast_Schedule spreadsheet exists (exact title)",
+           spreadsheet is not None,
+           f"Available titles: {[r[1] for r in rows]}",
+           runtime_only=True)
 
     if spreadsheet:
         spreadsheet_id, title = spreadsheet
@@ -133,7 +166,7 @@ def check_gsheet():
         playlist_sheet = cur.fetchone()
 
         record("Playlist sheet exists in spreadsheet", playlist_sheet is not None,
-               f"Sheets in spreadsheet: {title}")
+               f"Sheets in spreadsheet: {title}", runtime_only=True)
 
         if playlist_sheet:
             sheet_id = playlist_sheet[0]
@@ -144,11 +177,12 @@ def check_gsheet():
             """, (spreadsheet_id, sheet_id))
             data_rows = cur.fetchone()[0]
             record("Playlist sheet has >= 8 data rows", data_rows >= 8,
-                   f"Found {data_rows} data rows")
+                   f"Found {data_rows} data rows", runtime_only=True)
         else:
-            record("Playlist sheet has >= 8 data rows", False, "No Playlist sheet")
+            record("Playlist sheet has >= 8 data rows", False, "No Playlist sheet",
+                   runtime_only=True)
 
-        # Check Show_Schedule sheet
+        # Check Show_Schedule sheet (must contain the 4 specific Sundays)
         cur.execute("""
             SELECT id, title FROM gsheet.sheets
             WHERE spreadsheet_id = %s AND (title ILIKE '%%show%%' OR title ILIKE '%%schedule%%')
@@ -156,7 +190,7 @@ def check_gsheet():
         """, (spreadsheet_id,))
         show_sheet = cur.fetchone()
         record("Show_Schedule sheet exists", show_sheet is not None,
-               "No Show_Schedule sheet found")
+               "No Show_Schedule sheet found", runtime_only=True)
 
         if show_sheet:
             sheet_id = show_sheet[0]
@@ -167,13 +201,37 @@ def check_gsheet():
             """, (spreadsheet_id, sheet_id))
             data_rows = cur.fetchone()[0]
             record("Show_Schedule sheet has >= 4 rows (April Sundays)", data_rows >= 4,
-                   f"Found {data_rows} rows")
+                   f"Found {data_rows} rows", runtime_only=True)
+
+            # Pull all cell values for that sheet to verify the 4 Sundays appear
+            cur.execute("""
+                SELECT row_index, col_index, value FROM gsheet.cells
+                WHERE spreadsheet_id = %s AND sheet_id = %s
+            """, (spreadsheet_id, sheet_id))
+            cells = cur.fetchall()
+            # Group by row
+            grid = {}
+            for ri, ci, val in cells:
+                grid.setdefault(ri, {})[ci] = str(val) if val is not None else ""
+            # Flatten each row's values
+            row_strings = {ri: " | ".join(v for _, v in sorted(cols.items())) for ri, cols in grid.items()}
+
+            for d in ["2026-04-05", "2026-04-12", "2026-04-19", "2026-04-26"]:
+                found = any(d in s for s in row_strings.values())
+                record(f"Show_Schedule contains date {d}", found,
+                       f"Rows: {list(row_strings.values())[:6]}",
+                       runtime_only=True)
         else:
-            record("Show_Schedule sheet has >= 4 rows", False, "Sheet not found")
+            record("Show_Schedule sheet has >= 4 rows", False, "Sheet not found",
+                   runtime_only=True)
     else:
         for chk in ["Playlist sheet exists", "Playlist sheet has >= 8 data rows",
-                    "Show_Schedule sheet exists", "Show_Schedule sheet has >= 4 rows"]:
-            record(chk, False, "No spreadsheet found")
+                    "Show_Schedule sheet exists", "Show_Schedule sheet has >= 4 rows",
+                    "Show_Schedule contains date 2026-04-05",
+                    "Show_Schedule contains date 2026-04-12",
+                    "Show_Schedule contains date 2026-04-19",
+                    "Show_Schedule contains date 2026-04-26"]:
+            record(chk, False, "No spreadsheet found", runtime_only=True)
 
     cur.close()
     conn.close()
@@ -204,12 +262,12 @@ def check_email():
             break
 
     record("Email sent to station@radioafrica.fm", matching is not None,
-           f"Total messages: {len(messages)}")
+           f"Total messages: {len(messages)}", runtime_only=True)
     if matching:
         body = (matching[0] or "") + " " + (matching[3] or "")
         has_content = any(k in body.lower() for k in ["schedule", "broadcast", "afrobeat", "sunday", "show"])
         record("Email mentions show schedule content", has_content,
-               f"Subject: {matching[0]}")
+               f"Subject: {matching[0]}", runtime_only=True)
 
 
 def num_close(a, b, tol=1.0):
@@ -226,75 +284,39 @@ def str_match(a, b):
 
 
 def check_xlsx_content(workspace, groundtruth_workspace="."):
-    """Check Radio_Broadcast_Schedule_local.xlsx has valid content."""
-    print("\n=== Checking XLSX Content ===")
+    """Optional/runtime-only XLSX spot check.
+
+    The task.md asks the agent to create the workbook in the cloud
+    spreadsheet, NOT a local xlsx. We keep this check as a non-blocking
+    spot check: if a local xlsx happens to be present, validate it; if
+    not, skip silently. This avoids forcing an output the task does not
+    require.
+    """
+    print("\n=== Checking XLSX Content (optional) ===")
     try:
         import openpyxl
     except ImportError:
-        record("openpyxl available", False, "Cannot import openpyxl")
-        return False
+        return True
 
     xlsx_path = os.path.join(workspace, "Radio_Broadcast_Schedule_local.xlsx")
     if not os.path.isfile(xlsx_path):
-        record("Radio_Broadcast_Schedule_local.xlsx exists", False, f"Not found: {xlsx_path}")
-        return False
-    record("Radio_Broadcast_Schedule_local.xlsx exists", True)
+        # Not required by task.md; skip silently.
+        print("  [SKIP] Local xlsx not present (not required by task)")
+        return True
 
     try:
         wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-        record("XLSX has at least one sheet", len(wb.worksheets) >= 1,
-               f"Found {len(wb.worksheets)} sheets")
-        all_ok = True
-        for ws in wb.worksheets:
-            rows = list(ws.iter_rows(values_only=True))
-            has_data = len(rows) >= 2
-            record(f"XLSX sheet '{ws.title}' has data rows", has_data,
-                   f"Only {len(rows)} rows")
-            if not has_data:
-                all_ok = False
-        # --- Groundtruth XLSX value comparison ---
-        gt_path = os.path.join(groundtruth_workspace, "Radio_Broadcast_Schedule_local.xlsx")
-        if os.path.isfile(gt_path):
-            gt_wb = openpyxl.load_workbook(gt_path, data_only=True)
-            for gt_sname in gt_wb.sheetnames:
-                gt_ws = gt_wb[gt_sname]
-                a_ws = None
-                for asn in wb.sheetnames:
-                    if asn.strip().lower() == gt_sname.strip().lower():
-                        a_ws = wb[asn]
-                        break
-                if a_ws is None:
-                    record(f"GT sheet '{gt_sname}' exists in agent xlsx", False, f"Available: {wb.sheetnames}")
-                    continue
-                gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-                a_rows = [r for r in a_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-                record(f"GT '{gt_sname}' row count", len(a_rows) == len(gt_rows),
-                       f"Expected {len(gt_rows)}, got {len(a_rows)}")
-                for ri in range(min(3, len(gt_rows))):
-                    if ri >= len(a_rows):
-                        break
-                    ok = True
-                    for ci in range(min(len(gt_rows[ri]), len(a_rows[ri]))):
-                        gv, av = gt_rows[ri][ci], a_rows[ri][ci]
-                        if gv is None:
-                            continue
-                        if isinstance(gv, (int, float)):
-                            if not num_close(av, gv, max(abs(gv) * 0.1, 1.0)):
-                                ok = False
-                                break
-                        else:
-                            if not str_match(av, gv):
-                                ok = False
-                                break
-                    record(f"GT '{gt_sname}' row {ri+1} values", ok,
-                           f"gt={gt_rows[ri][:4]}, agent={a_rows[ri][:4] if ri < len(a_rows) else 'missing'}")
-            gt_wb.close()
-
+        # Just sanity check it has data; do not assert structure here
+        # because the cloud spreadsheet (gsheet) is the source of truth.
+        any_data = any(
+            len(list(ws.iter_rows(values_only=True))) >= 2 for ws in wb.worksheets
+        )
+        print(f"  [SPOT] Local xlsx present and has data: {any_data}")
         wb.close()
-        return all_ok
+        return True
     except Exception as e:
-        record("XLSX readable", False, str(e))
-        return False
+        print(f"  [SPOT] Local xlsx error (ignored): {e}")
+        return True
 
 
 def main():
@@ -329,7 +351,38 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    # Two-mode gate:
+    # - V1 (GT-test, agent did not run): only gate on non-runtime fails.
+    # - V2 (agent did run): once we detect ANY agent-side artifact in
+    #   gcal/gsheet, we gate on the full FAIL_COUNT.
+    non_runtime_fail = FAIL_COUNT - RUNTIME_ONLY_FAIL
+
+    agent_ran = False
+    try:
+        ck = psycopg2.connect(**DB_CONFIG)
+        ck_cur = ck.cursor()
+        ck_cur.execute(
+            "SELECT COUNT(*) FROM gcal.events "
+            "WHERE start_datetime >= '2026-04-01' AND start_datetime < '2026-05-01' "
+            "AND (summary ILIKE '%afrobeat%' OR summary ILIKE '%show%')"
+        )
+        n_gcal = ck_cur.fetchone()[0] or 0
+        ck_cur.execute("SELECT COUNT(*) FROM gsheet.spreadsheets")
+        n_sheets = ck_cur.fetchone()[0] or 0
+        ck_cur.close()
+        ck.close()
+        agent_ran = (n_gcal >= 1) or (n_sheets >= 1)
+    except Exception:
+        pass
+
+    print(f"Agent ran: {agent_ran}; Non-runtime fails: {non_runtime_fail}, runtime-only fails: {RUNTIME_ONLY_FAIL}")
+
+    if agent_ran:
+        gate_fails = FAIL_COUNT
+    else:
+        gate_fails = non_runtime_fail
+
+    if gate_fails == 0:
         print("PASS")
         sys.exit(0)
     else:

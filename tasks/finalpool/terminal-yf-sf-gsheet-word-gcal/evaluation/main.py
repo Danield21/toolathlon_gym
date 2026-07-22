@@ -60,27 +60,36 @@ def check_word(workspace):
         doc = Document(path)
         all_text = " ".join(p.text for p in doc.paragraphs).lower()
 
+        # Collect heading-style paragraphs (style.name starting with 'Heading')
+        heading_texts = []
+        for p in doc.paragraphs:
+            sname = (p.style.name if p.style else "") or ""
+            if sname.lower().startswith("heading"):
+                heading_texts.append(p.text.strip().lower())
+        headings_blob = " | ".join(heading_texts)
+
         check("Has title 'Q4 Compensation Review'",
               "q4 compensation review" in all_text or "compensation review memo" in all_text,
               f"Text snippet: {all_text[:100]}")
-        check("Has Background section",
-              "background" in all_text,
-              "Missing 'Background' section")
-        check("Has Methodology section",
-              "methodology" in all_text,
-              "Missing 'Methodology' section")
-        check("Has Market Analysis section",
-              "market analysis" in all_text or "market" in all_text,
-              "Missing market analysis")
-        check("Has Regional Performance section",
-              "regional" in all_text or "region" in all_text,
-              "Missing regional section")
-        check("Has Budget Impact section",
-              "budget" in all_text,
-              "Missing budget section")
-        check("Has Recommendations section",
-              "recommend" in all_text,
-              "Missing recommendations")
+        # Tighten: section detection requires a Heading-styled paragraph containing the keyword
+        check("Has Background heading",
+              any("background" in h for h in heading_texts),
+              f"Headings: {headings_blob[:200]}")
+        check("Has Methodology heading",
+              any("methodology" in h for h in heading_texts),
+              f"Headings: {headings_blob[:200]}")
+        check("Has Market Analysis heading",
+              any("market" in h for h in heading_texts),
+              f"Headings: {headings_blob[:200]}")
+        check("Has Regional Performance heading",
+              any(("regional" in h) or ("region" in h) for h in heading_texts),
+              f"Headings: {headings_blob[:200]}")
+        check("Has Budget Impact heading",
+              any("budget" in h for h in heading_texts),
+              f"Headings: {headings_blob[:200]}")
+        check("Has Recommendations heading",
+              any("recommend" in h for h in heading_texts),
+              f"Headings: {headings_blob[:200]}")
         check("Mentions DJI or Dow Jones",
               "dji" in all_text or "dow jones" in all_text or "dow" in all_text,
               "No DJI/Dow Jones reference")
@@ -113,16 +122,21 @@ def check_gsheet():
         sheet_titles = [s[1].lower() for s in sheets]
         check("Has at least 3 sheets", len(sheets) >= 3, f"Found {len(sheets)} sheets: {sheet_titles}")
 
-        has_rep = any("rep" in t or "performance" in t for t in sheet_titles)
-        has_market = any("market" in t or "adjustment" in t for t in sheet_titles)
-        has_adjusted = any("adjusted" in t or "bonus" in t for t in sheet_titles)
-        check("Has Rep_Performance sheet", has_rep, f"Sheets: {sheet_titles}")
-        check("Has Market_Adjustment sheet", has_market, f"Sheets: {sheet_titles}")
-        check("Has Adjusted_Bonuses sheet", has_adjusted, f"Sheets: {sheet_titles}")
+        # Tighten: require sheet names exactly matching Rep_Performance, Market_Adjustment, Adjusted_Bonuses
+        # (case-insensitive, underscore/space tolerant)
+        def _norm(s):
+            return (s or "").lower().replace(" ", "_").replace("-", "_")
+        norm_titles = [_norm(t) for t in sheet_titles]
+        has_rep = any(t == "rep_performance" for t in norm_titles)
+        has_market = any(t == "market_adjustment" for t in norm_titles)
+        has_adjusted = any(t == "adjusted_bonuses" for t in norm_titles)
+        check("Has Rep_Performance sheet (exact name)", has_rep, f"Sheets: {sheet_titles}")
+        check("Has Market_Adjustment sheet (exact name)", has_market, f"Sheets: {sheet_titles}")
+        check("Has Adjusted_Bonuses sheet (exact name)", has_adjusted, f"Sheets: {sheet_titles}")
 
         # Check Market_Adjustment sheet has DJI data
         for sid, title in sheets:
-            if "market" in title.lower() or "adjustment" in title.lower():
+            if _norm(title) == "market_adjustment":
                 cur.execute("""SELECT value FROM gsheet.cells
                     WHERE spreadsheet_id = %s AND sheet_id = %s""", (ss_id, sid))
                 values = [r[0].lower() if r[0] else "" for r in cur.fetchall()]
@@ -137,7 +151,7 @@ def check_gsheet():
 
         # Check Rep_Performance sheet has data rows
         for sid, title in sheets:
-            if "rep" in title.lower() or "performance" in title.lower():
+            if _norm(title) == "rep_performance":
                 cur.execute("""SELECT COUNT(DISTINCT row_index) FROM gsheet.cells
                     WHERE spreadsheet_id = %s AND sheet_id = %s AND row_index > 0""", (ss_id, sid))
                 data_rows = cur.fetchone()[0]
@@ -164,8 +178,12 @@ def check_gcal():
 
         if events:
             evt = events[0]
-            check("Event title contains 'Compensation Review'",
-                  "compensation" in evt[0].lower() and "review" in evt[0].lower(),
+            t = evt[0].lower()
+            # Tighten: title must be exactly "Q4 Compensation Review Meeting"
+            # (case-insensitive, whitespace-normalized) per task.md.
+            t_norm = " ".join(t.split())
+            check("Event title is exactly 'Q4 Compensation Review Meeting'",
+                  t_norm == "q4 compensation review meeting",
                   f"Title: {evt[0]}")
 
             # Check it's in the March 9-13 week
@@ -207,51 +225,121 @@ def check_scripts(workspace):
         check(f"{script} exists", os.path.exists(path))
 
 
+def _get_sales_count():
+    """Pull number of Sales department employees from HR table."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        with conn.cursor() as cur:
+            cur.execute(
+                'SELECT COUNT(*) FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES" '
+                'WHERE "DEPARTMENT" = %s',
+                ('Sales',),
+            )
+            n = cur.fetchone()[0]
+        conn.close()
+        return int(n)
+    except Exception:
+        return None
+
+
 def check_json_outputs(workspace):
     print("\n=== Check 5: JSON Output Files ===")
+    sales_n = _get_sales_count()
+    # Allow ±2 tolerance for off-by-one boundaries; otherwise require exact count.
+    expected_min = (sales_n - 2) if sales_n is not None else 100
 
     # current_bonuses.json
     cb_path = os.path.join(workspace, "current_bonuses.json")
+    cb_data = None
     if not os.path.exists(cb_path):
         check("current_bonuses.json exists", False)
     else:
         check("current_bonuses.json exists", True)
         try:
             with open(cb_path) as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                check("current_bonuses has entries", len(data) > 100, f"Found {len(data)} entries")
-                # Check structure of first entry
-                if data:
-                    first = data[0]
-                    has_keys = all(k in str(first).lower() for k in ["name", "region", "salary", "bonus"])
-                    check("current_bonuses has required fields", has_keys, f"Keys: {list(first.keys()) if isinstance(first, dict) else 'not dict'}")
-            elif isinstance(data, dict):
-                check("current_bonuses has entries", len(data) > 0, f"Found dict with {len(data)} keys")
+                cb_data = json.load(f)
+            if isinstance(cb_data, list):
+                check(
+                    f"current_bonuses entry count >= Sales HR count ({expected_min})",
+                    len(cb_data) >= expected_min,
+                    f"Found {len(cb_data)} entries (expected >= {expected_min})",
+                )
+                # Check structure of first entry: tighten to use dict.keys()
+                if cb_data and isinstance(cb_data[0], dict):
+                    first = cb_data[0]
+                    keys_lower = {k.lower() for k in first.keys()}
+                    has_name = any("name" in k for k in keys_lower)
+                    has_region = any("region" in k for k in keys_lower)
+                    has_salary = any("salary" in k or "compensation" in k for k in keys_lower)
+                    has_bonus = any("bonus" in k for k in keys_lower)
+                    check("current_bonuses has 'name' field", has_name, f"Keys: {list(first.keys())}")
+                    check("current_bonuses has 'region' field", has_region, f"Keys: {list(first.keys())}")
+                    check("current_bonuses has 'salary' field", has_salary, f"Keys: {list(first.keys())}")
+                    check("current_bonuses has 'bonus' field", has_bonus, f"Keys: {list(first.keys())}")
+            elif isinstance(cb_data, dict):
+                check("current_bonuses has entries", len(cb_data) > 0, f"Found dict with {len(cb_data)} keys")
         except Exception as e:
             check("current_bonuses.json valid JSON", False, str(e))
 
     # market_adjusted_bonuses.json
     mab_path = os.path.join(workspace, "market_adjusted_bonuses.json")
+    mab_data = None
     if not os.path.exists(mab_path):
         check("market_adjusted_bonuses.json exists", False)
     else:
         check("market_adjusted_bonuses.json exists", True)
         try:
             with open(mab_path) as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                check("adjusted_bonuses has entries", len(data) > 100, f"Found {len(data)} entries")
-                # Check that adjusted values are different from current (factor should be 0.9)
-                if data and isinstance(data[0], dict):
-                    keys_lower = {k.lower() for k in data[0].keys()}
+                mab_data = json.load(f)
+            if isinstance(mab_data, list):
+                check(
+                    f"adjusted_bonuses entry count >= Sales HR count ({expected_min})",
+                    len(mab_data) >= expected_min,
+                    f"Found {len(mab_data)} entries (expected >= {expected_min})",
+                )
+                if mab_data and isinstance(mab_data[0], dict):
+                    keys_lower = {k.lower() for k in mab_data[0].keys()}
                     has_adjusted = any("adjust" in k for k in keys_lower)
                     check("adjusted_bonuses has adjusted field", has_adjusted,
-                          f"Keys: {list(data[0].keys())}")
-            elif isinstance(data, dict):
-                check("adjusted_bonuses has data", len(data) > 0, f"Found dict with {len(data)} keys")
+                          f"Keys: {list(mab_data[0].keys())}")
+            elif isinstance(mab_data, dict):
+                check("adjusted_bonuses has data", len(mab_data) > 0, f"Found dict with {len(mab_data)} keys")
         except Exception as e:
             check("market_adjusted_bonuses.json valid JSON", False, str(e))
+
+    # Validate budget cap and 20% constraint
+    if isinstance(mab_data, list) and mab_data and isinstance(mab_data[0], dict):
+        # Try common bonus field names
+        def _get_val(d, keys):
+            for k in d.keys():
+                if k.lower() in keys or any(target in k.lower() for target in keys):
+                    try:
+                        return float(d[k])
+                    except (TypeError, ValueError):
+                        continue
+            return None
+
+        total_bonus = 0.0
+        violations_20 = 0
+        rows_with_bonus = 0
+        for entry in mab_data:
+            # Restrict to specific adjusted-bonus key names (drop generic 'bonus' fallback)
+            adj = _get_val(entry, ["adjusted_bonus", "adjusted", "final_bonus", "scaled_bonus"])
+            sal = _get_val(entry, ["salary", "annual_salary", "base_salary", "compensation"])
+            if adj is not None:
+                total_bonus += adj
+                rows_with_bonus += 1
+            if adj is not None and sal is not None and sal > 0 and adj > sal * 0.20 + 0.01:
+                violations_20 += 1
+
+        if rows_with_bonus > 0:
+            # Budget cap: 30,000,000
+            check("Total adjusted bonuses <= budget cap (30,000,000)",
+                  total_bonus <= 30000000 + 1.0,
+                  f"Total bonus: {total_bonus:.2f}")
+            check("No bonus exceeds 20% of salary",
+                  violations_20 == 0,
+                  f"Found {violations_20} violations out of {rows_with_bonus} entries")
 
 
 def check_reverse_validation():
@@ -328,7 +416,8 @@ def main():
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
 
-    if accuracy >= 70:
+    # Use FAIL_COUNT == 0 (replaces 70% accuracy threshold which masked critical fails)
+    if FAIL_COUNT == 0:
         print("PASS")
         sys.exit(0)
     else:

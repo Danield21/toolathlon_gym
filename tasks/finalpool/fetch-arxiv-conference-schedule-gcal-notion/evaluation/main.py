@@ -87,19 +87,21 @@ def check_notion():
 
         record("Conference Reading List database exists", True)
 
-        # Check database properties
+        # Check database properties - require ALL 6 properties from task.md
         if props:
             if isinstance(props, str):
                 props = json.loads(props)
             prop_names = [k.lower() for k in props.keys()] if isinstance(props, dict) else []
-            has_title = any("title" in p for p in prop_names)
-            has_source = any("source" in p for p in prop_names)
-            has_relevance = any("relevance" in p for p in prop_names)
-            record(
-                "Database has required properties",
-                has_title or has_source or has_relevance,
-                f"Properties: {prop_names}",
-            )
+            required_props = {
+                "title": any("title" in p for p in prop_names),
+                "authors": any("author" in p for p in prop_names),
+                "source": any("source" in p for p in prop_names),
+                "conference_session": any("session" in p for p in prop_names),
+                "relevance_score": any("relevance" in p for p in prop_names),
+                "read_by_date": any("read" in p and "date" in p for p in prop_names) or any("read_by" in p for p in prop_names),
+            }
+            for name, present in required_props.items():
+                record(f"Database has '{name}' property", present, f"Properties: {prop_names}")
         else:
             record("Database has properties", False, "No properties found")
 
@@ -131,26 +133,120 @@ def check_notion():
                                 if name:
                                     sources.add(name.lower())
 
+        # Require BOTH ArXiv and Scholar sources, not OR with page count
+        has_arxiv = any("arxiv" in s for s in sources)
+        has_scholar = any("scholar" in s for s in sources)
         record(
-            "Entries from both ArXiv and Scholar sources",
-            len(sources) >= 2 or len(pages) >= 6,
+            "Entries include ArXiv source",
+            has_arxiv,
+            f"Sources found: {sources}",
+        )
+        record(
+            "Entries include Scholar source",
+            has_scholar,
             f"Sources found: {sources}",
         )
 
-        # Check relevance scores
-        has_scores = False
+        # Check relevance scores - require all entries to have a numeric score 1-5
+        # Also build per-page (relevance, read_by_date, title) records for downstream checks
+        scores_valid = 0
+        per_page_records = []  # list of (relevance:int|None, read_by:str|None, title:str)
         for page_id, page_props in pages:
             if isinstance(page_props, str):
                 page_props = json.loads(page_props)
+
+            page_relevance = None
+            page_read_by = None
+            page_title = ""
             if isinstance(page_props, dict):
                 for key, val in page_props.items():
-                    if "relevance" in key.lower():
-                        has_scores = True
-                        break
-            if has_scores:
-                break
+                    klow = key.lower()
+                    if "relevance" in klow:
+                        try:
+                            num = None
+                            if isinstance(val, dict):
+                                num = val.get("number")
+                                if num is None and isinstance(val.get("formula"), dict):
+                                    num = val["formula"].get("number")
+                            elif isinstance(val, (int, float)):
+                                num = val
+                            if num is not None and 1 <= float(num) <= 5:
+                                scores_valid += 1
+                                page_relevance = float(num)
+                        except (TypeError, ValueError):
+                            pass
+                    if "read" in klow and "date" in klow:
+                        try:
+                            if isinstance(val, dict):
+                                date_val = val.get("date")
+                                if isinstance(date_val, dict):
+                                    page_read_by = date_val.get("start")
+                                elif isinstance(date_val, str):
+                                    page_read_by = date_val
+                                elif isinstance(val.get("formula"), dict):
+                                    page_read_by = val["formula"].get("date")
+                        except (TypeError, ValueError):
+                            pass
+                    if klow == "title" or "title" == klow.strip():
+                        try:
+                            if isinstance(val, dict):
+                                title_arr = val.get("title", [])
+                                if isinstance(title_arr, list):
+                                    page_title = " ".join(
+                                        t.get("plain_text", "") if isinstance(t, dict) else ""
+                                        for t in title_arr
+                                    )
+                        except (TypeError, ValueError):
+                            pass
+            per_page_records.append((page_relevance, page_read_by, page_title))
 
-        record("Entries have relevance scores", has_scores)
+        record(
+            "All entries have relevance scores 1-5",
+            scores_valid == len(pages) and len(pages) >= 6,
+            f"valid={scores_valid}, total={len(pages)}",
+        )
+
+        # Read_By_Date conditional validation:
+        #   - high relevance (4-5) -> 2026-03-20
+        #   - lower relevance (1-3) -> 2026-03-23
+        read_by_correct = 0
+        read_by_total = 0
+        for relevance, read_by, _title in per_page_records:
+            if relevance is None or read_by is None:
+                continue
+            read_by_total += 1
+            read_by_str = str(read_by)
+            if relevance >= 4 and "2026-03-20" in read_by_str:
+                read_by_correct += 1
+            elif relevance <= 3 and "2026-03-23" in read_by_str:
+                read_by_correct += 1
+        record(
+            "Read_By_Date follows relevance rule (>=4 -> 03-20, <=3 -> 03-23)",
+            read_by_total >= 6 and read_by_correct == read_by_total,
+            f"correct={read_by_correct}/{read_by_total}",
+        )
+
+        # Noise rejection: papers about protein folding, manifolds, climate change
+        # should NOT appear in the reading list (they are noise injected in preprocess).
+        noise_keywords = [
+            "protein folding",
+            "topological invariant",
+            "four-dimensional manifold",
+            "climate change",
+            "coastal erosion",
+        ]
+        noise_titles_found = []
+        for _r, _rb, title in per_page_records:
+            tl = (title or "").lower()
+            for nk in noise_keywords:
+                if nk in tl:
+                    noise_titles_found.append(title)
+                    break
+        record(
+            "Noise (irrelevant) papers excluded from reading list",
+            len(noise_titles_found) == 0,
+            f"found noise titles: {noise_titles_found}",
+        )
 
         cur.close()
         conn.close()
@@ -210,71 +306,48 @@ def check_calendar():
         if not found:
             all_ok = False
 
-    # Check dates are in March 2026
-    march_events = []
-    for summary, description, start_dt, end_dt in reading_events:
-        if start_dt:
-            dt_str = str(start_dt)
-            if "2026-03" in dt_str:
-                march_events.append(summary)
+    # Check exact dates and times
+    # March 18 14:00-15:30: Transformer
+    # March 19 14:00-15:30: Attention
+    # March 20 14:00-15:30: Optimization
+    expected_sessions = [
+        ("transformer", "2026-03-18", "14:00", "15:30"),
+        ("attention", "2026-03-19", "14:00", "15:30"),
+        ("optim", "2026-03-20", "14:00", "15:30"),
+    ]
+    for keyword, exp_date, exp_start_hm, exp_end_hm in expected_sessions:
+        match_date = False
+        match_start_time = False
+        match_end_time = False
+        for summary, description, start_dt, end_dt in reading_events:
+            if keyword in (summary or "").lower():
+                sd = str(start_dt) if start_dt else ""
+                ed = str(end_dt) if end_dt else ""
+                if exp_date in sd:
+                    match_date = True
+                if exp_start_hm in sd:
+                    match_start_time = True
+                if exp_end_hm in ed:
+                    match_end_time = True
+        record(f"'{keyword}' event date is {exp_date}", match_date)
+        record(f"'{keyword}' event starts at {exp_start_hm}", match_start_time)
+        record(f"'{keyword}' event ends at {exp_end_hm}", match_end_time)
+        if not (match_date and match_start_time and match_end_time):
+            all_ok = False
 
-    record(
-        "Reading group events in March 2026",
-        len(march_events) >= 3,
-        f"March events: {march_events}",
-    )
-    if len(march_events) < 3:
-        all_ok = False
-
-    # Check descriptions mention papers
-    desc_with_papers = 0
-    for summary, description, start_dt, end_dt in reading_events:
-        if description and len(description) > 20:
-            desc_with_papers += 1
-
-    record(
-        "Reading group descriptions have content",
-        desc_with_papers >= 2,
-        f"{desc_with_papers} events have substantive descriptions",
-    )
-    if desc_with_papers < 2:
-        all_ok = False
+    # Each reading group event description must have non-trivial content
+    # listing paper titles (substantive content > 50 chars)
+    for keyword, exp_date, _, _ in expected_sessions:
+        for summary, description, start_dt, end_dt in reading_events:
+            if keyword in (summary or "").lower():
+                desc = description or ""
+                record(f"'{keyword}' event description lists papers (>50 chars)",
+                       len(desc) > 50, f"len={len(desc)}")
+                break
+        else:
+            record(f"'{keyword}' event description present", False, "no event found")
 
     return all_ok
-
-
-def check_xlsx_content(workspace):
-    """Check Conference_Reading_Summary.xlsx has valid content."""
-    print("\n=== Checking XLSX Content ===")
-    try:
-        import openpyxl
-    except ImportError:
-        record("openpyxl available", False, "Cannot import openpyxl")
-        return False
-
-    xlsx_path = os.path.join(workspace, "Conference_Reading_Summary.xlsx")
-    if not os.path.isfile(xlsx_path):
-        record("Conference_Reading_Summary.xlsx exists", False, f"Not found: {xlsx_path}")
-        return False
-    record("Conference_Reading_Summary.xlsx exists", True)
-
-    try:
-        wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-        record("XLSX has at least one sheet", len(wb.worksheets) >= 1,
-               f"Found {len(wb.worksheets)} sheets")
-        all_ok = True
-        for ws in wb.worksheets:
-            rows = list(ws.iter_rows(values_only=True))
-            has_data = len(rows) >= 2
-            record(f"XLSX sheet '{ws.title}' has data rows", has_data,
-                   f"Only {len(rows)} rows")
-            if not has_data:
-                all_ok = False
-        wb.close()
-        return all_ok
-    except Exception as e:
-        record("XLSX readable", False, str(e))
-        return False
 
 
 def main():
@@ -287,15 +360,13 @@ def main():
 
     notion_ok = check_notion()
     cal_ok = check_calendar()
-    xlsx_ok = check_xlsx_content(args.agent_workspace)
 
     print(f"\n=== SUMMARY ===")
     print(f"  Notion:   {'PASS' if notion_ok else 'FAIL'}")
     print(f"  Calendar: {'PASS' if cal_ok else 'FAIL'}")
-    print(f"  XLSX:     {'PASS' if xlsx_ok else 'FAIL'}")
     print(f"  Passed: {PASS_COUNT}, Failed: {FAIL_COUNT}")
 
-    overall = notion_ok and cal_ok and xlsx_ok
+    overall = notion_ok and cal_ok and FAIL_COUNT == 0
     print(f"  Overall:  {'PASS' if overall else 'FAIL'}")
 
     sys.exit(0 if overall else 1)

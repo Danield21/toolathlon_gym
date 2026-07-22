@@ -62,30 +62,111 @@ def get_tier_data_from_db():
     }
 
 
-def check_gsheet_exists():
+def check_gsheet_exists(tier_data):
+    """Verify the Google Sheet exists AND contains tier summary data rows (VIP/Gold/Standard)."""
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
         cur.execute("SELECT id, title FROM gsheet.spreadsheets WHERE LOWER(title) LIKE '%customer loyalty%' OR LOWER(title) LIKE '%loyalty program%'")
         rows = cur.fetchall()
+        if not rows:
+            cur.close()
+            conn.close()
+            return False, "Spreadsheet title not found"
+        ss_id = rows[0][0]
+        # Pull all cell values + formatted values for the spreadsheet
+        cur.execute(
+            "SELECT row_index, col_index, value, formatted_value FROM gsheet.cells WHERE spreadsheet_id = %s",
+            (str(ss_id),),
+        )
+        cells = cur.fetchall()
         cur.close()
         conn.close()
-        return len(rows) > 0
-    except Exception:
-        return False
+        if len(cells) < 12:
+            return False, f"GSheet has too few cells ({len(cells)}); need at least tier summary rows"
+        # Gather lowercase text representation of all values
+        texts = []
+        numbers = []
+        for _, _, v, fv in cells:
+            for t in (v, fv):
+                if t is None:
+                    continue
+                t_str = str(t)
+                texts.append(t_str.lower())
+                # try to parse number
+                try:
+                    numbers.append(float(t_str.replace(',', '').replace('$', '').strip()))
+                except (TypeError, ValueError):
+                    pass
+        all_text = "\n".join(texts)
+        # Require all 3 tier names present
+        for tier in ("vip", "gold", "standard"):
+            if tier not in all_text:
+                return False, f"GSheet missing tier label '{tier}'"
+        # Require tier counts (6, 15, 29) or expected numbers from tier_data
+        if tier_data:
+            expected_counts = [len(tier_data["vip"]), len(tier_data["gold"]), len(tier_data["std"])]
+            expected_revs = [tier_data["vip_rev"], tier_data["gold_rev"], tier_data["std_rev"]]
+            for cnt in expected_counts:
+                if not any(abs(n - cnt) < 0.01 for n in numbers):
+                    return False, f"GSheet missing tier customer count {cnt}"
+            for rev in expected_revs:
+                if not any(abs(n - rev) <= max(5.0, rev * 0.01) for n in numbers):
+                    return False, f"GSheet missing tier revenue close to {rev}"
+        return True, "OK"
+    except Exception as e:
+        return False, f"DB error: {e}"
 
 
-def check_vip_emails_sent(vip_count):
+def check_vip_emails_sent(vip_list):
+    """Verify each VIP customer received a 'Welcome to Our VIP Program' email
+    whose body mentions their specific total purchase amount."""
+    import re
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM email.messages WHERE LOWER(subject) LIKE '%vip%'")
-        cnt = cur.fetchone()[0]
+        cur.execute(
+            "SELECT subject, body_text, body_html, to_addr FROM email.messages WHERE LOWER(subject) LIKE '%vip%'"
+        )
+        rows = cur.fetchall()
         cur.close()
         conn.close()
-        return cnt >= vip_count
-    except Exception:
-        return False
+        if len(rows) < len(vip_list):
+            return False, f"Only {len(rows)} VIP emails found, expected >= {len(vip_list)}"
+
+        def _amounts_from(text):
+            if not text:
+                return []
+            out = []
+            # Match plain floats (possibly with thousands separators) and dollar amounts
+            for m in re.finditer(r"\$?\s?([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+\.[0-9]+|[0-9]+)", text):
+                try:
+                    out.append(float(m.group(1).replace(',', '')))
+                except ValueError:
+                    pass
+            return out
+
+        # For each VIP, there must be at least one email whose recipient matches
+        # and body mentions a number within $1 of the VIP's total_spent.
+        missing = []
+        for _, customer_email, customer_total, _ in vip_list:
+            found = False
+            for subj, body_text, body_html, to_addr in rows:
+                recipient_text = (str(to_addr) or "").lower()
+                if customer_email.lower() not in recipient_text:
+                    continue
+                body_blob = (body_text or "") + " " + (body_html or "")
+                amounts = _amounts_from(body_blob)
+                if any(abs(a - float(customer_total)) <= 1.0 for a in amounts):
+                    found = True
+                    break
+            if not found:
+                missing.append(f"{customer_email} (total={customer_total})")
+        if missing:
+            return False, "VIPs missing personalized email with total amount: " + ", ".join(missing[:3])
+        return True, "OK"
+    except Exception as e:
+        return False, f"DB error: {e}"
 
 
 def check_notion_page_exists():
@@ -208,20 +289,22 @@ def main():
             else:
                 print("    PASS")
 
-    # Check GSheet exists
+    # Check GSheet exists with tier summary data rows
     print("  Checking Google Sheet...")
-    if check_gsheet_exists():
+    ok, msg = check_gsheet_exists(tier_data)
+    if ok:
         print("    PASS")
     else:
-        all_errors.append("Google Sheet 'Customer Loyalty Program' not found in DB")
+        all_errors.append(f"Google Sheet 'Customer Loyalty Program' verification failed: {msg}")
 
-    # Check VIP emails sent
+    # Check VIP emails sent with personalized total purchase amount
     print("  Checking VIP emails sent...")
-    vip_count = len(tier_data["vip"]) if tier_data else 6
-    if check_vip_emails_sent(vip_count):
-        print(f"    PASS (at least {vip_count} VIP emails)")
+    vip_list = tier_data["vip"] if tier_data else []
+    ok, msg = check_vip_emails_sent(vip_list)
+    if ok:
+        print(f"    PASS ({len(vip_list)} VIP emails with personalized amounts)")
     else:
-        all_errors.append(f"Expected >= {vip_count} VIP emails, not found in email.messages")
+        all_errors.append(f"VIP email verification failed: {msg}")
 
     # Check Notion page
     print("  Checking Notion page...")

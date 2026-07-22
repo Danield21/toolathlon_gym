@@ -2,7 +2,7 @@ I am a principal investigator preparing multiple grant proposals and need help o
 
 Start by fetching the funding opportunities from http://localhost:30230/api/funding.json. This file contains information about several grant programs from different agencies, including their deadlines, funding amounts, and topic areas. Record all the details about each opportunity.
 
-Next, search the scholarly paper database for recent publications that relate to the topics covered by these funding programs. The relevant topic areas include machine learning, AI safety, interpretability, robust AI, medical imaging, and drug discovery. You should find around five relevant papers. For each paper, note its title, authors, citation count, publication year, and venue.
+Next, search the scholarly paper database for recent publications that relate to the topics covered by these funding programs. The relevant topic areas include machine learning, AI safety, interpretability, robust AI, medical imaging, and drug discovery. You should select exactly five relevant papers covering the topic areas. For each paper, note its title, authors, citation count, publication year, and venue.
 
 Then, review the research statement and collaborator list files in the workspace. Based on the funding topics and the collaborators' expertise areas, determine which collaborators would be good fits for each grant opportunity.
 

@@ -2,6 +2,18 @@
 import argparse, os, sys
 
 
+FAIL_COUNT = 0
+
+
+def record(label, ok, detail=""):
+    global FAIL_COUNT
+    status = "PASS" if ok else "FAIL"
+    extra = f" - {detail}" if detail and not ok else ""
+    print(f"    [{status}] {label}{extra}")
+    if not ok:
+        FAIL_COUNT += 1
+
+
 def num_close(a, b, abs_tol=1.0, rel_tol=0.05):
     try:
         a_f, b_f = float(a), float(b)
@@ -17,106 +29,225 @@ def load_sheet_rows(wb, sheet_name):
     return None
 
 
+EXPECTED_SECTORS = {
+    "AMZN": "Consumer Cyclical",
+    "GOOGL": "Communication Services",
+    "JNJ": "Healthcare",
+    "JPM": "Financial Services",
+    "XOM": "Energy",
+}
+
+
+def _compute_expected_returns():
+    """Compute expected 90-day returns at runtime from yf.stock_prices.
+
+    Falls back to hardcoded values if DB is unreachable.
+    """
+    fallback = {"AMZN": -4.61, "GOOGL": -6.29, "JNJ": 19.30, "JPM": -6.40, "XOM": 30.22}
+    try:
+        import psycopg2
+        conn = psycopg2.connect(host='localhost', port=5432, dbname='toolathlon_gym',
+                                user='eigent', password='camel')
+        out = {}
+        with conn.cursor() as cur:
+            for sym in ["AMZN", "GOOGL", "JNJ", "JPM", "XOM"]:
+                cur.execute(
+                    """
+                    WITH latest AS (
+                        SELECT date, close FROM yf.stock_prices WHERE symbol=%s ORDER BY date DESC LIMIT 1
+                    ),
+                    target_date AS (
+                        SELECT (SELECT date FROM latest) - INTERVAL '90 days' as d
+                    ),
+                    old_price AS (
+                        SELECT close FROM yf.stock_prices
+                        WHERE symbol=%s AND date <= (SELECT d FROM target_date)
+                        ORDER BY date DESC LIMIT 1
+                    )
+                    SELECT ((SELECT close FROM latest) - (SELECT close FROM old_price))
+                           / (SELECT close FROM old_price) * 100
+                    """,
+                    (sym, sym),
+                )
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    out[sym] = float(row[0])
+                else:
+                    out[sym] = fallback[sym]
+        conn.close()
+        return out
+    except Exception:
+        return fallback
+
+
+EXPECTED_RETURNS = _compute_expected_returns()
+EXPECTED_MACRO = {
+    "us_10y_yield": (4.25, "Headwind for growth stocks"),
+    "fed_funds_rate": (5.25, "Restrictive"),
+    "cpi_yoy": (3.1, "Inflationary pressure"),
+    "unemployment": (3.7, "Tight labor market"),
+    "gdp_growth_q4": (2.8, "Supportive"),
+    "sp500_pe_ratio": (22.5, "Above historical average"),
+    "vix": (18.3, "Low volatility"),
+}
+
+
 def check_excel(agent_workspace):
-    errors = []
     import openpyxl
     path = os.path.join(agent_workspace, "Macro_Investment.xlsx")
     if not os.path.exists(path):
-        return ["Macro_Investment.xlsx not found"]
+        record("Macro_Investment.xlsx exists", False, "file not found")
+        # Increment FAIL_COUNT for each missed check
+        for _ in range(20):
+            record("Excel content (skipped due to missing file)", False)
+        return
+    record("Macro_Investment.xlsx exists", True)
     try:
         wb = openpyxl.load_workbook(path, data_only=True)
 
-        # Stock Performance sheet
+        # ===== Stock Performance sheet =====
         rows = load_sheet_rows(wb, "Stock Performance")
+        record("Sheet 'Stock Performance' exists", rows is not None)
         if rows is None:
-            errors.append("Sheet 'Stock Performance' not found")
+            for _ in range(10):
+                record("Stock row check (skipped)", False)
         else:
             data_rows = [r for r in rows[1:] if r and r[0] is not None]
-            if len(data_rows) < 5:
-                errors.append(f"Stock Performance has {len(data_rows)} rows, expected 5")
-            symbols = {str(r[0]).strip().upper() for r in data_rows if r[0]}
-            for sym in ["AMZN", "GOOGL", "JNJ", "JPM", "XOM"]:
-                if sym not in symbols:
-                    errors.append(f"Symbol {sym} missing from Stock Performance")
-            # Check specific values
+            record(f"Stock Performance has 5 rows", len(data_rows) == 5,
+                   f"got {len(data_rows)}")
+            by_sym = {}
             for r in data_rows:
-                if r[0] and str(r[0]).strip().upper() == "XOM":
-                    if len(r) > 5 and not num_close(r[5], 30.22):
-                        errors.append(f"XOM Return_90d_Pct={r[5]}, expected ~30.22")
-                if r[0] and str(r[0]).strip().upper() == "JNJ":
-                    if len(r) > 5 and not num_close(r[5], 19.30):
-                        errors.append(f"JNJ Return_90d_Pct={r[5]}, expected ~19.30")
+                if r and r[0]:
+                    by_sym[str(r[0]).strip().upper()] = r
+            for sym in ["AMZN", "GOOGL", "JNJ", "JPM", "XOM"]:
+                row = by_sym.get(sym)
+                record(f"{sym} present in Stock Performance", row is not None)
+                if row is not None:
+                    # Sector check
+                    if len(row) > 2 and row[2]:
+                        record(f"{sym} sector",
+                               str(row[2]).strip().lower() == EXPECTED_SECTORS[sym].lower(),
+                               f"got '{row[2]}', expected '{EXPECTED_SECTORS[sym]}'")
+                    else:
+                        record(f"{sym} sector", False, "missing")
+                    # Return value check (tighter abs_tol=0.1)
+                    if len(row) > 5 and row[5] is not None:
+                        record(f"{sym} Return_90d_Pct",
+                               num_close(row[5], EXPECTED_RETURNS[sym], abs_tol=0.1, rel_tol=0.0),
+                               f"got {row[5]}, expected ~{EXPECTED_RETURNS[sym]}")
+                    else:
+                        record(f"{sym} Return_90d_Pct", False, "missing")
+            # Verify alphabetical sort by Symbol
+            symbols_in_order = [str(r[0]).strip().upper() for r in data_rows if r and r[0]]
+            record("Stock Performance sorted alphabetically",
+                   symbols_in_order == sorted(symbols_in_order),
+                   f"got {symbols_in_order}")
 
-        # Macro Context sheet
+        # ===== Macro Context sheet =====
         rows2 = load_sheet_rows(wb, "Macro Context")
+        record("Sheet 'Macro Context' exists", rows2 is not None)
         if rows2 is None:
-            errors.append("Sheet 'Macro Context' not found")
+            for _ in range(15):
+                record("Macro row check (skipped)", False)
         else:
             data_rows2 = [r for r in rows2[1:] if r and r[0] is not None]
-            if len(data_rows2) < 7:
-                errors.append(f"Macro Context has {len(data_rows2)} rows, expected 7")
-            lookup = {}
-            for r in data_rows2:
-                if r[0]:
-                    lookup[str(r[0]).strip().lower()] = r
-            if "us_10y_yield" in lookup:
-                if not num_close(lookup["us_10y_yield"][1], 4.25, abs_tol=0.1):
-                    errors.append(f"us_10y_yield value={lookup['us_10y_yield'][1]}, expected 4.25")
-            if "cpi_yoy" in lookup:
-                if not num_close(lookup["cpi_yoy"][1], 3.1, abs_tol=0.1):
-                    errors.append(f"cpi_yoy value={lookup['cpi_yoy'][1]}, expected 3.1")
+            record("Macro Context has 7 rows", len(data_rows2) == 7,
+                   f"got {len(data_rows2)}")
+            lookup = {str(r[0]).strip().lower(): r for r in data_rows2 if r and r[0]}
+            for ind_key, (exp_val, exp_label) in EXPECTED_MACRO.items():
+                r = lookup.get(ind_key)
+                record(f"Indicator '{ind_key}' present", r is not None)
+                if r is not None:
+                    val_ok = len(r) > 1 and r[1] is not None and num_close(
+                        r[1], exp_val, abs_tol=0.1, rel_tol=0.0)
+                    record(f"'{ind_key}' value", val_ok,
+                           f"got {r[1] if len(r)>1 else None}, expected {exp_val}")
+                    label_ok = len(r) > 2 and r[2] is not None and (
+                        str(r[2]).strip().lower() == exp_label.lower())
+                    record(f"'{ind_key}' Impact_Assessment", label_ok,
+                           f"got '{r[2] if len(r)>2 else None}', expected '{exp_label}'")
 
-        # Portfolio Summary sheet
+        # ===== Portfolio Summary sheet =====
         rows3 = load_sheet_rows(wb, "Portfolio Summary")
+        record("Sheet 'Portfolio Summary' exists", rows3 is not None)
         if rows3 is None:
-            errors.append("Sheet 'Portfolio Summary' not found")
+            for _ in range(5):
+                record("Portfolio summary row (skipped)", False)
         else:
             data_rows3 = [r for r in rows3[1:] if r and r[0] is not None]
-            lookup3 = {str(r[0]).strip().lower(): r[1] for r in data_rows3 if r[0]}
-            if "average_90d_return" in lookup3:
-                if not num_close(lookup3["average_90d_return"], 6.44):
-                    errors.append(f"Average_90d_Return={lookup3['average_90d_return']}, expected ~6.44")
-            else:
-                errors.append("Average_90d_Return not found")
-            if "best_performer" in lookup3:
-                if str(lookup3["best_performer"]).strip().upper() != "XOM":
-                    errors.append(f"Best_Performer={lookup3['best_performer']}, expected XOM")
-            else:
-                errors.append("Best_Performer not found")
-            if "worst_performer" in lookup3:
-                if str(lookup3["worst_performer"]).strip().upper() != "JPM":
-                    errors.append(f"Worst_Performer={lookup3['worst_performer']}, expected JPM")
-            else:
-                errors.append("Worst_Performer not found")
-            if "avg_trailing_pe" in lookup3:
-                if not num_close(lookup3["avg_trailing_pe"], 23.43):
-                    errors.append(f"Avg_Trailing_PE={lookup3['avg_trailing_pe']}, expected ~23.43")
-            if "macro_risk_score" in lookup3:
-                if not num_close(lookup3["macro_risk_score"], 3, abs_tol=1):
-                    errors.append(f"Macro_Risk_Score={lookup3['macro_risk_score']}, expected ~3")
+            lookup3 = {str(r[0]).strip().lower(): r[1] for r in data_rows3 if r and r[0]}
+            # Average_90d_Return = avg of returns ~ 6.44
+            v = lookup3.get("average_90d_return")
+            record("Average_90d_Return ~ 6.44",
+                   v is not None and num_close(v, 6.44, abs_tol=0.05, rel_tol=0.0),
+                   f"got {v}")
+            v = lookup3.get("best_performer")
+            record("Best_Performer == XOM",
+                   v is not None and str(v).strip().upper() == "XOM",
+                   f"got {v}")
+            v = lookup3.get("worst_performer")
+            record("Worst_Performer == JPM",
+                   v is not None and str(v).strip().upper() == "JPM",
+                   f"got {v}")
+            v = lookup3.get("avg_trailing_pe")
+            record("Avg_Trailing_PE ~ 23.43",
+                   v is not None and num_close(v, 23.43, abs_tol=0.1, rel_tol=0.0),
+                   f"got {v}")
+            v = lookup3.get("macro_risk_score")
+            # Per task: 7 macro indicators with negative-sounding labels:
+            # Headwind, Restrictive, Inflationary pressure, Above historical average
+            # = 4 (us_10y_yield, fed_funds_rate, cpi_yoy, sp500_pe_ratio)
+            # However task originally accepted 3 (excludes Above historical avg).
+            # Accept 3 or 4 to be lenient given ambiguity but reject 0/1/5/6/7.
+            try:
+                vf = float(v) if v is not None else None
+            except Exception:
+                vf = None
+            record("Macro_Risk_Score in {3,4}",
+                   vf is not None and 3 <= vf <= 4,
+                   f"got {v}")
 
     except Exception as e:
-        errors.append(f"Error reading Excel: {e}")
-    return errors
+        record(f"Error reading Excel: {e}", False)
 
 
 def check_word(agent_workspace):
-    errors = []
     path = os.path.join(agent_workspace, "Investment_Report.docx")
     if not os.path.exists(path):
-        return ["Investment_Report.docx not found"]
+        record("Investment_Report.docx exists", False)
+        for _ in range(8):
+            record("Word section (skipped due to missing file)", False)
+        return
+    record("Investment_Report.docx exists", True)
     try:
         from docx import Document
         doc = Document(path)
-        text = "\n".join([p.text for p in doc.paragraphs]).lower()
-        if len(text) < 200:
-            errors.append(f"Investment_Report.docx too short ({len(text)} chars)")
-        for kw in ["macro", "portfolio", "sector"]:
-            if kw not in text:
-                errors.append(f"Investment_Report.docx missing keyword '{kw}'")
+        paras = [p.text for p in doc.paragraphs]
+        full_text = "\n".join(paras)
+        text_lower = full_text.lower()
+        record("Investment_Report.docx >= 600 chars", len(full_text) >= 600,
+               f"got {len(full_text)} chars")
+        # Title (must appear in first 5 paragraphs at the top)
+        first5_lower = "\n".join(paras[:5]).lower()
+        record("Title 'Q1 2026 Macro Investment Report' at top (first 5 paras)",
+               "q1 2026 macro investment report" in first5_lower)
+        # Sections
+        for section_kw in ["macroeconomic", "portfolio", "sector", "outlook"]:
+            record(f"Word section keyword '{section_kw}'",
+                   section_kw in text_lower)
+        # Sector commentary should mention all 5 sectors and symbols
+        sector_hits = sum(1 for sym in ["googl", "amzn", "jpm", "jnj", "xom"]
+                          if sym in text_lower)
+        record("Word references all 5 of 5 portfolio symbols",
+               sector_hits == 5, f"got {sector_hits}")
+        sector_word_hits = sum(1 for s in [
+            "communication services", "consumer cyclical",
+            "financial services", "healthcare", "energy"]
+                               if s in text_lower)
+        record("Word references all 5 of 5 sector names",
+               sector_word_hits == 5, f"got {sector_word_hits}")
     except Exception as e:
-        errors.append(f"Error reading Word doc: {e}")
-    return errors
+        record(f"Error reading Word doc: {e}", False)
 
 
 def main():
@@ -126,36 +257,21 @@ def main():
     parser.add_argument("--launch_time", required=False)
     parser.add_argument("--res_log_file", required=False)
     args = parser.parse_args()
-    agent_ws = args.agent_workspace or os.path.join(os.path.dirname(__file__), "..", "groundtruth_workspace")
-
-    all_errors = []
+    agent_ws = args.agent_workspace or os.path.join(
+        os.path.dirname(__file__), "..", "groundtruth_workspace")
 
     print("  Checking Excel file...")
-    errs = check_excel(agent_ws)
-    if errs:
-        all_errors.extend(errs)
-        for e in errs[:5]:
-            print(f"    ERROR: {e}")
-    else:
-        print("    PASS")
+    check_excel(agent_ws)
 
     print("  Checking Word document...")
-    errs = check_word(agent_ws)
-    if errs:
-        all_errors.extend(errs)
-        for e in errs[:3]:
-            print(f"    ERROR: {e}")
-    else:
-        print("    PASS")
+    check_word(agent_ws)
 
-    if all_errors:
-        print(f"\n=== RESULT: FAIL ({len(all_errors)} errors) ===")
-        for e in all_errors[:10]:
-            print(f"  {e}")
-        sys.exit(1)
-    else:
+    if FAIL_COUNT == 0:
         print("\n=== RESULT: PASS ===")
         sys.exit(0)
+    else:
+        print(f"\n=== RESULT: FAIL ({FAIL_COUNT} errors) ===")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

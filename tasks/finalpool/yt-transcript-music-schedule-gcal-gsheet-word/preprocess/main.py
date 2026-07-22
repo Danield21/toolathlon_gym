@@ -14,24 +14,27 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
 }
 
 GCAL_EVENTS = [
+    # Monday afternoon noise (no conflict with Sunday evening show)
     {
         "summary": "Studio Recording",
         "description": "Live recording session - studio fully booked.",
         "start": "2026-04-06 14:00:00+00",
         "end": "2026-04-06 18:00:00+00",
     },
+    # Sunday-evening conflict on 2026-04-19 20:00-22:00 — overlaps the show
+    # timeslot, forcing the agent to detect a real conflict on that Sunday.
     {
         "summary": "Tech Maintenance",
         "description": "Equipment maintenance check.",
-        "start": "2026-04-13 09:00:00+00",
-        "end": "2026-04-13 11:00:00+00",
+        "start": "2026-04-19 20:00:00+00",
+        "end": "2026-04-19 22:00:00+00",
     },
 ]
 

@@ -20,8 +20,6 @@ DB_CONFIG = {
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
-PAPER_KEYWORDS = ["dpo", "direct preference", "llama", "mistral"]
-
 
 def record(name, passed, detail=""):
     global PASS_COUNT, FAIL_COUNT
@@ -34,12 +32,36 @@ def record(name, passed, detail=""):
         print(f"  [FAIL] {name}{msg}")
 
 
+def norm(s):
+    return str(s or "").strip().lower().replace("_", " ")
+
+
+# Expected papers (from preprocess)
+EXPECTED_PAPERS = [
+    {"arxiv_id": "2305.20050", "kw": ["dpo", "direct preference"]},
+    {"arxiv_id": "2307.09288", "kw": ["llama"]},
+    {"arxiv_id": "2310.06825", "kw": ["mistral"]},
+]
+
+
+def _extract_notion_title(props):
+    try:
+        title_arr = props.get('title', {}).get('title', [])
+        return "".join([t.get('text', {}).get('content', '') for t in title_arr])
+    except Exception:
+        return ""
+
+
 def check_notion():
     print("\n=== Checking Notion Page ===")
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
+    except Exception as e:
+        record("Notion connection", False, str(e))
+        return
 
+    try:
         cur.execute("""
             SELECT id, properties FROM notion.pages
             WHERE archived = false AND in_trash = false
@@ -48,42 +70,50 @@ def check_notion():
 
         target_page = None
         for pid, props in pages:
-            props_text = str(props).lower() if props else ""
-            if "llm fine-tuning" in props_text or ("llm" in props_text and "fine" in props_text and "tuning" in props_text):
+            t = _extract_notion_title(props or {})
+            if norm(t) == norm("LLM Fine-Tuning Knowledge Base"):
                 target_page = pid
                 break
-            if "fine-tuning knowledge base" in props_text or "knowledge base" in props_text:
-                target_page = pid
-                break
-
-        record("Notion page 'LLM Fine-Tuning Knowledge Base' exists",
+        record("Notion page 'LLM Fine-Tuning Knowledge Base' exists (exact title)",
                target_page is not None,
                f"Searched {len(pages)} pages")
 
-        if target_page is None:
-            # Try broader search
-            for pid, props in pages:
-                props_text = str(props).lower() if props else ""
-                if "fine" in props_text or "llm" in props_text or "tuning" in props_text:
-                    target_page = pid
-                    break
-            if target_page:
-                print(f"  [INFO] Found page with broader search: {target_page}")
-
-        # Check that multiple paper-related pages exist or content is substantial
-        paper_pages = 0
-        for pid, props in pages:
-            props_text = str(props).lower() if props else ""
-            if any(kw in props_text for kw in ["dpo", "llama", "mistral", "preference", "fine-tun"]):
-                paper_pages += 1
-
-        record("Notion has pages/content for at least 2 relevant papers",
-               paper_pages >= 2 or len(pages) >= 3,
-               f"Found {paper_pages} paper-related pages, {len(pages)} total pages")
+        if target_page:
+            # Check that the page has block content covering each relevant paper
+            cur.execute("SELECT block_type, content FROM notion.blocks WHERE page_id=%s", (target_page,))
+            blocks = cur.fetchall()
+            full_text = ""
+            for btype, content in blocks:
+                if isinstance(content, dict):
+                    rt = content.get("rich_text", []) or content.get("text", [])
+                    if isinstance(rt, list):
+                        for piece in rt:
+                            if isinstance(piece, dict):
+                                full_text += " " + piece.get("plain_text", "")
+                                inner = piece.get("text", {})
+                                if isinstance(inner, dict):
+                                    full_text += " " + str(inner.get("content", ""))
+                else:
+                    full_text += " " + str(content)
+            full_text_lower = full_text.lower()
+            import re as _re
+            paper_hits = 0
+            for ep in EXPECTED_PAPERS:
+                hit = False
+                for kw in ep["kw"]:
+                    # word-boundary match against false positives like 'mistralian'/'tdpo'
+                    if _re.search(r"(?<![a-z0-9])" + _re.escape(kw) + r"(?![a-z0-9])", full_text_lower):
+                        hit = True
+                        break
+                if hit:
+                    paper_hits += 1
+            record(f"Notion page covers all {len(EXPECTED_PAPERS)} relevant papers",
+                   paper_hits == len(EXPECTED_PAPERS),
+                   f"hits={paper_hits}, text[:300]={full_text_lower[:300]}")
 
         conn.close()
     except Exception as e:
-        record("Notion connection", False, str(e))
+        record("Notion check", False, str(e))
 
 
 def check_word(agent_workspace):
@@ -101,24 +131,34 @@ def check_word(agent_workspace):
         return
     record("Word file readable", True)
 
-    full_text = "\n".join(p.text for p in doc.paragraphs).lower()
+    paragraph_texts = [p.text for p in doc.paragraphs]
+    full_text = "\n".join(paragraph_texts)
+    full_text_lower = full_text.lower()
 
-    has_heading = ("llm" in full_text or "fine-tun" in full_text) and ("survey" in full_text or "synthesis" in full_text or "alignment" in full_text)
-    record("Word has heading mentioning LLM fine-tuning/alignment", has_heading)
+    # Heading 'LLM Fine-Tuning and Alignment Survey'
+    has_heading = "llm fine-tuning and alignment survey" in full_text_lower
+    record("Word has heading 'LLM Fine-Tuning and Alignment Survey'", has_heading,
+           f"first 200 chars: {full_text[:200]}")
 
-    has_intro = len(full_text) > 400
-    record("Word has substantial content", has_intro, f"Text length: {len(full_text)}")
+    # Has substantial content
+    record("Word has substantial content (> 600 chars)", len(full_text) > 600,
+           f"Text length: {len(full_text)}")
 
-    has_dpo = "dpo" in full_text or "direct preference" in full_text
-    has_llama = "llama" in full_text
-    has_mistral = "mistral" in full_text
-    papers_mentioned = sum([has_dpo, has_llama, has_mistral])
-
+    # All 3 relevant papers covered (word-boundary regex to avoid 'tdpo'/'mistralian'/'llamafication')
+    import re as _re_word
+    def _wb(kw, text):
+        return _re_word.search(r"(?<![a-z0-9])" + _re_word.escape(kw) + r"(?![a-z0-9])", text) is not None
+    has_dpo = _wb("dpo", full_text_lower) or "direct preference" in full_text_lower
+    has_llama = _wb("llama", full_text_lower) or _wb("llama2", full_text_lower) or _wb("llama-2", full_text_lower)
+    has_mistral = _wb("mistral", full_text_lower)
     record("Word mentions DPO paper", has_dpo)
     record("Word mentions Llama 2 paper", has_llama)
     record("Word mentions Mistral 7B paper", has_mistral)
-    record("Word mentions at least 2 relevant papers", papers_mentioned >= 2,
-           f"Found {papers_mentioned}/3 papers")
+
+    # Authors present (from preprocess data)
+    record("Word mentions Rafael Rafailov (DPO)", "rafailov" in full_text_lower)
+    record("Word mentions Hugo Touvron (Llama)", "touvron" in full_text_lower)
+    record("Word mentions Albert Jiang (Mistral)", "jiang" in full_text_lower)
 
 
 def check_gsheet():
@@ -126,17 +166,21 @@ def check_gsheet():
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
+    except Exception as e:
+        record("GSheet connection", False, str(e))
+        return
 
+    try:
         cur.execute("SELECT id, title FROM gsheet.spreadsheets")
         spreadsheets = cur.fetchall()
 
         target_ss = None
         for sid, title in spreadsheets:
-            if title and ("llm" in title.lower() or "paper" in title.lower()) and ("registry" in title.lower() or "paper" in title.lower()):
+            if norm(title) == norm("LLM Paper Registry"):
                 target_ss = sid
                 break
 
-        record("GSheet 'LLM Paper Registry' exists",
+        record("GSheet 'LLM Paper Registry' exists (exact title)",
                target_ss is not None,
                f"Found sheets: {[t for _, t in spreadsheets]}")
 
@@ -146,38 +190,47 @@ def check_gsheet():
 
         cur.execute("SELECT id, title FROM gsheet.sheets WHERE spreadsheet_id = %s", (target_ss,))
         sheets = cur.fetchall()
-
         if not sheets:
             record("GSheet has at least one sheet", False)
             conn.close()
             return
 
         sheet_id = sheets[0][0]
+
+        # Header check
+        cur.execute("""
+            SELECT value FROM gsheet.cells
+            WHERE spreadsheet_id = %s AND sheet_id = %s AND row_index = 0
+            ORDER BY col_index
+        """, (target_ss, sheet_id))
+        headers = [norm(r[0]) for r in cur.fetchall()]
+        for h in ["arxiv id", "title", "authors", "published date", "key contribution", "method category"]:
+            record(f"GSheet has '{h}' header", h in headers, f"got: {headers}")
+
+        # Row count
         cur.execute("""
             SELECT COUNT(DISTINCT row_index) FROM gsheet.cells
             WHERE spreadsheet_id = %s AND sheet_id = %s AND row_index > 0
         """, (target_ss, sheet_id))
         data_rows = cur.fetchone()[0]
-        record("GSheet 'LLM Paper Registry' has at least 3 data rows",
-               data_rows >= 3, f"Found {data_rows} data rows")
+        record("GSheet has 3 data rows (one per paper)",
+               data_rows == 3, f"Found {data_rows} data rows")
 
+        # Each expected arxiv ID present in cells
         cur.execute("""
             SELECT LOWER(value) FROM gsheet.cells
             WHERE spreadsheet_id = %s AND sheet_id = %s
         """, (target_ss, sheet_id))
         cell_values = [row[0] for row in cur.fetchall() if row[0]]
         all_text = " ".join(cell_values)
-
-        has_dpo = "dpo" in all_text or "direct preference" in all_text
-        has_llama = "llama" in all_text
-        has_mistral = "mistral" in all_text
-        record("GSheet contains DPO paper entry", has_dpo)
-        record("GSheet contains Llama paper entry", has_llama)
-        record("GSheet contains Mistral paper entry", has_mistral)
+        for ep in EXPECTED_PAPERS:
+            record(f"GSheet contains arxiv_id {ep['arxiv_id']}",
+                   ep['arxiv_id'] in all_text,
+                   f"sample: {all_text[:300]}")
 
         conn.close()
     except Exception as e:
-        record("GSheet connection", False, str(e))
+        record("GSheet check", False, str(e))
 
 
 def main():
@@ -194,12 +247,7 @@ def main():
 
     total = PASS_COUNT + FAIL_COUNT
     print(f"\n=== Results: {PASS_COUNT}/{total} passed ===")
-    if FAIL_COUNT > 0:
-        print(f"{FAIL_COUNT} checks failed")
-        sys.exit(1)
-    else:
-        print("All checks passed!")
-        sys.exit(0)
+    sys.exit(0 if FAIL_COUNT == 0 else 1)
 
 
 if __name__ == "__main__":

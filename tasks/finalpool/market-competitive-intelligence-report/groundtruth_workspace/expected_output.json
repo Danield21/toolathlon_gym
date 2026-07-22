@@ -1,4 +1,8 @@
 {
   "status": "completed",
-  "records_processed": 0
+  "deliverables": [
+    "Competitive_Analysis.xlsx",
+    "Executive_Summary.docx",
+    "Competitive_Briefing.pptx"
+  ]
 }

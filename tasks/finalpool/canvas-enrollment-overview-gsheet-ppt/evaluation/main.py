@@ -53,71 +53,101 @@ def num_close(a, b, tol=1.0):
 # Check 1: Google Sheet
 # ============================================================================
 
+def _expected_fall_2013_codes():
+    """Query canvas DB for Fall 2013 course codes (ending in '2013J')."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT course_code, total_students FROM canvas.courses "
+            "WHERE course_code LIKE %s",
+            ("%2013J",),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [(c.lower(), int(ts) if ts is not None else 0) for c, ts in rows]
+    except Exception:
+        # Fallback: known Fall 2013 codes
+        return [("aaa-2013j", 383), ("bbb-2013j", 2237), ("ddd-2013j", 1938),
+                ("eee-2013j", 1052), ("fff-2013j", 2283), ("ggg-2013j", 952)]
+
+
 def check_gsheet():
     print("\n=== Checking Google Sheet ===")
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
-    cur.execute("SELECT id, title FROM gsheet.spreadsheets")
+    # Require exact title 'Fall 2013 Enrollment Overview'
+    cur.execute(
+        "SELECT id, title FROM gsheet.spreadsheets "
+        "WHERE title ILIKE %s",
+        ("Fall 2013 Enrollment Overview",),
+    )
     sheets = cur.fetchall()
-    print(f"[check_gsheet] Found {len(sheets)} spreadsheets.")
-    record("At least 1 spreadsheet created", len(sheets) >= 1)
+    record("Spreadsheet titled 'Fall 2013 Enrollment Overview' exists",
+           len(sheets) >= 1, f"Found {len(sheets)} matching spreadsheets")
 
-    found_sheet = False
-    for ss_id, title in sheets:
-        if title and ("enrollment" in title.lower() or "fall 2013" in title.lower()):
-            found_sheet = True
-            record(f"Spreadsheet '{title}' found", True)
+    if not sheets:
+        cur.close()
+        conn.close()
+        return False
 
-            # Get cell data
-            cur.execute("""
-                SELECT c.row_index, c.col_index, c.value
-                FROM gsheet.cells c
-                JOIN gsheet.sheets s ON c.sheet_id = s.id
-                WHERE c.spreadsheet_id = %s
-                ORDER BY c.row_index, c.col_index
-            """, (ss_id,))
-            cells = cur.fetchall()
+    ss_id, title = sheets[0]
 
-            # Build a grid
-            grid = {}
-            for row_i, col_i, val in cells:
-                if row_i not in grid:
-                    grid[row_i] = {}
-                grid[row_i][col_i] = val
+    # Get cell data
+    cur.execute("""
+        SELECT c.row_index, c.col_index, c.value
+        FROM gsheet.cells c
+        JOIN gsheet.sheets s ON c.sheet_id = s.id
+        WHERE c.spreadsheet_id = %s
+        ORDER BY c.row_index, c.col_index
+    """, (ss_id,))
+    cells = cur.fetchall()
 
-            max_row = max(grid.keys()) if grid else 0
-            record("Spreadsheet has at least 7 rows (header + 6 courses)",
-                   max_row >= 6,
-                   f"Max row index: {max_row}")
+    grid = {}
+    for row_i, col_i, val in cells:
+        if row_i not in grid:
+            grid[row_i] = {}
+        grid[row_i][col_i] = val
 
-            # Check for expected courses in data
-            all_vals = [str(v).lower() for row in grid.values() for v in row.values() if v]
-            for code in ["fff-2013j", "bbb-2013j", "ddd-2013j"]:
-                found_code = any(code in v for v in all_vals)
-                record(f"Spreadsheet contains {code.upper()}", found_code)
+    expected = _expected_fall_2013_codes()
+    n_courses = len(expected)
+    max_row = max(grid.keys()) if grid else 0
+    record(f"Spreadsheet has header + {n_courses} courses",
+           max_row >= n_courses,
+           f"Max row index: {max_row}; expected at least {n_courses}")
 
-            # Check for numeric student counts
-            numeric_vals = []
-            for row in grid.values():
-                for v in row.values():
-                    try:
-                        numeric_vals.append(float(v))
-                    except (TypeError, ValueError):
-                        pass
-            record("Spreadsheet has numeric enrollment data",
-                   any(v >= 100 for v in numeric_vals),
-                   f"Numeric values: {numeric_vals[:5]}")
-            break
+    # Check for ALL expected Fall 2013 course codes in data
+    all_vals = [str(v).lower() for row in grid.values() for v in row.values() if v]
+    for code, _ts in expected:
+        found_code = any(code in v for v in all_vals)
+        record(f"Spreadsheet contains {code.upper()}", found_code)
 
-    if not found_sheet:
-        record("Fall 2013 Enrollment spreadsheet found", False,
-               f"Spreadsheets: {[(s[0], s[1]) for s in sheets]}")
+    # Check for numeric student counts; require sum of integers >= sum(expected)
+    numeric_vals = []
+    for row in grid.values():
+        for v in row.values():
+            try:
+                numeric_vals.append(float(v))
+            except (TypeError, ValueError):
+                pass
+    expected_total = sum(ts for _, ts in expected)
+    # Require all expected per-course student counts to appear OR the total
+    # (Strict: cannot pass with placeholder "100").
+    expected_counts = [ts for _, ts in expected]
+    matched_counts = sum(
+        1 for ec in expected_counts if any(num_close(v, ec, 5) for v in numeric_vals)
+    )
+    has_total = any(num_close(v, expected_total, 5) for v in numeric_vals)
+    record("Spreadsheet has numeric enrollment data matching expected per-course counts",
+           matched_counts >= max(1, len(expected_counts) - 1) or has_total,
+           f"Matched {matched_counts}/{len(expected_counts)} counts; total found: {has_total}")
 
     cur.close()
     conn.close()
-    return found_sheet
+    return True
 
 
 # ============================================================================
@@ -155,13 +185,19 @@ def check_pptx(agent_workspace):
                "enrollment" in all_text or "enrolled" in all_text or "students" in all_text,
                "Missing enrollment content")
 
-        # Check for course codes
-        for code in ["fff-2013j", "bbb-2013j"]:
+        # Check for ALL Fall 2013 course codes
+        expected = _expected_fall_2013_codes()
+        for code, _ts in expected:
             record(f"PPT mentions {code.upper()}",
                    code in all_text,
                    f"Missing {code} in slides")
 
-        return slide_count >= 8
+        n_courses = len(expected)
+        record(f"PPT has at least {n_courses + 2} slides (title + per-course + summary)",
+               slide_count >= n_courses + 2,
+               f"Found {slide_count} slides; expected at least {n_courses + 2}")
+
+        return slide_count >= n_courses + 2
 
     except ImportError:
         size = os.path.getsize(pptx_path)
@@ -208,10 +244,13 @@ def check_word(agent_workspace):
                len(tables) >= 1,
                f"Found {len(tables)} tables")
 
-        # Check for total enrollment number
-        record("Word doc mentions total enrollment",
-               "8845" in all_text or "8,845" in all_text or "total" in all_text,
-               "Missing total enrollment figure")
+        # Check for total enrollment number (8845 = sum of Fall 2013 students)
+        expected = _expected_fall_2013_codes()
+        expected_total = sum(ts for _, ts in expected)
+        total_strs = [str(expected_total), f"{expected_total:,}"]
+        record(f"Word doc mentions total enrollment ({expected_total})",
+               any(s in all_text for s in total_strs),
+               f"Missing total {expected_total}; expected one of {total_strs}")
 
         return True
 
@@ -234,41 +273,52 @@ def check_emails():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
 
+    # Require recipient = academic.office@university.edu (AND not OR)
     cur.execute("""
         SELECT subject, from_addr, to_addr, body_text
         FROM email.messages
-    """)
-    all_emails = cur.fetchall()
+        WHERE to_addr::text ILIKE %s
+    """, ("%academic.office@university.edu%",))
+    addressed = cur.fetchall()
+    record("Email to academic.office@university.edu found",
+           len(addressed) >= 1, f"Found {len(addressed)} matching")
+
+    if not addressed:
+        cur.close()
+        conn.close()
+        return False
+
+    # Among recipient-correct emails, require subject contains 'Fall 2013'
+    # AND ('enrollment' or 'semester')
+    valid = None
+    for subject, from_addr, to_addr, body_text in addressed:
+        sub = (subject or "").lower()
+        if "fall 2013" in sub and ("enrollment" in sub or "semester" in sub):
+            valid = (subject, from_addr, to_addr, body_text)
+            break
+    record("Email subject contains 'Fall 2013' AND ('enrollment' or 'semester')",
+           valid is not None,
+           f"Subjects observed: {[e[0] for e in addressed]}")
+
+    if valid is None:
+        cur.close()
+        conn.close()
+        return False
+
+    body = (valid[3] or "").lower()
+    expected = _expected_fall_2013_codes()
+    expected_total = sum(ts for _, ts in expected)
+    # Body must contain the actual numeric total enrollment.
+    record(f"Email body mentions total enrollment number ({expected_total})",
+           str(expected_total) in body or f"{expected_total:,}" in body,
+           f"Body missing total {expected_total}")
+    record("Email body mentions number of courses",
+           "course" in body,
+           "Body missing course count info")
+
     cur.close()
     conn.close()
-
-    print(f"[check_emails] Found {len(all_emails)} total emails.")
-    record("At least 1 email sent", len(all_emails) >= 1, f"Found {len(all_emails)}")
-
-    found_email = False
-    for subject, from_addr, to_addr, body_text in all_emails:
-        to_str = str(to_addr or "").lower()
-        subject_lower = (subject or "").lower()
-        if ("academic.office@university.edu" in to_str or
-                "enrollment" in subject_lower or "fall 2013" in subject_lower):
-            found_email = True
-            record("Email to academic.office@university.edu found", True)
-
-            record("Email subject mentions enrollment or Fall 2013",
-                   "enrollment" in subject_lower or "fall 2013" in subject_lower or "2013" in subject_lower,
-                   f"Subject: {subject}")
-
-            body_lower = (body_text or "").lower()
-            record("Email body has enrollment stats",
-                   any(term in body_lower for term in ["enrollment", "students", "courses", "2013"]),
-                   "Body missing enrollment content")
-            break
-
-    if not found_email:
-        record("Enrollment email found", False,
-               f"Emails: {[(e[0], str(e[2])[:60]) for e in all_emails[:3]]}")
-
-    return found_email
+    return True
 
 
 # ============================================================================
@@ -288,7 +338,13 @@ def main():
     word_ok = check_word(args.agent_workspace)
     email_ok = check_emails()
 
-    all_passed = gsheet_ok and pptx_ok and word_ok and email_ok
+    # Aggregation gate must include FAIL_COUNT==0 so per-row record() failures
+    # propagate. Each check_* may return True at the end of its happy path while
+    # individual record() calls (per-course code, numeric counts, body content)
+    # have already incremented FAIL_COUNT.
+    all_passed = (
+        gsheet_ok and pptx_ok and word_ok and email_ok and FAIL_COUNT == 0
+    )
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

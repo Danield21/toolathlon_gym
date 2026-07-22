@@ -70,8 +70,10 @@ def main():
             a_data = a_rows[1:] if len(a_rows) > 1 else []
             g_data = g_rows[1:] if len(g_rows) > 1 else []
 
-            if len(a_data) != 7:
-                all_errors.append(f"Department Analysis row count: {len(a_data)}, expected 7")
+            # Use GT row count (no hard-coded 7)
+            expected_count = len(g_data)
+            if len(a_data) != expected_count:
+                all_errors.append(f"Department Analysis row count: {len(a_data)}, expected {expected_count}")
 
             a_lookup = {}
             for row in a_data:
@@ -95,26 +97,67 @@ def main():
                 # Avg_Job_Satisfaction
                 if not num_close(a_row[3], g_row[3], 0.05):
                     all_errors.append(f"{g_row[0]} Avg_Job_Satisfaction: {a_row[3]} vs {g_row[3]}")
+                # Combined_Score
+                if len(g_row) > 4 and len(a_row) > 4:
+                    if not num_close(a_row[4], g_row[4], 0.05):
+                        all_errors.append(f"{g_row[0]} Combined_Score: {a_row[4]} vs {g_row[4]}")
             print("    Done.")
 
         # Check Findings sheet
         print("  Checking Findings sheet...")
         a_rows2 = load_sheet_rows(agent_wb, "Findings")
+        g_rows2 = load_sheet_rows(gt_wb, "Findings")
         if a_rows2 is None:
             all_errors.append("Sheet 'Findings' not found in agent output")
         else:
             a_data2 = a_rows2[1:] if len(a_rows2) > 1 else []
+            g_data2 = g_rows2[1:] if g_rows2 and len(g_rows2) > 1 else []
             a_lookup2 = {}
             for row in a_data2:
                 if row and row[0]:
                     a_lookup2[str(row[0]).strip().lower()] = row
+            g_lookup2 = {}
+            for row in g_data2:
+                if row and row[0]:
+                    g_lookup2[str(row[0]).strip().lower()] = row
 
-            # Check Total_Employees
-            te_row = a_lookup2.get("total_employees")
-            if te_row is None:
-                all_errors.append("Findings missing Total_Employees row")
-            elif not num_close(te_row[1], 50000, 1000):
-                all_errors.append(f"Total_Employees: {te_row[1]} vs expected ~50000")
+            # Validate every Findings row from GT
+            string_metrics = {"best_wlb_department", "best_js_department"}
+            # Tie-breaking: when departments are tied at rounded values, accept any
+            # department whose unrounded WLB / JS is at the (rounded) max.
+            # WLB: Operations (4.5434) and Finance (4.5404) both round to 4.54 → accept either.
+            # JS:  Finance (6.5932) and Sales (6.5874) both round to 6.59 → accept either.
+            ACCEPTABLE_BEST_WLB = {"finance", "operations"}
+            ACCEPTABLE_BEST_JS = {"finance", "sales"}
+            for metric_key, g_row in g_lookup2.items():
+                a_row = a_lookup2.get(metric_key)
+                if a_row is None:
+                    all_errors.append(f"Findings missing {g_row[0]} row")
+                    continue
+                a_val = a_row[1] if len(a_row) > 1 else None
+                g_val = g_row[1] if len(g_row) > 1 else None
+                if metric_key == "best_wlb_department":
+                    av = str(a_val).strip().lower() if a_val is not None else ""
+                    if av not in ACCEPTABLE_BEST_WLB:
+                        all_errors.append(f"Findings {g_row[0]}: {a_val} not in {ACCEPTABLE_BEST_WLB}")
+                elif metric_key == "best_js_department":
+                    av = str(a_val).strip().lower() if a_val is not None else ""
+                    if av not in ACCEPTABLE_BEST_JS:
+                        all_errors.append(f"Findings {g_row[0]}: {a_val} not in {ACCEPTABLE_BEST_JS}")
+                elif metric_key in string_metrics:
+                    if str(a_val).strip().lower() != str(g_val).strip().lower():
+                        all_errors.append(f"Findings {g_row[0]}: {a_val} vs {g_val}")
+                elif metric_key == "total_employees":
+                    # Tighten tolerance: must match exactly (or +/- 1 for off-by-one)
+                    if not num_close(a_val, g_val, 1):
+                        all_errors.append(f"Findings Total_Employees: {a_val} vs {g_val}")
+                elif metric_key == "departments_analyzed":
+                    if not num_close(a_val, g_val, 0):
+                        all_errors.append(f"Findings Departments_Analyzed: {a_val} vs {g_val}")
+                else:
+                    # Overall_Avg_WLB, Overall_Avg_Job_Satisfaction
+                    if not num_close(a_val, g_val, 0.05):
+                        all_errors.append(f"Findings {g_row[0]}: {a_val} vs {g_val}")
 
             print("    Done.")
 
@@ -123,31 +166,31 @@ def main():
     try:
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
+        # Require exact title 'HR Wellbeing Dashboard'
         cur.execute("""
-            SELECT COUNT(*) FROM notion.pages
+            SELECT id, properties FROM notion.pages
             WHERE properties::text ILIKE '%HR Wellbeing Dashboard%'
-               OR properties::text ILIKE '%wellbeing%'
+              AND archived = false
         """)
-        count = cur.fetchone()[0]
-        if count == 0:
-            # Also check by looking at blocks
-            cur.execute("""
-                SELECT COUNT(*) FROM notion.blocks
-                WHERE content::text ILIKE '%wellbeing%' OR content::text ILIKE '%work.life%'
-            """)
-            block_count = cur.fetchone()[0]
-            if block_count == 0:
-                # Check pages table more broadly
-                cur.execute("SELECT COUNT(*) FROM notion.pages")
-                page_count = cur.fetchone()[0]
-                if page_count == 0:
-                    all_errors.append("No Notion pages found - HR Wellbeing Dashboard not created")
-                else:
-                    print(f"    Notion pages found: {page_count}")
-            else:
-                print(f"    Notion blocks with wellbeing content found: {block_count}")
+        rows = cur.fetchall()
+        if not rows:
+            all_errors.append("Notion page 'HR Wellbeing Dashboard' not found")
         else:
-            print(f"    Notion page found ({count} matching pages)")
+            page_ids = [r[0] for r in rows]
+            # Validate page content/blocks mention overall avgs and best department
+            cur.execute(
+                "SELECT block_data FROM notion.blocks WHERE parent_id = ANY(%s)",
+                (page_ids,))
+            blob = " ".join(str(r[0] or "").lower() for r in cur.fetchall())
+            # Combine with page properties text in case agent wrote in title-only structure
+            blob += " " + " ".join(str(r[1] or "").lower() for r in rows)
+            # Accept any of the top-tier departments (Finance/Operations for WLB, Finance/Sales for JS).
+            best_dept_terms = ["finance", "operations", "sales"]
+            if not any(t in blob for t in best_dept_terms):
+                all_errors.append(f"Notion page should mention a top-performing department (one of {best_dept_terms})")
+            if "wellbeing" not in blob and "well-being" not in blob and "work-life" not in blob and "balance" not in blob:
+                all_errors.append("Notion page should mention wellbeing/work-life balance topic in content")
+            print(f"    Notion page validated ({len(rows)} matching pages)")
         cur.close()
         conn.close()
     except Exception as e:
@@ -159,16 +202,33 @@ def main():
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
         cur.execute("""
-            SELECT COUNT(*) FROM email.messages
+            SELECT subject, body_text FROM email.messages
             WHERE to_addr::text ILIKE '%hr_director@company.com%'
         """)
-        count = cur.fetchone()[0]
+        msgs = cur.fetchall()
         cur.close()
         conn.close()
-        if count == 0:
+        if not msgs:
             all_errors.append("No email sent to hr_director@company.com")
         else:
-            print(f"    Email found ({count} messages)")
+            ok = False
+            for subj, body in msgs:
+                subj_l = (subj or "").lower()
+                body_l = (body or "").lower()
+                # Subject must reference wellbeing/work-life
+                if not ("wellbeing" in subj_l or "well-being" in subj_l or
+                        "work-life" in subj_l or "work life" in subj_l):
+                    continue
+                # Body must mention at least one top-performing department
+                # (Finance / Operations / Sales — accepting tie-breaking variations).
+                if not any(t in body_l for t in ("finance", "operations", "sales")):
+                    continue
+                ok = True
+                break
+            if not ok:
+                all_errors.append("No email matched: subject must reference wellbeing/work-life and body must mention Finance (best dept)")
+            else:
+                print(f"    Email validated ({len(msgs)} messages)")
     except Exception as e:
         all_errors.append(f"Error checking email: {e}")
 

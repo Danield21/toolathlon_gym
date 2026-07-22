@@ -1,0 +1,6 @@
+{
+  "Medium": {"ticket_count": 15774, "defect_rate_per_100_orders": 10516.0},
+  "Low": {"ticket_count": 9348, "defect_rate_per_100_orders": 6232.0},
+  "High": {"ticket_count": 6466, "defect_rate_per_100_orders": 4310.67},
+  "totals": {"total_tickets": 31588, "total_orders": 150}
+}

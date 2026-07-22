@@ -64,6 +64,7 @@ def compute_expected_from_db():
         return None
 
     results = {}  # sym -> dict of values
+    daily_return_samples = []  # list of (symbol, date_str, expected_daily_return_pct)
     for sym in STOCKS:
         cur.execute(
             "SELECT date, close FROM yf.stock_prices "
@@ -76,6 +77,16 @@ def compute_expected_from_db():
             return None
 
         closes = [float(r[1]) for r in rows]
+        dates_list = [str(r[0]) for r in rows]
+
+        # Sample daily returns for verification: first 2 and last 2 (after the first)
+        # Daily return pct = (close[i] - close[i-1]) / close[i-1] * 100
+        sample_indices = []
+        if len(rows) >= 6:
+            sample_indices = [1, 2, len(rows) - 2, len(rows) - 1]
+        for si in sample_indices:
+            dr_pct = round((closes[si] - closes[si - 1]) / closes[si - 1] * 100, 2)
+            daily_return_samples.append((sym, dates_list[si], dr_pct))
 
         # Daily log returns
         log_returns = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
@@ -144,7 +155,8 @@ def compute_expected_from_db():
         'Safest_Stock': safest,
     }
 
-    return {'risk_analysis': results, 'summary': summary}
+    return {'risk_analysis': results, 'summary': summary,
+            'daily_return_samples': daily_return_samples}
 
 
 def nums_close(expected, actual, abs_tol=TOLERANCE_ABS, rel_tol=TOLERANCE_REL):
@@ -183,9 +195,13 @@ def find_sheet(wb, name):
 
 
 def check_risk_analysis_db(ws_agent, expected):
-    """Check Risk Analysis sheet against DB-computed values."""
+    """Check Risk Analysis sheet against DB-computed values.
+    Returns (passed, total, critical_failures).
+    critical_failures lists mandatory checks that must not fail
+    regardless of the 80% accuracy threshold."""
     total = 0
     passed = 0
+    critical_failures = []
 
     agent_headers = [cell.value for cell in ws_agent[1]]
 
@@ -198,37 +214,55 @@ def check_risk_analysis_db(ws_agent, expected):
         if found:
             passed += 1
         else:
-            print(f"  FAIL: Risk Analysis missing column '{col}'. Agent headers: {agent_headers}")
+            msg = f"Risk Analysis missing column '{col}'"
+            print(f"  FAIL: {msg}. Agent headers: {agent_headers}")
+            critical_failures.append(msg)
 
-    # Build agent lookup by Symbol
+    # Build agent lookup by Symbol and preserve row order
     agent_rows = {}
+    agent_symbol_order = []
     for row in ws_agent.iter_rows(min_row=2, values_only=True):
         if row and row[0]:
-            agent_rows[str(row[0]).strip()] = row
+            sym_key = str(row[0]).strip()
+            agent_rows[sym_key] = row
+            agent_symbol_order.append(sym_key)
 
-    # Check row count
     total += 1
     if len(agent_rows) == len(STOCKS):
         passed += 1
     else:
-        print(f"  FAIL: Risk Analysis row count: expected {len(STOCKS)}, got {len(agent_rows)}")
+        msg = f"Risk Analysis row count: expected {len(STOCKS)}, got {len(agent_rows)}"
+        print(f"  FAIL: {msg}")
+        critical_failures.append(msg)
 
-    # Check each stock
+    total += 1
+    if agent_symbol_order == sorted(agent_symbol_order):
+        passed += 1
+    else:
+        msg = f"Risk Analysis not sorted alphabetically by Symbol: {agent_symbol_order}"
+        print(f"  FAIL: {msg}")
+        critical_failures.append(msg)
+
+    # CRITICAL columns per stock: must be correct (Risk_Category, Vol_vs_Benchmark).
+    # Others count toward the 80% accuracy total but are NOT mandatory individually.
+    critical_cols = {"Risk_Category", "Vol_vs_Benchmark"}
+
     for sym in STOCKS:
         gt = expected[sym]
         agent_row = agent_rows.get(sym)
         if not agent_row:
-            print(f"  FAIL: Risk Analysis missing stock {sym}")
+            msg = f"Risk Analysis missing stock {sym}"
+            print(f"  FAIL: {msg}")
+            critical_failures.append(msg)
             total += len(expected_cols) - 1
             continue
 
         for col_idx, col_name in enumerate(expected_cols):
-            if col_idx == 0:  # Symbol already matched
+            if col_idx == 0:
                 continue
             total += 1
             gt_val = gt.get(col_name)
 
-            # Find matching column in agent row
             agent_col_idx = None
             for ai, ah in enumerate(agent_headers or []):
                 if ah and str(ah).strip().lower().replace(" ", "_") == col_name.lower():
@@ -242,15 +276,20 @@ def check_risk_analysis_db(ws_agent, expected):
             if val_match(gt_val, agent_val):
                 passed += 1
             else:
-                print(f"  FAIL: Risk Analysis {sym}.{col_name}: expected={gt_val}, got={agent_val}")
+                msg = f"Risk Analysis {sym}.{col_name}: expected={gt_val}, got={agent_val}"
+                print(f"  FAIL: {msg}")
+                if col_name in critical_cols:
+                    critical_failures.append(msg)
 
-    return passed, total
+    return passed, total, critical_failures
 
 
 def check_risk_analysis_gt(ws_agent, ws_gt):
-    """Fallback: Check Risk Analysis sheet against groundtruth Excel."""
+    """Fallback: Check Risk Analysis sheet against groundtruth Excel.
+    Returns (passed, total, critical_failures)."""
     total = 0
     passed = 0
+    critical_failures = []
 
     gt_headers = [cell.value for cell in ws_gt[1]]
     agent_headers = [cell.value for cell in ws_agent[1]]
@@ -272,20 +311,36 @@ def check_risk_analysis_gt(ws_agent, ws_gt):
             gt_rows[str(row[0]).strip()] = row
 
     agent_rows = {}
+    agent_symbol_order = []
     for row in ws_agent.iter_rows(min_row=2, values_only=True):
         if row and row[0]:
-            agent_rows[str(row[0]).strip()] = row
+            sym_key = str(row[0]).strip()
+            agent_rows[sym_key] = row
+            agent_symbol_order.append(sym_key)
 
     total += 1
     if len(agent_rows) == len(gt_rows):
         passed += 1
     else:
-        print(f"  FAIL: Risk Analysis row count: expected {len(gt_rows)}, got {len(agent_rows)}")
+        msg = f"Risk Analysis row count: expected {len(gt_rows)}, got {len(agent_rows)}"
+        print(f"  FAIL: {msg}")
+        critical_failures.append(msg)
 
+    total += 1
+    if agent_symbol_order == sorted(agent_symbol_order):
+        passed += 1
+    else:
+        msg = f"Risk Analysis not sorted alphabetically by Symbol: {agent_symbol_order}"
+        print(f"  FAIL: {msg}")
+        critical_failures.append(msg)
+
+    critical_cols = {"Risk_Category", "Vol_vs_Benchmark"}
     for sym, gt_row in gt_rows.items():
         agent_row = agent_rows.get(sym)
         if not agent_row:
-            print(f"  FAIL: Risk Analysis missing stock {sym}")
+            msg = f"Risk Analysis missing stock {sym}"
+            print(f"  FAIL: {msg}")
+            critical_failures.append(msg)
             total += len(expected_cols) - 1
             continue
         for col_idx, col_name in enumerate(expected_cols):
@@ -304,20 +359,29 @@ def check_risk_analysis_gt(ws_agent, ws_gt):
             if val_match(gt_val, agent_val):
                 passed += 1
             else:
-                print(f"  FAIL: Risk Analysis {sym}.{col_name}: expected={gt_val}, got={agent_val}")
+                msg = f"Risk Analysis {sym}.{col_name}: expected={gt_val}, got={agent_val}"
+                print(f"  FAIL: {msg}")
+                if col_name in critical_cols:
+                    critical_failures.append(msg)
 
-    return passed, total
+    return passed, total, critical_failures
 
 
 def check_summary_db(ws_agent, expected_summary):
-    """Check Summary sheet against DB-computed values."""
+    """Check Summary sheet against DB-computed values.
+    Returns (passed, total, critical_failures)."""
     total = 0
     passed = 0
+    critical_failures = []
 
     agent_data = {}
     for row in ws_agent.iter_rows(min_row=2, values_only=True):
         if row and row[0]:
             agent_data[str(row[0]).strip()] = row[1]
+
+    # All summary items are critical: identifying the wrong highest/lowest stock
+    # or wrong count is a significant error.
+    critical_metrics = set(expected_summary.keys())
 
     for metric, gt_val in expected_summary.items():
         total += 1
@@ -330,15 +394,20 @@ def check_summary_db(ws_agent, expected_summary):
         if val_match(gt_val, agent_val):
             passed += 1
         else:
-            print(f"  FAIL: Summary '{metric}': expected={gt_val}, got={agent_val}")
+            msg = f"Summary '{metric}': expected={gt_val}, got={agent_val}"
+            print(f"  FAIL: {msg}")
+            if metric in critical_metrics:
+                critical_failures.append(msg)
 
-    return passed, total
+    return passed, total, critical_failures
 
 
 def check_summary_gt(ws_agent, ws_gt):
-    """Fallback: Check Summary sheet against groundtruth Excel."""
+    """Fallback: Check Summary sheet against groundtruth Excel.
+    Returns (passed, total, critical_failures)."""
     total = 0
     passed = 0
+    critical_failures = []
 
     gt_data = {}
     for row in ws_gt.iter_rows(min_row=2, values_only=True):
@@ -361,13 +430,19 @@ def check_summary_gt(ws_agent, ws_gt):
         if val_match(gt_val, agent_val):
             passed += 1
         else:
-            print(f"  FAIL: Summary '{metric}': expected={gt_val}, got={agent_val}")
+            msg = f"Summary '{metric}': expected={gt_val}, got={agent_val}"
+            print(f"  FAIL: {msg}")
+            critical_failures.append(msg)
 
-    return passed, total
+    return passed, total, critical_failures
 
 
-def check_daily_returns(ws_agent):
-    """Check Daily Returns sheet exists with correct columns and approximate row count."""
+def check_daily_returns(ws_agent, sample_values=None):
+    """Check Daily Returns sheet exists with correct columns and approximate row count.
+
+    sample_values: optional list of (symbol, date_str, expected_daily_return_pct) tuples
+    for sample value verification.
+    """
     total = 0
     passed = 0
 
@@ -389,6 +464,43 @@ def check_daily_returns(ws_agent):
         passed += 1
     else:
         print(f"  FAIL: Daily Returns row count: expected ~1255, got {row_count}")
+
+    # Sample value verification (if provided)
+    if sample_values:
+        # Build lookup: (symbol, date_str) -> daily_return_pct
+        lookup = {}
+        # Find col indices
+        sym_idx = 0
+        date_idx = 1
+        dr_idx = 3
+        for ai, ah in enumerate(headers or []):
+            if ah:
+                h = str(ah).strip().lower().replace(" ", "_")
+                if h == "symbol":
+                    sym_idx = ai
+                elif h == "date":
+                    date_idx = ai
+                elif h == "daily_return_pct":
+                    dr_idx = ai
+        for row in ws_agent.iter_rows(min_row=2, values_only=True):
+            if not row or row[sym_idx] is None:
+                continue
+            sym = str(row[sym_idx]).strip()
+            d = row[date_idx] if date_idx < len(row) else None
+            d_str = str(d)[:10] if d is not None else ""
+            dr = row[dr_idx] if dr_idx < len(row) else None
+            lookup[(sym, d_str)] = dr
+
+        for sym, d_str, expected_val in sample_values:
+            total += 1
+            actual = lookup.get((sym, d_str))
+            try:
+                if actual is not None and abs(float(actual) - float(expected_val)) <= 0.01:
+                    passed += 1
+                else:
+                    print(f"  FAIL: Daily Returns {sym} {d_str}: expected={expected_val}, got={actual}")
+            except (TypeError, ValueError):
+                print(f"  FAIL: Daily Returns {sym} {d_str}: expected={expected_val}, got={actual} (non-numeric)")
 
     return passed, total
 
@@ -425,6 +537,7 @@ def main(args):
 
     total_passed = 0
     total_checks = 0
+    critical_failures = []
 
     # Check 1: Risk Analysis sheet
     print("--- Check 1: Risk Analysis Sheet ---")
@@ -433,21 +546,24 @@ def main(args):
     if not ws_ra_agent:
         print("FAIL: 'Risk Analysis' sheet not found in agent output")
         total_checks += 1
+        critical_failures.append("'Risk Analysis' sheet missing")
     elif use_db:
-        p, t = check_risk_analysis_db(ws_ra_agent, db_expected['risk_analysis'])
+        p, t, cf = check_risk_analysis_db(ws_ra_agent, db_expected['risk_analysis'])
         print(f"  Risk Analysis: {p}/{t} checks passed")
         total_passed += p
         total_checks += t
+        critical_failures.extend(cf)
     else:
         ws_ra_gt = find_sheet(wb_gt, "Risk Analysis")
         if not ws_ra_gt:
             print("FAIL: 'Risk Analysis' sheet not found in groundtruth (internal error)")
             total_checks += 1
         else:
-            p, t = check_risk_analysis_gt(ws_ra_agent, ws_ra_gt)
+            p, t, cf = check_risk_analysis_gt(ws_ra_agent, ws_ra_gt)
             print(f"  Risk Analysis: {p}/{t} checks passed")
             total_passed += p
             total_checks += t
+            critical_failures.extend(cf)
 
     # Check 2: Summary sheet
     print("\n--- Check 2: Summary Sheet ---")
@@ -456,21 +572,24 @@ def main(args):
     if not ws_sum_agent:
         print("FAIL: 'Summary' sheet not found in agent output")
         total_checks += 1
+        critical_failures.append("'Summary' sheet missing")
     elif use_db:
-        p, t = check_summary_db(ws_sum_agent, db_expected['summary'])
+        p, t, cf = check_summary_db(ws_sum_agent, db_expected['summary'])
         print(f"  Summary: {p}/{t} checks passed")
         total_passed += p
         total_checks += t
+        critical_failures.extend(cf)
     else:
         ws_sum_gt = find_sheet(wb_gt, "Summary")
         if not ws_sum_gt:
             print("FAIL: 'Summary' sheet not found in groundtruth (internal error)")
             total_checks += 1
         else:
-            p, t = check_summary_gt(ws_sum_agent, ws_sum_gt)
+            p, t, cf = check_summary_gt(ws_sum_agent, ws_sum_gt)
             print(f"  Summary: {p}/{t} checks passed")
             total_passed += p
             total_checks += t
+            critical_failures.extend(cf)
 
     # Check 3: Daily Returns sheet
     print("\n--- Check 3: Daily Returns Sheet ---")
@@ -480,7 +599,8 @@ def main(args):
         print("FAIL: 'Daily Returns' sheet not found in agent output")
         total_checks += 1
     else:
-        p, t = check_daily_returns(ws_dr_agent)
+        sample_values = db_expected.get('daily_return_samples') if use_db and db_expected else None
+        p, t = check_daily_returns(ws_dr_agent, sample_values=sample_values)
         print(f"  Daily Returns: {p}/{t} checks passed")
         total_passed += p
         total_checks += t
@@ -510,11 +630,18 @@ def main(args):
             json.dump(result, f, indent=2)
         print(f"Report saved to {args.res_log_file}")
 
-    if accuracy >= 80:
+    # PASS requires BOTH: accuracy >= 80% AND no critical failures
+    if critical_failures:
+        print(f"\nCritical failures ({len(critical_failures)}):")
+        for cf in critical_failures[:10]:
+            print(f"  - {cf}")
+        print("FAIL (critical assertions failed)")
+        sys.exit(1)
+    elif accuracy >= 80:
         print("PASS")
         sys.exit(0)
     else:
-        print("FAIL")
+        print("FAIL (accuracy below 80%)")
         sys.exit(1)
 
 

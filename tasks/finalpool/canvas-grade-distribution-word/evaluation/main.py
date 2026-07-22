@@ -19,7 +19,22 @@ DB_CONFIG = {
     "password": "camel",
 }
 
-COURSE_ID = 16  # FFF-2013J
+COURSE_CODE = "FFF-2013J"
+
+
+def get_course_id():
+    """Look up course_id dynamically by course_code, with fallback."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG, connect_timeout=5)
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM canvas.courses WHERE course_code=%s LIMIT 1", (COURSE_CODE,))
+        row = cur.fetchone()
+        cur.close(); conn.close()
+        if row:
+            return int(row[0])
+    except Exception as e:
+        print(f"[WARN] Course lookup failed: {e}")
+    return 16  # fallback
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -60,6 +75,7 @@ def get_expected_data():
     """Compute expected grade distribution from Canvas DB."""
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
+    COURSE_ID = get_course_id()
 
     cur.execute("""
         SELECT s.score, a.points_possible
@@ -150,7 +166,7 @@ def check_excel(agent_workspace, gt_workspace, expected_bands, expected_total, e
         record(f"Grade band '{grade}' found", True)
         if len(a_row) > 1 and len(g_row) > 1:
             record(f"  {grade} Count",
-                   num_close(a_row[1], g_row[1], 10),
+                   num_close(a_row[1], g_row[1], 2),
                    f"Agent={a_row[1]}, GT={g_row[1]}")
         if len(a_row) > 2 and len(g_row) > 2:
             record(f"  {grade} Percentage",
@@ -178,7 +194,8 @@ def check_excel(agent_workspace, gt_workspace, expected_bands, expected_total, e
         if row and row[0]:
             a_assign_lookup[str(row[0]).strip().lower()] = row
 
-    for g_row in g_data2[:5]:
+    # Check ALL assignments (not just first 5)
+    for g_row in g_data2:
         if not g_row or not g_row[0]:
             continue
         name = str(g_row[0]).strip()
@@ -189,7 +206,7 @@ def check_excel(agent_workspace, gt_workspace, expected_bands, expected_total, e
             continue
         record(f"Assignment '{name}' found", True)
         if len(a_row) > 1 and len(g_row) > 1:
-            record(f"  Avg_Score",
+            record(f"  Avg_Score for {name[:30]}",
                    num_close(a_row[1], g_row[1], 2.0),
                    f"Agent={a_row[1]}, GT={g_row[1]}")
 

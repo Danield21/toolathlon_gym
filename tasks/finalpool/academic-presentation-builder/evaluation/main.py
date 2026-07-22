@@ -22,17 +22,23 @@ def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
 
 
 def check_word_doc(agent_workspace, gt_data):
-    """Check the Word document for required structure and content."""
+    """Check the Word document for required structure and content.
+
+    Returns (passed, total, critical_failed) — critical_failed is a count of
+    critical checks that must all pass for the overall eval to succeed.
+    """
     passed = 0
     total = 0
+    critical_failed = 0
     filename = gt_data["review_doc"]["filename"]
     doc_path = os.path.join(agent_workspace, filename)
 
-    # Check file exists
+    # Check file exists (critical)
     total += 1
     if not os.path.exists(doc_path):
         print(f"  FAIL: {filename} not found at {doc_path}")
-        return passed, total
+        critical_failed += 1
+        return passed, total, critical_failed
 
     passed += 1
     print(f"  PASS: {filename} exists")
@@ -60,11 +66,12 @@ def check_word_doc(agent_workspace, gt_data):
         else:
             print(f"  FAIL: Heading '{heading}' not found. Found headings: {headings_found}")
 
-    # Check summary table
+    # Check summary table (CRITICAL: exact row count)
     total += 1
     tables = doc.tables
     if len(tables) == 0:
-        print("  FAIL: No tables found in document")
+        print("  FAIL: No tables found in document [CRITICAL]")
+        critical_failed += 1
     else:
         table = tables[0]
         # Check row count (header + data rows)
@@ -76,18 +83,36 @@ def check_word_doc(agent_workspace, gt_data):
             if cell_text.strip():
                 data_rows += 1
 
-        if data_rows >= expected_data_rows:
+        # task.md requires exactly N rows (CRITICAL)
+        if data_rows == expected_data_rows:
             passed += 1
-            print(f"  PASS: Summary table has {data_rows} data rows (expected >= {expected_data_rows})")
+            print(f"  PASS: Summary table has exactly {data_rows} data rows (expected == {expected_data_rows})")
         else:
-            print(f"  FAIL: Summary table has {data_rows} data rows (expected >= {expected_data_rows})")
+            print(f"  FAIL: Summary table has {data_rows} data rows (expected == {expected_data_rows}) [CRITICAL]")
+            critical_failed += 1
 
-    # Check table columns
+    # Check table columns (with synonym support)
     total += 1
     if len(tables) > 0:
         header_cells = [cell.text.strip().lower() for cell in tables[0].rows[0].cells]
         expected_cols = [c.lower() for c in gt_data["review_doc"]["required_table_columns"]]
-        cols_found = sum(1 for ec in expected_cols if any(ec in hc for hc in header_cells))
+        synonyms = {
+            "title": ["paper", "name"],
+            "method": ["approach", "technique"],
+            "contribution": ["contribution", "key", "main"],
+            "finding": ["result", "outcome", "finding"],
+            "author": ["author"],
+            "year": ["year", "date"],
+        }
+        def col_matches(expected_col, header_cells):
+            if any(expected_col in hc for hc in header_cells):
+                return True
+            for keyword, syns in synonyms.items():
+                if keyword in expected_col:
+                    if any(any(s in hc for s in syns) for hc in header_cells):
+                        return True
+            return False
+        cols_found = sum(1 for ec in expected_cols if col_matches(ec, header_cells))
         if cols_found >= len(expected_cols):
             passed += 1
             print(f"  PASS: All {len(expected_cols)} required table columns found")
@@ -106,7 +131,7 @@ def check_word_doc(agent_workspace, gt_data):
         else:
             print(f"  FAIL: Keyword '{mention}' not found in document text")
 
-    return passed, total
+    return passed, total, critical_failed
 
 
 def check_pptx(agent_workspace, gt_data):
@@ -247,12 +272,15 @@ def main(args):
     total_passed = 0
     total_checks = 0
 
+    total_critical_failed = 0
+
     # Check 1: Word document
     print("--- Check 1: Word Document (LLM_Reasoning_Review.docx) ---")
-    p, t = check_word_doc(args.agent_workspace, gt_data)
+    p, t, cf = check_word_doc(args.agent_workspace, gt_data)
     print(f"  Word Doc: {p}/{t} checks passed")
     total_passed += p
     total_checks += t
+    total_critical_failed += cf
 
     # Check 2: PowerPoint
     print("\n--- Check 2: PowerPoint (LLM_Reasoning_Slides.pptx) ---")
@@ -288,6 +316,9 @@ def main(args):
             json.dump(result, f, indent=2)
         print(f"Report saved to {args.res_log_file}")
 
+    if total_critical_failed > 0:
+        print(f"FAIL (critical checks failed: {total_critical_failed})")
+        sys.exit(1)
     if accuracy >= 80:
         print("PASS")
         sys.exit(0)

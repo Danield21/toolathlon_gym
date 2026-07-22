@@ -1,7 +1,7 @@
 """
 Preprocess for arxiv-fetch-terminal-pipeline task.
 
-Clears and injects papers about code generation into scholarly and arxiv tables.
+Clears scholarly and arxiv tables and injects 4 federated learning papers.
 Starts mock HTTP server on port 30151 for supplementary data fetch.
 
 Prerequisites:
@@ -18,93 +18,89 @@ import psycopg2
 
 DB_CONN = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
 }
 
+# Federated learning papers (matches task.md topic)
 TARGET_PAPERS = [
     {
-        "arxiv_id": "2107.03374",
-        "title": "Evaluating Large Language Models Trained on Code",
-        "authors": [{"name": "Mark Chen"}, {"name": "Jerry Tworek"}, {"name": "Heewoo Jun"}],
-        "categories": ["cs.LG", "cs.PL"],
+        "arxiv_id": "1602.05629",
+        "title": "Communication-Efficient Learning of Deep Networks from Decentralized Data",
+        "authors": [{"name": "H. Brendan McMahan"}, {"name": "Eider Moore"}, {"name": "Daniel Ramage"}],
+        "categories": ["cs.LG"],
         "primary_category": "cs.LG",
         "abstract": (
-            "We introduce Codex, a GPT language model fine-tuned on publicly available code from "
-            "GitHub, and study its Python code-writing capabilities. A distinct production version "
-            "of Codex powers GitHub Copilot. On HumanEval, a new evaluation set we release to "
-            "measure functional correctness for synthesizing programs from docstrings, our model "
-            "solves 28.8% of the problems, while GPT-3 solves 0% and GPT-J solves 11.4%. "
-            "Furthermore, we find that repeated sampling from the model is a surprisingly effective "
-            "strategy for producing working solutions to difficult prompts."
+            "Modern mobile devices have access to a wealth of data suitable for learning models, "
+            "which in turn can greatly improve the user experience. We advocate an alternative that "
+            "leaves the training data distributed on the mobile devices, and learns a shared model by "
+            "aggregating locally-computed updates. We term this decentralized approach Federated "
+            "Learning. We present a practical method for the federated learning of deep networks based "
+            "on iterative model averaging, and conduct an extensive empirical evaluation."
         ),
-        "published": "2021-07-07",
-        "pub_year": 2021,
+        "published": "2016-02-17",
+        "pub_year": 2017,
+        "venue": "AISTATS",
+        "citation_count": 6500,
+    },
+    {
+        "arxiv_id": "1806.00582",
+        "title": "Federated Learning with Non-IID Data",
+        "authors": [{"name": "Yue Zhao"}, {"name": "Meng Li"}, {"name": "Liangzhen Lai"}],
+        "categories": ["cs.LG", "stat.ML"],
+        "primary_category": "cs.LG",
+        "abstract": (
+            "Federated learning enables resource-constrained edge compute devices, such as mobile phones "
+            "and IoT devices, to learn a shared model for prediction, while keeping the training data "
+            "local. This decentralized approach to train models provides privacy, security, regulatory "
+            "and economic benefits. In this work, we focus on the statistical challenge of federated "
+            "learning when local data is non-IID."
+        ),
+        "published": "2018-06-02",
+        "pub_year": 2018,
         "venue": "arXiv",
-        "citation_count": 3500,
+        "citation_count": 1700,
     },
     {
-        "arxiv_id": "2002.08155",
-        "title": "CodeBERT: A Pre-Trained Model for Programming and Natural Languages",
-        "authors": [{"name": "Zhangyin Feng"}, {"name": "Daya Guo"}, {"name": "Duyu Tang"}],
-        "categories": ["cs.CL", "cs.PL"],
-        "primary_category": "cs.CL",
+        "arxiv_id": "2002.05516",
+        "title": "Personalized Federated Learning: A Meta-Learning Approach",
+        "authors": [{"name": "Alireza Fallah"}, {"name": "Aryan Mokhtari"}, {"name": "Asuman Ozdaglar"}],
+        "categories": ["cs.LG"],
+        "primary_category": "cs.LG",
         "abstract": (
-            "We present CodeBERT, a bimodal pre-trained model for programming language and natural "
-            "language. CodeBERT learns general-purpose representations that support downstream NL-PL "
-            "applications such as natural language code search, code documentation generation, and "
-            "other tasks. We develop CodeBERT with Transformer-based neural architecture, and train "
-            "it with a hybrid objective function that incorporates the pre-training task of replaced "
-            "token detection, which is to detect plausible alternatives sampled from generators."
+            "We study a personalized variant of the federated learning, in which our goal is to find a "
+            "shared initial model that participating users can quickly adapt to their local datasets. "
+            "We use a model-agnostic meta-learning approach to formulate this problem and analyze its "
+            "convergence properties for both convex and non-convex settings."
         ),
-        "published": "2020-02-19",
+        "published": "2020-02-13",
         "pub_year": 2020,
-        "venue": "EMNLP Findings",
-        "citation_count": 2200,
+        "venue": "NeurIPS",
+        "citation_count": 800,
     },
     {
-        "arxiv_id": "2203.07814",
-        "title": "Competition-Level Code Generation with AlphaCode",
-        "authors": [{"name": "Yujia Li"}, {"name": "David Choi"}, {"name": "Junyoung Chung"}],
-        "categories": ["cs.PL", "cs.AI"],
-        "primary_category": "cs.PL",
+        "arxiv_id": "1812.06127",
+        "title": "Federated Optimization in Heterogeneous Networks",
+        "authors": [{"name": "Tian Li"}, {"name": "Anit Kumar Sahu"}, {"name": "Manzil Zaheer"}],
+        "categories": ["cs.LG"],
+        "primary_category": "cs.LG",
         "abstract": (
-            "Programming is a powerful and ubiquitous problem-solving tool. Developing systems that "
-            "can assist programmers or even generate programs independently could make programming "
-            "more productive and accessible. We introduce AlphaCode, a system for code generation "
-            "that can create novel solutions to competitive programming problems that require deeper "
-            "reasoning. In simulated evaluations on recent programming competitions on the Codeforces "
-            "platform, AlphaCode achieved on average a ranking within the top 54.3% of participants."
+            "Federated Learning is a distributed learning paradigm with two key challenges that "
+            "differentiate it from traditional distributed optimization: (1) significant variability in "
+            "terms of the systems characteristics on each device in the network (systems heterogeneity), "
+            "and (2) non-identically distributed data across the network (statistical heterogeneity). "
+            "We introduce a framework, FedProx, to tackle heterogeneity."
         ),
-        "published": "2022-03-08",
-        "pub_year": 2022,
-        "venue": "Science",
-        "citation_count": 1800,
-    },
-    {
-        "arxiv_id": "2305.06161",
-        "title": "StarCoder: May the Source Be with You!",
-        "authors": [{"name": "Raymond Li"}, {"name": "Loubna Ben Allal"}, {"name": "Yangtian Zi"}],
-        "categories": ["cs.CL", "cs.PL"],
-        "primary_category": "cs.CL",
-        "abstract": (
-            "The BigCode community, an open-scientific collaboration working on the responsible "
-            "development of large language models for code, introduces StarCoder and StarCoderBase. "
-            "StarCoderBase is a 15.5B parameter model trained on 1 trillion tokens sourced from The "
-            "Stack, a large collection of permissively licensed GitHub repositories. StarCoder is a "
-            "fine-tuned version of StarCoderBase on 35B Python tokens. We evaluate StarCoder on a "
-            "comprehensive set of code generation benchmarks and find that it outperforms every open "
-            "code LLM that supports multiple programming languages."
-        ),
-        "published": "2023-05-09",
-        "pub_year": 2023,
-        "venue": "TMLR",
-        "citation_count": 1500,
+        "published": "2018-12-14",
+        "pub_year": 2020,
+        "venue": "MLSys",
+        "citation_count": 3000,
     },
 ]
 
+# Noise paper to test the agent's filtering ability
 NOISE_PAPERS = [
     {
         "arxiv_id": "1906.10611",
@@ -116,9 +112,7 @@ NOISE_PAPERS = [
             "Research at the intersection of machine learning and software engineering has recently "
             "seen a surge in interest. This survey is a comprehensive review of the state of the art "
             "in this area, covering probabilistic models of code, neural models for code analysis, "
-            "code completion, bug detection, and program repair. We discuss the naturalness hypothesis "
-            "which posits that software is a form of human communication and has statistical properties "
-            "similar to natural language corpora."
+            "code completion, bug detection, and program repair."
         ),
         "published": "2019-06-25",
         "pub_year": 2019,
@@ -249,9 +243,13 @@ async def setup_mock_server():
     os.makedirs(tmp_dir, exist_ok=True)
 
     tar_path = os.path.join(files_dir, "mock_pages.tar.gz")
-    with tarfile.open(tar_path, "r:gz") as tar:
-        tar.extractall(path=tmp_dir)
-    print(f"[preprocess] Extracted {tar_path} to {tmp_dir}")
+    if os.path.isfile(tar_path):
+        with tarfile.open(tar_path, "r:gz") as tar:
+            tar.extractall(path=tmp_dir)
+        print(f"[preprocess] Extracted {tar_path} to {tmp_dir}")
+    else:
+        print(f"[preprocess] Skipping mock server: tarball not found at {tar_path}")
+        return
 
     mock_dir = os.path.join(tmp_dir, "mock_pages")
 

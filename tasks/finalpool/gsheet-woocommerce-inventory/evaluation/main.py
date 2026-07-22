@@ -266,9 +266,16 @@ def check_gsheet():
     cur = conn.cursor()
 
     try:
-        # Find spreadsheet with "inventory" in title (case-insensitive)
+        # Reverse validation: noise spreadsheets must remain
+        cur.execute("SELECT COUNT(*) FROM gsheet.spreadsheets WHERE id LIKE 'noise-ss-w-%'")
+        noise_cnt = cur.fetchone()[0]
+        if noise_cnt < 3:
+            errors.append(f"Noise spreadsheets missing: {noise_cnt}/3 preserved")
+            return False, errors
+
+        # Find spreadsheet with "inventory" in title (case-insensitive), excluding noise
         cur.execute(
-            "SELECT id, title FROM gsheet.spreadsheets WHERE LOWER(title) LIKE '%inventory%'"
+            "SELECT id, title FROM gsheet.spreadsheets WHERE LOWER(title) LIKE '%inventory%' AND id NOT LIKE 'noise-ss-w-%'"
         )
         spreadsheets = cur.fetchall()
         if not spreadsheets:
@@ -327,11 +334,19 @@ def check_email():
     cur = conn.cursor()
 
     try:
+        # Reverse validation: noise emails must still exist
+        cur.execute("SELECT COUNT(*) FROM email.messages WHERE message_id LIKE 'noise-email-w-%'")
+        noise_cnt = cur.fetchone()[0]
+        if noise_cnt < 4:
+            errors.append(f"Noise emails missing: {noise_cnt}/4 preserved")
+            return False, errors
+
         # Look for email with relevant subject
         cur.execute("""
             SELECT subject, to_addr, body_text
             FROM email.messages
-            WHERE (LOWER(subject) LIKE '%low stock%' OR LOWER(subject) LIKE '%alert%' OR LOWER(subject) LIKE '%restock%')
+            WHERE (LOWER(subject) LIKE '%low stock%' OR LOWER(subject) LIKE '%restock%')
+              AND message_id NOT LIKE 'noise-email-w-%'
         """)
         emails = cur.fetchall()
 

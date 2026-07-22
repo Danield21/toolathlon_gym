@@ -12,6 +12,6 @@ The second sheet should be named "Products Below Benchmark" and list all individ
 
 The third sheet should be named "Summary" with columns Metric and Value containing Total_Categories, Categories_Above_Benchmark, Categories_Below_Benchmark, and Products_Below_Benchmark.
 
-Finally, create a Notion page titled "Review Performance Analysis Q1 2026" to serve as a knowledge base entry. The page should summarize the key findings from your analysis including which categories are performing above and below benchmark, how many products need improvement, and a brief recommendation for improving review scores in underperforming categories.
+Finally, create a knowledge base page titled "Review Performance Analysis Q1 2026". The page should summarize the key findings from your analysis including which categories are performing above and below benchmark, how many products need improvement, and a brief recommendation for improving review scores in underperforming categories.
 
 When you have completed all tasks, call claim_done.
