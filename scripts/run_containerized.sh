@@ -169,9 +169,13 @@ start_container() {
         -e PGHOST=toolathlon_pg \
         -e PG_HOST=toolathlon_pg \
         -e PGPORT=5432 \
+        -e PG_PORT=5432 \
         -e PGUSER=eigent \
+        -e PG_USER=eigent \
         -e PGPASSWORD=camel \
+        -e PG_PASSWORD=camel \
         -e PGDATABASE=toolathlon_gym \
+        -e PG_DATABASE=toolathlon_gym \
         -e LOCAL_SERVERS_PATH=/opt/local_servers \
         -e PYTHON_BIN=/opt/venv/bin/python3 \
         "${env_args[@]}" \

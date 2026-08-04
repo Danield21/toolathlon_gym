@@ -38,6 +38,57 @@ def _make_default_email_config() -> EmailConfig:
     )
 
 
+def _prepare_pg_config_file(config_file: str, logger) -> str:
+    """Create a PG-safe email config without requiring real credentials.
+
+    Toolathlon email tasks sometimes provide only an address and display name.
+    That is sufficient for the PostgreSQL-backed IMAP/SMTP implementation, but
+    the shared config loader still validates a password. Normalize every PG
+    launch through a temporary config with an explicit placeholder password.
+    """
+    account = {}
+    if config_file and os.path.exists(config_file):
+        with open(config_file, "r", encoding="utf-8") as fh:
+            config_data = json.load(fh)
+        if isinstance(config_data, list):
+            account = config_data[0] if config_data else {}
+        elif isinstance(config_data, dict):
+            account = config_data
+        else:
+            raise ValueError("Email configuration must be an object or list")
+        if not isinstance(account, dict):
+            raise ValueError("Email account configuration must be an object")
+        logger.info(
+            "Using task email identity from '%s' in PG-only mode", config_file
+        )
+    elif config_file:
+        logger.info(
+            "Config file '%s' not found - running in PG-only mode", config_file
+        )
+    else:
+        logger.info("No config file specified - running in PG-only mode")
+
+    pg_config = {
+        "email": account.get("email")
+        or os.environ.get("EMAIL_ADDRESS", "user@example.com"),
+        "name": account.get("name")
+        or os.environ.get("EMAIL_NAME", "PG Email User"),
+        "imap_server": "localhost",
+        "imap_port": account.get("imap_port", 993),
+        "smtp_server": "localhost",
+        "smtp_port": account.get("smtp_port", 587),
+        "use_ssl": account.get("use_ssl", True),
+        "use_starttls": account.get("use_starttls", True),
+        "password": account.get("password") or "unused",
+    }
+    fd, temp_config_file = tempfile.mkstemp(
+        suffix=".json", prefix="email_pg_cfg_"
+    )
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(pg_config, fh)
+    return temp_config_file
+
+
 def create_services(email_config):
     """Create service instances using PostgreSQL backends"""
     # Create PG-backed backends
@@ -104,36 +155,10 @@ def main():
         # Initialize MCP server
         mcp = FastMCP("emails-mcp")
 
-        # If no config file provided or it doesn't exist, create a temporary
-        # dummy config so that config_manager doesn't complain.
-        config_file = args.config_file
-        _temp_config_file = None
-
-        if config_file and os.path.exists(config_file):
-            # Real config file supplied – use it normally
-            pass
-        else:
-            if config_file and not os.path.exists(config_file):
-                logger.info(
-                    f"Config file '{config_file}' not found – running in PG-only mode"
-                )
-            else:
-                logger.info("No config file specified – running in PG-only mode")
-
-            # Write a minimal dummy config so config_manager.load_email_config works
-            dummy = {
-                "email": os.environ.get("EMAIL_ADDRESS", "user@example.com"),
-                "name": os.environ.get("EMAIL_NAME", "PG Email User"),
-                "imap_server": "localhost",
-                "imap_port": 993,
-                "smtp_server": "localhost",
-                "smtp_port": 587,
-                "password": "unused",
-            }
-            fd, _temp_config_file = tempfile.mkstemp(suffix=".json", prefix="email_cfg_")
-            with os.fdopen(fd, "w") as fh:
-                json.dump(dummy, fh)
-            config_file = _temp_config_file
+        # This server always uses PostgreSQL-backed IMAP/SMTP. Preserve the
+        # task's email identity, but never require real network credentials.
+        _temp_config_file = _prepare_pg_config_file(args.config_file, logger)
+        config_file = _temp_config_file
 
         # Load configuration
         config_manager.load_workspace_config(

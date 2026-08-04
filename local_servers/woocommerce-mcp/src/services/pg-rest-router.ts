@@ -478,7 +478,7 @@ export class PgRestRouter {
     if (!groupId) {
       // List all settings groups
       const res = await this.pool.query('SELECT DISTINCT group_id, group_id AS id, group_id AS label FROM wc.settings ORDER BY group_id');
-      return makeResponse(res.rows.map(r => ({ id: r.group_id, label: r.label || r.group_id })));
+      return makeResponse(res.rows.map((r: { group_id: string; label?: string }) => ({ id: r.group_id, label: r.label || r.group_id })));
     }
     if (optionId) {
       // Get specific setting
