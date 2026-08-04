@@ -1,8 +1,21 @@
+import sys
+import traceback
+
 import typer
 
 from .server import run_sse, run_stdio, run_streamable_http
 
 app = typer.Typer(help="Excel MCP Server")
+
+
+def _log_lifecycle(message: str) -> None:
+    """Log lifecycle messages without writing to the MCP stdout channel."""
+    try:
+        if sys.stderr is not None and not sys.stderr.closed:
+            print(message, file=sys.stderr)
+    except (BrokenPipeError, OSError, ValueError):
+        # The parent may close stdio before the MCP server finishes unwinding.
+        pass
 
 @app.command()
 def sse():
@@ -10,13 +23,13 @@ def sse():
     try:
         run_sse()
     except KeyboardInterrupt:
-        print("\nShutting down server...")
+        _log_lifecycle("\nShutting down server...")
     except Exception as e:
-        print(f"\nError: {e}")
-        import traceback
-        traceback.print_exc()
+        _log_lifecycle(f"\nError: {e}")
+        if sys.stderr is not None and not sys.stderr.closed:
+            traceback.print_exc(file=sys.stderr)
     finally:
-        print("Service stopped.")
+        _log_lifecycle("Service stopped.")
 
 @app.command()
 def streamable_http():
@@ -24,13 +37,13 @@ def streamable_http():
     try:
         run_streamable_http()
     except KeyboardInterrupt:
-        print("\nShutting down server...")
+        _log_lifecycle("\nShutting down server...")
     except Exception as e:
-        print(f"\nError: {e}")
-        import traceback
-        traceback.print_exc()
+        _log_lifecycle(f"\nError: {e}")
+        if sys.stderr is not None and not sys.stderr.closed:
+            traceback.print_exc(file=sys.stderr)
     finally:
-        print("Service stopped.")
+        _log_lifecycle("Service stopped.")
 
 @app.command()
 def stdio():
@@ -38,13 +51,13 @@ def stdio():
     try:
         run_stdio()
     except KeyboardInterrupt:
-        print("\nShutting down server...")
+        _log_lifecycle("\nShutting down server...")
     except Exception as e:
-        print(f"\nError: {e}")
-        import traceback
-        traceback.print_exc()
+        _log_lifecycle(f"\nError: {e}")
+        if sys.stderr is not None and not sys.stderr.closed:
+            traceback.print_exc(file=sys.stderr)
     finally:
-        print("Service stopped.")
+        _log_lifecycle("Service stopped.")
 
 if __name__ == "__main__":
-    app() 
+    app()

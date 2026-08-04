@@ -9,7 +9,7 @@ from camel.agents import ChatAgent
 from camel.messages import BaseMessage
 from camel.toolkits import FunctionTool, MCPToolkit
 
-from utils.aux_tools.basic import make_claim_done, sleep
+from utils.aux_tools.basic import ClaimDoneSignal, make_claim_done, sleep
 from utils.aux_tools.overlong_tool_manager import make_overlong_tools
 from utils.aux_tools.python_interpretor import make_python_execute
 from utils.data_structures.task_config import TaskConfig
@@ -27,6 +27,18 @@ class TaskStatus(Enum):
 async def _noop(*args, **kwargs) -> str:
     """Stub for unsupported local tools (manage_context, history, etc.)."""
     return "OK"
+
+
+def _enforce_claim_done_protocol(system_message: str) -> str:
+    """Make the runner and prompt agree on the sole completion signal."""
+    protocol = (
+        "Completion protocol (mandatory): the task is complete only after you "
+        "call the claim_done tool. A normal text response, including a summary "
+        "saying that the work is complete, does not count as completion. Do not "
+        "stop after describing the result; call claim_done after all required "
+        "tool actions have succeeded."
+    )
+    return f"{system_message.rstrip()}\n\n{protocol}"
 
 
 def _fix_schema(schema: dict, strict_openai: bool = False):
@@ -305,7 +317,14 @@ class TaskAgent:
                 http_mcp_urls=http_mcp_urls,
                 http_mcp_timeout=http_mcp_timeout,
             )
-            toolkit = MCPToolkit(clients=mcp_clients, timeout=http_mcp_timeout)
+            toolkit = MCPToolkit(
+                clients=mcp_clients,
+                timeout=float(os.environ.get("MCP_CONNECT_TIMEOUT", "180")),
+                max_retries=int(os.environ.get("MCP_CONNECT_RETRIES", "2")),
+                retry_delay=float(
+                    os.environ.get("MCP_CONNECT_RETRY_DELAY", "3")
+                ),
+            )
             await toolkit.connect()
 
             mcp_tools = toolkit.get_tools()
@@ -337,15 +356,44 @@ class TaskAgent:
                 sys_msg = self.task_config.system_prompts.agent
                 # Fix tool name mismatch: original Toolathlon uses "local-" prefix
                 sys_msg = sys_msg.replace("local-claim_done", "claim_done")
+            if "claim_done" in {tool.get_function_name() for tool in local_tools}:
+                sys_msg = _enforce_claim_done_protocol(sys_msg)
+
+            model_context_window = int(
+                os.environ.get("MODEL_CONTEXT_WINDOW", "131072")
+            )
+            if model_context_window < 1:
+                raise ValueError(
+                    "MODEL_CONTEXT_WINDOW must be a positive integer, got "
+                    f"{model_context_window}"
+                )
+            print_color(
+                f"[agent] Model context window: {model_context_window} tokens",
+                "cyan",
+            )
+
+            step_timeout = float(
+                os.environ.get("CAMEL_STEP_TIMEOUT", "3000")
+            )
+            if step_timeout <= 0:
+                raise ValueError(
+                    "CAMEL_STEP_TIMEOUT must be positive, got "
+                    f"{step_timeout}"
+                )
+            print_color(
+                f"[agent] CAMEL step timeout: {step_timeout:g}s",
+                "cyan",
+            )
 
             agent = ChatAgent(
                 system_message=sys_msg,
                 model=self.model,
                 tools=all_tools,
                 max_iteration=self.max_steps,
-                step_timeout=1200,
+                token_limit=model_context_window,
+                step_timeout=step_timeout,
                 tool_execution_timeout=120,
-                summarize_threshold=None,  # disable context summarization — stop on token limit
+                summarize_threshold=None,  # stop instead of silently exceeding the registered limit
                 retry_attempts=999,  # effectively infinite retry on rate limit
                 retry_delay=5.0,     # start at 5s, exponential backoff up to 60s
             )
@@ -368,6 +416,9 @@ class TaskAgent:
                 status = TaskStatus.FAILED
                 print_color("[agent] Ended without claim_done.", "red")
 
+        except ClaimDoneSignal:
+            status = TaskStatus.SUCCESS
+            print_color("[agent] Done (claim_done called).", "green")
         except KeyboardInterrupt:
             status = TaskStatus.INTERRUPTED
         except Exception as e:

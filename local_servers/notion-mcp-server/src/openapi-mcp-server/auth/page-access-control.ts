@@ -1,14 +1,23 @@
-import { HttpClient } from '../client/http-client.js'
+import type { OpenAPIV3 } from 'openapi-types'
+import type { HttpClientResponse } from '../client/http-client.js'
+
+/** Shared surface used by proxy + page-access-control. */
+export type NotionHttpLike = {
+  executeOperation<T = any>(
+    operation: OpenAPIV3.OperationObject & { method: string; path: string },
+    params?: Record<string, any>,
+  ): Promise<HttpClientResponse<T>>
+}
 
 export interface PageAccessControlOptions {
   pageIds?: string[]
   pageUrls?: string[]
-  httpClient: HttpClient
+  httpClient: NotionHttpLike
 }
 
 export class PageAccessController {
   private rootPageIds: Set<string> = new Set()
-  private httpClient: HttpClient
+  private httpClient: NotionHttpLike
   private pageCache = new Map<string, { parentId: string | null; isAllowed: boolean }>()
 
   constructor(options: PageAccessControlOptions) {

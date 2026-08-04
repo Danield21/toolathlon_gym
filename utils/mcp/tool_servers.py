@@ -97,7 +97,14 @@ def build_mcp_clients(
             env=full_env,
             cwd=cwd,
         )
-        timeout = cfg.get("client_session_timeout_seconds", 60)
+        timeout = float(cfg.get("client_session_timeout_seconds", 60))
+        # Concurrent Enroot launches can make the first uv/node startup much
+        # slower than the per-server YAML default while NFS is busy. Allow the
+        # runner to impose a safe minimum without weakening normal local runs.
+        timeout = max(
+            timeout,
+            float(os.environ.get("MCP_STDIO_TIMEOUT_MIN", "0")),
+        )
         clients.append(MCPClient(config=server_config, timeout=float(timeout)))
 
     found = {cfg.get("name", f.stem) for f in config_path.glob("*.yaml")

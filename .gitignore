@@ -11,5 +11,22 @@ node_modules/
 dumps/
 _test_workspace/
 
+# Local eval secrets / API keys
+run_sh/**/config.env
+run_sh/**/.env
+*.secret
+
+# Eval launcher logs / Slurm artifacts (keep scripts, ignore runtime)
+run_sh/**/logs/
+run_sh/**/*.log
+run_sh/**/*.out
+run_sh/**/*.err
+run_sh/**/*.pid
+run_sh/**/*.bak*
+
+# Built MCP entrypoints that are regenerated in the Enroot image
+# (source of truth is src/; template dist is under toolathlon_gym_eval_dockers)
+local_servers/woocommerce-mcp/dist/index.js
+
 # OS
 .DS_Store

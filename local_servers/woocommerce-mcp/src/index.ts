@@ -22,7 +22,8 @@ if (missingEnvVars.length > 0) {
 // Start the MCP server
 startMcpServer()
     .then(() => {
-        console.log('WooCommerce MCP Server started successfully');
+        // Must not write to stdout — MCP stdio uses stdout for JSON-RPC.
+        console.error('WooCommerce MCP Server started successfully');
     })
     .catch(error => {
         console.error('Failed to start WooCommerce MCP Server:', error);

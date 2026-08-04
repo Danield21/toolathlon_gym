@@ -1,9 +1,7 @@
-
 import os
 import sys
 
 # Use an environment variable as a global re-entrancy flag
-# This works across multiple module loads in the same process
 REENTRANCY_VAR = "_PSYCOPG2_PATCH_ACTIVE"
 
 # Get the directory where THIS patched __init__.py lives
@@ -24,7 +22,7 @@ finally:
 def connect(*args, **kwargs):
     if os.environ.get(REENTRANCY_VAR) == "1":
         return real_psycopg2.connect(*args, **kwargs)
-    
+
     os.environ[REENTRANCY_VAR] = "1"
     try:
         # Override with environment variables if present
@@ -40,7 +38,7 @@ def connect(*args, **kwargs):
             kwargs["user"] = os.environ.get("PGUSER", kwargs["user"])
         if "password" in kwargs:
             kwargs["password"] = os.environ.get("PGPASSWORD", kwargs["password"])
-        
+
         return real_psycopg2.connect(*args, **kwargs)
     finally:
         del os.environ[REENTRANCY_VAR]

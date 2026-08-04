@@ -1,6 +1,7 @@
 // src/client.ts
 
 import axios, { AxiosInstance, AxiosError } from 'axios';
+import { PgCanvasRouter } from './pg-canvas-router.js';
 import { 
   CanvasCourse, 
   CanvasAssignment,
@@ -44,12 +45,23 @@ import {
   QuizSubmissionAnswer
 } from './types.js';
 
+/** Minimal HTTP surface shared by axios and PgCanvasRouter. */
+type CanvasHttpClient = {
+  get(url: string, config?: any): Promise<any>;
+  post(url: string, data?: any, config?: any): Promise<any>;
+  put(url: string, data?: any, config?: any): Promise<any>;
+  delete(url: string, config?: any): Promise<any>;
+  request?(config: any): Promise<any>;
+  interceptors?: AxiosInstance['interceptors'];
+};
+
 export class CanvasClient {
-  private client: AxiosInstance;
+  private client: CanvasHttpClient;
   private baseURL: string;
   private token: string;
   private maxRetries: number = 3;
   private retryDelay: number = 1000;
+  private usePgBackend: boolean;
 
   constructor(token: string, domain: string, options?: { maxRetries?: number; retryDelay?: number }) {
     this.token = token;
@@ -57,19 +69,29 @@ export class CanvasClient {
     this.maxRetries = options?.maxRetries ?? 3;
     this.retryDelay = options?.retryDelay ?? 1000;
 
-    this.client = axios.create({
-      baseURL: this.baseURL,
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 30000 // 30 second timeout
-    });
-
-    this.setupInterceptors();
+    // Toolathlon Gym: always use PostgreSQL mock (emails-mcp style).
+    // Set CANVAS_USE_REAL_API=1 to hit live Canvas HTTPS instead.
+    this.usePgBackend = process.env.CANVAS_USE_REAL_API !== '1';
+    if (this.usePgBackend) {
+      this.client = new PgCanvasRouter();
+      console.error('[Canvas MCP] Using PgCanvasRouter (PG-only mode)');
+    } else {
+      this.client = axios.create({
+        baseURL: this.baseURL,
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000 // 30 second timeout
+      });
+      this.setupInterceptors();
+    }
   }
 
   private setupInterceptors(): void {
+    if (!this.client.interceptors) {
+      return;
+    }
     // Request interceptor for logging
     this.client.interceptors.request.use(
       (config) => {
@@ -125,6 +147,9 @@ export class CanvasClient {
           console.error(`[Canvas API] Retrying request (${config.__retryCount}/${this.maxRetries}) after ${delay}ms`);
           
           await this.sleep(delay);
+          if (!this.client.request) {
+            return Promise.reject(error);
+          }
           return this.client.request(config);
         }
 
@@ -775,8 +800,12 @@ export class CanvasClient {
   async startQuizAttempt(courseId: number, quizId: number): Promise<QuizSubmission> {
     try {
       const response = await this.client.post(`/courses/${courseId}/quizzes/${quizId}/submissions`);
-      // Canvas returns the full response with quiz_submissions array
-      return response.data;
+      // Canvas returns { quiz_submissions: [...] }; PG router may return a bare row.
+      const data = response.data;
+      if (data?.quiz_submissions?.length) {
+        return data.quiz_submissions[0];
+      }
+      return data;
     } catch (error: any) {
       // Canvas sometimes returns 500 but actually creates the submission
       // Also handle 409 (conflict) when attempt already exists
@@ -956,9 +985,15 @@ export class CanvasClient {
     const uploadUrlResponse = await this.client.post(uploadEndpoint, uploadParams);
     const { upload_url, upload_params } = uploadUrlResponse.data;
 
-    // Step 2: Upload the file
+    // PG mock already inserts the file row and returns a fake upload_url.
+    if (this.usePgBackend || (typeof upload_url === 'string' && upload_url.includes('mock-canvas.local'))) {
+      const { upload_url: _u, upload_params: _p, ...fileRow } = uploadUrlResponse.data;
+      return fileRow as CanvasFile;
+    }
+
+    // Step 2: Upload the file (real Canvas two-step upload)
     const formData = new FormData();
-    Object.entries(upload_params).forEach(([key, value]) => {
+    Object.entries(upload_params || {}).forEach(([key, value]) => {
       formData.append(key, value as string);
     });
 
@@ -1012,18 +1047,8 @@ export class CanvasClient {
     
     // Limit per_page to maximum of 20
     const limitedPerPage = Math.min(per_page, 20);
-    
-    // Create a new axios instance without interceptors for this specific request
-    const { default: newAxios } = await import('axios');
-    const simpleClient = newAxios.create({
-      baseURL: this.baseURL,
-      headers: {
-        'Authorization': `Bearer ${this.token}`,
-        'Content-Type': 'application/json'
-      }
-    });
 
-    const response = await simpleClient.get(`/accounts/${account_id}/users`, { 
+    const response = await this.client.get(`/accounts/${account_id}/users`, { 
       params: { 
         ...params, 
         page, 
@@ -1031,13 +1056,25 @@ export class CanvasClient {
       } 
     });
 
-    // Parse pagination info from Link header
-    const linkHeader = response.headers.link;
+    const allUsers: CanvasUser[] = Array.isArray(response.data) ? response.data : [];
+    // PG backend returns the full list (no Link header); slice client-side.
+    const start = Math.max(0, (page - 1) * limitedPerPage);
+    const users = this.usePgBackend
+      ? allUsers.slice(start, start + limitedPerPage)
+      : allUsers;
+
+    // Parse pagination info from Link header (real Canvas only)
+    const linkHeader = response.headers?.link;
     let pagination: any = {
       current_page: page
     };
 
-    if (linkHeader) {
+    if (this.usePgBackend) {
+      const total_pages = Math.max(1, Math.ceil(allUsers.length / limitedPerPage));
+      pagination.total_pages = total_pages;
+      if (page < total_pages) pagination.next_page = page + 1;
+      if (page > 1) pagination.prev_page = page - 1;
+    } else if (linkHeader) {
       const links = linkHeader.split(',').reduce((acc: any, link: string) => {
         const match = link.match(/<(.+?)>;\s*rel="(\w+)"/);
         if (match) {
@@ -1054,7 +1091,7 @@ export class CanvasClient {
     }
 
     return {
-      users: response.data,
+      users,
       pagination
     };
   }

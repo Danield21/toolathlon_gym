@@ -3,9 +3,10 @@ import { CallToolRequestSchema, JSONRPCResponse, ListToolsRequestSchema, Tool } 
 import { JSONSchema7 as IJsonSchema } from 'json-schema'
 import { OpenAPIToMCPConverter } from '../openapi/parser.js'
 import { HttpClient, HttpClientError } from '../client/http-client.js'
+import { PgHttpClient } from '../client/pg-client.js'
 import { OpenAPIV3 } from 'openapi-types'
 import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
-import { PageAccessController } from '../auth/page-access-control.js'
+import { PageAccessController, NotionHttpLike } from '../auth/page-access-control.js'
 
 type PathItemObject = OpenAPIV3.PathItemObject & {
   get?: OpenAPIV3.OperationObject
@@ -32,7 +33,7 @@ export interface MCPProxyOptions {
 // import this class, extend and return server
 export class MCPProxy {
   private server: Server
-  private httpClient: HttpClient
+  private httpClient: NotionHttpLike
   private tools: Record<string, NewToolDefinition>
   private openApiLookup: Record<string, OpenAPIV3.OperationObject & { method: string; path: string }>
   private pageAccessController: PageAccessController | null = null
@@ -43,13 +44,27 @@ export class MCPProxy {
     if (!baseUrl) {
       throw new Error('No base URL found in OpenAPI spec')
     }
-    this.httpClient = new HttpClient(
-      {
-        baseUrl,
-        headers: this.parseHeadersFromEnv(),
-      },
-      openApiSpec,
-    )
+    // Toolathlon Gym: always use PostgreSQL mock (emails-mcp style).
+    // Set NOTION_USE_REAL_API=1 to hit live Notion HTTPS instead.
+    const usePg = process.env.NOTION_USE_REAL_API !== '1'
+    if (usePg) {
+      this.httpClient = new PgHttpClient(
+        {
+          baseUrl,
+          headers: this.parseHeadersFromEnv(),
+        },
+        openApiSpec,
+      )
+      console.error('[Notion MCP] Using PgHttpClient (PG-only mode)')
+    } else {
+      this.httpClient = new HttpClient(
+        {
+          baseUrl,
+          headers: this.parseHeadersFromEnv(),
+        },
+        openApiSpec,
+      )
+    }
 
     // Initialize page access control if needed
     if ((options.pageIds && options.pageIds.length > 0) || (options.pageUrls && options.pageUrls.length > 0)) {

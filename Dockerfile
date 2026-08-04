@@ -58,9 +58,15 @@ RUN for dir in \
         /opt/local_servers/youtube-mcp-server \
         /opt/local_servers/filesystem \
         /opt/local_servers/HowToCook-mcp \
-        /opt/local_servers/servers; do \
+        /opt/local_servers/servers \
+        /opt/local_servers/mcp-canvas-lms \
+        /opt/local_servers/notion-mcp-server \
+        /opt/local_servers/mcp-npx-fetch \
+        /opt/local_servers/playwright-mcp \
+        /opt/local_servers/woocommerce-mcp \
+        /opt/local_servers/12306-mcp; do \
     [ -f "$dir/package.json" ] && \
-        echo "=== $dir ===" && cd "$dir" && npm install && (npm run build 2>/dev/null || true) && cd /workspace || true; \
+        echo "=== $dir ===" && cd "$dir" && npm install --ignore-scripts && (npm run build 2>/dev/null || true) && cd /workspace || true; \
 done
 
 RUN for dir in \

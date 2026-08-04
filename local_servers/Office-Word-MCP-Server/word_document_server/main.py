@@ -20,7 +20,9 @@ builtins.print = _stderr_print
 print("Loading configuration from .env file...")
 load_dotenv()
 # Set required environment variable for FastMCP 2.8.1+
-os.environ.setdefault('FASTMCP_LOG_LEVEL', 'INFO')
+os.environ.setdefault('FASTMCP_LOG_LEVEL', 'ERROR')
+# FastMCP 3.x prints a startup banner to stdout by default; that breaks MCP stdio.
+os.environ.setdefault('FASTMCP_SHOW_SERVER_BANNER', 'false')
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from word_document_server.tools import (
@@ -721,7 +723,8 @@ def run_server():
     
     try:
         if transport_type == 'stdio':
-            # Run with stdio transport (default, backward compatible)
+            # Run with stdio transport (default, backward compatible).
+            # Banner suppressed via FASTMCP_SHOW_SERVER_BANNER=false above.
             print("Server running on stdio transport")
             mcp.run(transport='stdio')
             

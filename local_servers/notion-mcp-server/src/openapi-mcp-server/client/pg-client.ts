@@ -24,11 +24,11 @@ export class PgHttpClient {
     _openApiSpec: OpenAPIV3.Document | OpenAPIV3_1.Document,
   ) {
     this.pool = new Pool({
-      host: process.env.PG_HOST || 'localhost',
-      port: parseInt(process.env.PG_PORT || '5432', 10),
-      database: process.env.PG_DATABASE || 'toolathlon',
-      user: process.env.PG_USER || 'postgres',
-      password: process.env.PG_PASSWORD || 'postgres',
+      host: process.env.PG_HOST || process.env.PGHOST || '127.0.0.1',
+      port: parseInt(process.env.PG_PORT || process.env.PGPORT || '5432', 10),
+      database: process.env.PG_DATABASE || process.env.PGDATABASE || 'toolathlon_gym',
+      user: process.env.PG_USER || process.env.PGUSER || 'eigent',
+      password: process.env.PG_PASSWORD || process.env.PGPASSWORD || 'camel',
     })
   }
 
