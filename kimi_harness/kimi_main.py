@@ -15,6 +15,7 @@ Flow:
 """
 import argparse
 import asyncio
+import ctypes
 import glob
 import json
 import os
@@ -26,6 +27,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, os.getcwd())
 
 from utils.general.helper import read_json, print_color  # noqa: E402
@@ -36,6 +39,22 @@ from utils.data_structures.task_config import TaskConfig  # noqa: E402
 
 HARNESS_DIR = str(Path(__file__).resolve().parent)
 CLAIM_TOOL = "mcp__local__claim_done"
+BUILTIN_DISALLOWED_TOOLS = (
+    "Bash",
+    "Shell",
+    "Terminal",
+    "Read",
+    "ReadMediaFile",
+    "Write",
+    "Edit",
+    "Glob",
+    "Grep",
+    "WebFetch",
+    "WebSearch",
+    "FetchURL",
+    "Fetch",
+    "Browser",
+)
 
 CLAIM_DONE_PROTOCOL = """\
 Completion Protocol (Mandatory):
@@ -74,14 +93,34 @@ CORE_RESPONSIBILITIES_TRUST = (
 )
 
 
-def _core_responsibilities(subagents: list) -> str:
+def _boundary_section(workspace: str) -> str:
+    """Explicit visible-boundary statement injected into every agent prompt."""
+    return (
+        "Visible Boundary (Strictly Enforced):\n"
+        f"- You may ONLY read and write files inside your accessible workspace: {workspace}\n"
+        "- You may use ONLY the task-granted tools to interact with external systems "
+        "(databases, calendars, email, spreadsheets, etc.).\n"
+        "- Do NOT access, read, list, or probe anything outside your workspace, including "
+        "tool/MCP server source code, evaluation logic, ground-truth data, harness or "
+        "benchmark internals, or any system paths (e.g. under /opt, /workspace/tasks, "
+        "/workspace/utils). Those are outside your task boundary.\n"
+        "- Assume the environment and all granted tools are functioning correctly. Never "
+        "attempt to diagnose, fix, or work around infrastructure; if a granted tool fails, "
+        "report the failure and continue with the tools that work."
+    )
+
+
+def _core_responsibilities(subagents: list, workspace: str = "") -> str:
     lines = [CORE_RESPONSIBILITIES_BASE]
     if subagents:
         lines += [CORE_RESPONSIBILITIES_DELEGATION, CORE_RESPONSIBILITIES_PARALLEL,
                   CORE_RESPONSIBILITIES_TRUST]
     else:
         lines.append(CORE_RESPONSIBILITIES_PARALLEL)
-    return "\n".join(lines)
+    out = "\n".join(lines)
+    if workspace:
+        out += "\n\n" + _boundary_section(workspace)
+    return out
 
 DELEGATION_RULES = """\
 Subagent Delegation:
@@ -242,6 +281,19 @@ def build_readonly_tool_patterns(server_names):
     return patterns
 
 
+_SUBAGENT_BOUNDARY = (
+    "Visible Boundary (Strictly Enforced):\n"
+    "- Read and write files ONLY inside the task workspace directory.\n"
+    "- Interact with external systems ONLY through the task-granted tools.\n"
+    "- Do NOT access, read, list, or probe anything outside the workspace, including "
+    "tool/MCP server source code, evaluation logic, ground-truth data, harness or "
+    "benchmark internals, or system paths (e.g. under /opt, /workspace/tasks, "
+    "/workspace/utils).\n"
+    "- Assume the environment and all granted tools work correctly. Never diagnose, fix, "
+    "or work around infrastructure; if a granted tool fails, report it and continue."
+)
+
+
 def render_subagent_profile(name, tools_list, disallowed=None):
     """Read assets/subagents/<name>.md, keep its body, rewrite frontmatter
     with an explicit read-only tool allowlist."""
@@ -250,17 +302,31 @@ def render_subagent_profile(name, tools_list, disallowed=None):
         raw = f.read()
     # split frontmatter (---\n...\n---\n) from body
     body = raw
+    metadata = {}
     if raw.startswith("---"):
         parts = raw.split("---", 2)
         if len(parts) >= 3:
+            metadata = yaml.safe_load(parts[1]) or {}
             body = parts[2].lstrip("\n")
+    description = metadata.get("description")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError(f"subagent profile {src} must define description")
+    when_to_use = metadata.get("whenToUse")
+    body = body.rstrip() + "\n\n" + _SUBAGENT_BOUNDARY + "\n"
     tools_yaml = "\n".join(f"  - {t}" for t in tools_list)
     disallowed_yaml = ""
     if disallowed:
         disallowed_yaml = "\ndisallowedTools:\n" + "\n".join(f"  - {t}" for t in disallowed)
+    when_to_use_yaml = (
+        f"whenToUse: {when_to_use}\n"
+        if isinstance(when_to_use, str) and when_to_use.strip()
+        else ""
+    )
     return (
         "---\n"
         f"name: {name}\n"
+        f"description: {description}\n"
+        f"{when_to_use_yaml}"
         f"override: true\n"
         "tools:\n"
         f"{tools_yaml}"
@@ -336,7 +402,7 @@ def render_system_prompt(task_config) -> str:
         sp = sp.replace(redundant, "")
 
     subagents = _active_subagents()
-    sections = [sp.rstrip(), "", _core_responsibilities(subagents)]
+    sections = [sp.rstrip(), "", _core_responsibilities(subagents, workspace=ws)]
     if subagents:
         sections += ["", DELEGATION_RULES, "", ORCHESTRATION_RULES]
         types_sec = _subagent_types_section(subagents)
@@ -366,11 +432,15 @@ def write_agentfile(path: str, system_prompt: str):
     else:
         tools_yaml = "  - mcp__*\n  - TodoList"
         subagents_yaml = "subagents: []"
+    disallowed_yaml = "\n".join(f"  - {t}" for t in BUILTIN_DISALLOWED_TOOLS)
     content = f"""---
 name: toolathlon-main
 description: Toolathlon-GYM task solver (main-agent)
+override: true
 tools:
 {tools_yaml}
+disallowedTools:
+{disallowed_yaml}
 {subagents_yaml}
 ---
 
@@ -381,7 +451,7 @@ tools:
 
 
 def write_kimi_home(home: str, task_config, workspace: str, marker: str,
-                    max_steps: int):
+                    max_steps: int, rewrite: dict = None):
     os.makedirs(home, exist_ok=True)
     os.makedirs(os.path.join(home, "agents"), exist_ok=True)
     os.makedirs(os.path.join(home, "plugins"), exist_ok=True)
@@ -403,6 +473,7 @@ def write_kimi_home(home: str, task_config, workspace: str, marker: str,
             python_bin=os.environ.get("PYTHON_BIN", "/opt/venv/bin/python3"),
             harness_dir=HARNESS_DIR,
         )
+    servers = _apply_path_rewrite(servers, rewrite or {})
     with open(os.path.join(home, "mcp.json"), "w", encoding="utf-8") as f:
         json.dump({"mcpServers": servers}, f, indent=2, ensure_ascii=False)
 
@@ -413,15 +484,20 @@ def write_kimi_home(home: str, task_config, workspace: str, marker: str,
     server_names = list(servers.keys())
     readonly_patterns = build_readonly_tool_patterns(server_names)
     if "coder" in active:
-        coder_path = os.path.join(HARNESS_DIR, "assets", "subagents", "coder.md")
-        shutil.copy2(coder_path, os.path.join(home, "agents", "coder.md"))
+        coder_body = render_subagent_profile(
+            "coder",
+            tools_list=["mcp__*"],
+            disallowed=[CLAIM_TOOL, *BUILTIN_DISALLOWED_TOOLS],
+        )
+        with open(os.path.join(home, "agents", "coder.md"), "w", encoding="utf-8") as f:
+            f.write(coder_body)
     for name in ("explore", "plan"):
         if name not in active:
             continue
         content = render_subagent_profile(
             name,
             tools_list=readonly_patterns,
-            disallowed=[CLAIM_TOOL],
+            disallowed=[CLAIM_TOOL, *BUILTIN_DISALLOWED_TOOLS],
         )
         with open(os.path.join(home, "agents", f"{name}.md"), "w", encoding="utf-8") as f:
             f.write(content)
@@ -453,8 +529,79 @@ startup_timeout_ms = {int(float(os.environ.get('MCP_STDIO_TIMEOUT_MIN', '90')) *
         f.write(config)
 
 
+_LIBC = ctypes.CDLL("libc.so.6", use_errno=True)
+_LIBC.mount.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+                        ctypes.c_ulong, ctypes.c_void_p)
+_LIBC.umount2.argtypes = (ctypes.c_char_p, ctypes.c_int)
+_MS_BIND = 4096
+_MNT_DETACH = 2
+
+# Directories that are Toolathlon-GYM internals, not part of the agent's
+# granted boundary. They are masked (hidden) while the agent runs, then
+# unmasked before the evaluator runs. Only source the agent never legitimately
+# needs is masked. The MCP servers / venv / harness-tools that the agent's
+# tools depend on are left in place (they are runtime deps) and guarded by the
+# fallback blocker instead.
+_BLACKBOX_DIRS = ("tasks", "utils", "configs", "scripts", "db",
+                  "local_servers", "explorer")
+# Toolathlon-GYM's own README/build scripts/source mirrors under /workspace
+# that are not needed by the agent at runtime.
+_BLACKBOX_FILES = ("main.py", "run_parallel.sh", "test_mcp_servers.py",
+                   "docker-compose.yml", "Dockerfile", "README.md",
+                   "toolathlon-gym.mdx", "pyproject.toml", "uv.lock",
+                   "LICENSE", "Weekly_Meal_Plan.xlsx")
+# Absolute single files to mask.
+_BLACKBOX_ABS_FILES = ("/opt/provision_agent.sh",)
+
+
+def _mount(src: str, tgt: str, fstype=None, flags=0) -> bool:
+    r = _LIBC.mount(src.encode(), tgt.encode(),
+                    fstype.encode() if fstype else None, flags, None)
+    return r == 0
+
+
+def _mask_blackbox() -> list:
+    """Hide Toolathlon-GYM internals from the agent by bind-mounting an empty
+    directory over each blackbox path. Returns the masked mount points so the
+    caller can unmask them before the evaluator runs.
+
+    The agent runs with a cleared capability bounding set, so it cannot umount
+    these masks — the blackbox paths simply do not exist for it.
+    """
+    if os.environ.get("KIMI_DISABLE_BOUNDARY") == "1":
+        return []
+    root = os.getcwd()
+    empty = "/tmp/.blackbox_empty"
+    empty_file = "/tmp/.blackbox_empty_file"
+    os.makedirs(empty, exist_ok=True)
+    if not os.path.exists(empty_file):
+        open(empty_file, "w").close()
+    mounted = []
+    for rel in _BLACKBOX_DIRS:
+        tgt = os.path.join(root, rel)
+        if os.path.isdir(tgt) and _mount(empty, tgt, None, _MS_BIND):
+            mounted.append(tgt)
+        elif os.path.isdir(tgt):
+            print_color(f"[boundary] warn: failed to mask {tgt}", "yellow")
+    for rel in _BLACKBOX_FILES:
+        tgt = os.path.join(root, rel)
+        if os.path.isfile(tgt) and _mount(empty_file, tgt, None, _MS_BIND):
+            mounted.append(tgt)
+    for tgt in _BLACKBOX_ABS_FILES:
+        if os.path.isfile(tgt) and _mount(empty_file, tgt, None, _MS_BIND):
+            mounted.append(tgt)
+    print_color(f"[boundary] masked {len(mounted)} blackbox paths", "cyan")
+    return mounted
+
+
+def _unmask_blackbox(mounted: list):
+    for tgt in mounted:
+        _LIBC.umount2(tgt.encode(), _MNT_DETACH)
+
+
 def launch_kimi(task_str: str, agentfile: str, home: str, stream_path: str,
-                workspace: str, marker: str, timeout_s: int, debug: bool):
+                workspace: str, marker: str, timeout_s: int, debug: bool,
+                rewrite: dict = None):
     env = dict(os.environ)
     env["KIMI_CODE_HOME"] = home
     env["KIMI_CODE_BUILTIN_PRODUCT_SKILLS"] = "0"
@@ -463,10 +610,39 @@ def launch_kimi(task_str: str, agentfile: str, home: str, stream_path: str,
     env.pop("HTTP_PROXY", None)
     env.pop("HTTPS_PROXY", None)
 
-    cmd = ["kimi", "-p", task_str,
-           "--agent-file", agentfile,
-           "--output-format", "stream-json"]
-    print_color(f"[kimi] launching: {' '.join(cmd[:3])} ... (home={home})", "cyan")
+    # Rewrite env paths that point into masked dirs (e.g. /opt/venv on PATH)
+    # so the agent's tools resolve to the staged copies.
+    rewrite = rewrite or {}
+    if rewrite:
+        def rw(v):
+            for src, dst in rewrite.items():
+                if v == src:
+                    return dst
+                if v.startswith(src + os.sep):
+                    return dst + v[len(src):]
+            return v
+        for key in ("PATH", "VIRTUAL_ENV", "PYTHON_BIN", "LOCAL_SERVERS_PATH"):
+            if key in env:
+                sep = ":" if key == "PATH" else None
+                parts = env[key].split(":") if key == "PATH" else [env[key]]
+                parts = [rw(p) for p in parts]
+                env[key] = ":".join(parts) if key == "PATH" else parts[0]
+
+    kimi_cmd = ["kimi", "-p", task_str,
+                "--agent-file", agentfile,
+                "--output-format", "stream-json"]
+    # Boundary hardening: the agent subtree must not be able to undo the
+    # blackbox bind-mount masks. enroot runs everything as uid 0 (single-UID
+    # user namespace), so file permissions cannot isolate the agent — but
+    # dropping the capability bounding set can. Strip every capability so the
+    # agent cannot mount/umount (CAP_SYS_ADMIN) and re-expose masked source.
+    cmd = kimi_cmd
+    if os.environ.get("KIMI_DISABLE_BOUNDARY") != "1":
+        cmd = (["setpriv", "--bounding-set=-all", "--inh-caps=-all",
+                "--ambient-caps=-all", "--no-new-privs"] + kimi_cmd)
+        print_color("[boundary] agent launched with capability bounding set cleared",
+                    "cyan")
+    print_color(f"[kimi] launching: {' '.join(kimi_cmd[:3])} ... (home={home})", "cyan")
 
     with open(stream_path, "w", encoding="utf-8") as sf:
         proc = subprocess.Popen(
@@ -498,6 +674,36 @@ def launch_kimi(task_str: str, agentfile: str, home: str, stream_path: str,
                 proc.kill()
                 proc.wait(timeout=10)
         return proc.returncode, marker_seen_at is not None or os.path.exists(marker)
+
+
+def _stage_agent_runtime(task_root: str) -> dict:
+    """No staging copies are needed: the MCP servers, venv, and harness tools
+    the agent depends on are left in place (not masked). Only Toolathlon task
+    source / evaluation / gym internals — which the agent never runs — are
+    masked. Returns an empty path-rewrite map (kept for interface stability).
+    """
+    return {}
+
+
+def _apply_path_rewrite(servers: dict, rewrite: dict):
+    if not rewrite:
+        return servers
+    def rw(v):
+        if not isinstance(v, str):
+            return v
+        for src, dst in rewrite.items():
+            if v == src:
+                return dst
+            if v.startswith(src + os.sep):
+                return dst + v[len(src):]
+        return v
+    for srv in servers.values():
+        srv["command"] = rw(srv.get("command", ""))
+        srv["args"] = [rw(a) for a in srv.get("args", [])]
+        srv["cwd"] = rw(srv.get("cwd", ""))
+        env = srv.get("env", {})
+        srv["env"] = {k: rw(v) for k, v in env.items()}
+    return servers
 
 
 def write_traj_logs(task_config, status: str, start_time: datetime,
@@ -564,24 +770,37 @@ async def amain():
     workspace = setup_workspace(task_config)
     run_preprocess(task_config, args.debug)
 
+    # Stage agent-runtime deps (MCP servers, harness tools, venv) into an
+    # agent-visible dir so the originals can be masked without breaking tools.
+    rewrite = _stage_agent_runtime(task_root)
+
     kimi_home = os.path.join(task_root, ".kimi_home")
-    write_kimi_home(kimi_home, task_config, workspace, marker, max_steps)
+    write_kimi_home(kimi_home, task_config, workspace, marker, max_steps,
+                    rewrite=rewrite)
 
     agentfile = os.path.join(task_root, "agent_main.md")
     write_agentfile(agentfile, render_system_prompt(task_config))
 
     stream_path = os.path.join(task_root, "raw_stream.jsonl")
     timeout_s = int(os.environ.get("KIMI_TASK_TIMEOUT_S", "7200"))
-    rc, done = launch_kimi(
-        task_str=task_config.task_str,
-        agentfile=agentfile,
-        home=kimi_home,
-        stream_path=stream_path,
-        workspace=workspace,
-        marker=marker,
-        timeout_s=timeout_s,
-        debug=args.debug,
-    )
+
+    # Mask Toolathlon internals from the agent, run kimi, then unmask so the
+    # evaluator (which reads tasks/, utils/) can run. finally guarantees unmask.
+    masked = _mask_blackbox()
+    try:
+        rc, done = launch_kimi(
+            task_str=task_config.task_str,
+            agentfile=agentfile,
+            home=kimi_home,
+            stream_path=stream_path,
+            workspace=workspace,
+            marker=marker,
+            timeout_s=timeout_s,
+            debug=args.debug,
+            rewrite=rewrite,
+        )
+    finally:
+        _unmask_blackbox(masked)
 
     status = "success" if done else "failed"
     print_color(f"[kimi] exited rc={rc} claim_done={done} -> status={status}",

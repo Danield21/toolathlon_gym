@@ -128,6 +128,39 @@ except Exception:
 conn.close()
 " 2>/dev/null || true
 
+# ---------------------------------------------------------------------------
+# Start the WooCommerce PG REST backend (fixes the long-standing "WooCommerce
+# MCP server down" infra bug). The MCP services speak HTTP to
+# ${WORDPRESS_SITE_URL:-http://localhost:8081}/wp-json/wc/v3; this wrapper
+# routes those calls to PgRestRouter -> per-task Postgres (schema wc).
+# Idempotent: only starts if 8081 is not already serving. Started in the
+# background inside the instance and killed automatically when the instance
+# rootfs is torn down.
+# ---------------------------------------------------------------------------
+log "Starting WooCommerce PG REST backend (port 8081) ..."
+run_in /bin/bash -c '
+  WC=/opt/local_servers/woocommerce-mcp
+  if curl -fsS -m 2 http://127.0.0.1:8081/health >/dev/null 2>&1; then
+    echo "[wc-rest] already running"
+    exit 0
+  fi
+  if [[ -f "$WC/dist/services/pg-rest-server.js" ]]; then
+    nohup node "$WC/dist/services/pg-rest-server.js" >/tmp/wc-rest.log 2>&1 &
+    for i in $(seq 1 25); do
+      if curl -fsS -m 2 http://127.0.0.1:8081/health >/dev/null 2>&1; then
+        echo "[wc-rest] up (pid $!)"
+        exit 0
+      fi
+      sleep 0.4
+    done
+    echo "[wc-rest] FAILED to become healthy; log:" >&2
+    cat /tmp/wc-rest.log >&2 || true
+  else
+    echo "[wc-rest] pg-rest-server.js missing (build incomplete)" >&2
+  fi
+  exit 0
+' || warn "WooCommerce REST backend did not start"
+
 log "Running task ..."
 set +e
 run_in /bin/bash -c "cd /workspace && exec /opt/venv/bin/python3 main.py --eval_config /workspace/scripts/eval_config.json --task_dir '${TASK}' --max_steps '${MAX_STEPS}' --debug" \

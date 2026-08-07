@@ -6,7 +6,7 @@ JSON-RPC 2.0) for initialize / ping / tools/list / tools/call.
 
 Tools mirror utils/roles/task_agent.py::_build_local_tools semantics:
   claim_done              -> writes the completion marker file
-  python_execute          -> run code under the agent workspace (uv run)
+  python_execute          -> run code under the agent workspace
   save_overlong_output    -> persist large text, return an id
   view_overlong_output    -> paginated read of a saved output
   sleep                   -> asyncio-less time.sleep
@@ -31,6 +31,41 @@ WORKSPACE = ""
 MARKER = ""
 ENABLED = set()
 
+# Source trees that are runtime dependencies (the MCP servers execute from
+# here) but whose *contents* the evaluated agent must not read. Reading them
+# to debug infra or reverse-engineer the harness is out of the task boundary.
+# This is a read-guard only: it never blocks execution, so MCP tools and the
+# interpreter keep working — only agent-driven reads of these paths error out.
+_BLOCKED_READ_PREFIXES = (
+    "/opt/local_servers",
+    "/opt/kimi-code",
+)
+_BLOCKED_READ_MSG = (
+    "Reading this path is outside your task boundary. The directory holds "
+    "tool/harness implementation source, which you may use via the granted "
+    "tools but may not inspect. Solve the task using the granted tools and "
+    "your workspace only."
+)
+
+# Runtime guard prepended to user code: hooks open() so reads of the blocked
+# source trees raise, while everything else (including normal execution and
+# MCP subprocess spawns) is untouched.
+_READ_GUARD = (
+    "import builtins as _bi, os as _os\n"
+    "_BLK = {blocked!r}\n"
+    "_MSG = {msg!r}\n"
+    "_orig_open = _bi.open\n"
+    "def _g(file, mode='r', *a, **k):\n"
+    "    try:\n"
+    "        p = _os.path.normpath(_os.fspath(file)) if isinstance(file, (str, bytes, _os.PathLike)) else ''\n"
+    "    except Exception:\n"
+    "        p = ''\n"
+    "    if p and any(p.startswith(b) for b in _BLK) and any(m in mode for m in ('r', '+')):\n"
+    "        raise PermissionError(_MSG + ' [' + p + ']')\n"
+    "    return _orig_open(file, mode, *a, **k)\n"
+    "_bi.open = _g\n"
+)
+
 
 def _claim_done() -> str:
     if MARKER:
@@ -51,15 +86,18 @@ def _python_execute(code: str, filename: str = "", timeout: int = 30) -> str:
     os.makedirs(tmp_dir, exist_ok=True)
 
     file_path = os.path.join(tmp_dir, filename)
+    guard = "" if os.environ.get("KIMI_DISABLE_BOUNDARY") == "1" else _READ_GUARD.format(
+        blocked=list(_BLOCKED_READ_PREFIXES), msg=_BLOCKED_READ_MSG)
     with open(file_path, "w", encoding="utf-8") as f:
-        f.write(code)
+        f.write(guard + code)
 
-    cmd = f"uv run --directory {workspace} ./.python_tmp/{filename}"
+    python_bin = os.environ.get("PYTHON_EXECUTE_BIN") or sys.executable
+    cmd = [python_bin, file_path]
     start = time.time()
     try:
         result = subprocess.run(
-            cmd, shell=True, capture_output=True,
-            text=True, encoding="utf-8", timeout=timeout,
+            cmd, cwd=workspace, capture_output=True, text=True,
+            encoding="utf-8", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return f"=== TIMEOUT ===\nExceeded {timeout}s limit."
