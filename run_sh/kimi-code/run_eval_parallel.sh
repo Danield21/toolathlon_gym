@@ -20,7 +20,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RUNTIME_ROOT="${TOOLATHLON_EVAL_DOCKER_ROOT:-/lintaoLab2/bowending/project_agent_swarm_benchmark/toolathlon_gym_eval_dockers}"
-CONFIG_ENV="${SCRIPT_DIR}/config.env"
+CONFIG_ENV="${KIMI_CONFIG_ENV:-${SCRIPT_DIR}/config.env}"
 ENV_MAX_STEPS="${MAX_STEPS:-}"
 ENV_MAX_CONCURRENT="${MAX_CONCURRENT:-}"
 ENV_DUMP_ROOT="${DUMP_ROOT:-}"
@@ -129,13 +129,33 @@ append_summary() {
 
 port_is_listening() {
   local port="$1"
-  ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$"
+  local hexport
+  hexport="$(printf '%04X' "$port")"
+  # /proc/net/tcp is kernel-direct and unaffected by ss output format changes.
+  # Column 4 (st) == 0A means LISTEN. We check both IPv4 and IPv6.
+  awk -v p="$hexport" '
+    $2 ~ ":" p && $4 == "0A" { found=1; exit }
+    END { exit !found }
+  ' /proc/net/tcp /proc/net/tcp6 2>/dev/null
 }
 
 # Called only by the parent shell. The atomic lease directory prevents another
 # concurrently launched evaluator from choosing the same port between the
 # listen check and PostgreSQL bind. Leases are retained for the whole run, so a
 # port is never reused by two tasks in one summary.
+TASK_LOCK_ROOT="/dev/shm/toolathlon_task_locks_${UID}_${RUN_ID}"
+mkdir -p "$TASK_LOCK_ROOT"
+chmod 700 "$TASK_LOCK_ROOT" 2>/dev/null || true
+
+# claim_task prevents the same task from being launched twice (e.g. FIFO
+# semaphore race where a closed FIFO causes read to return immediately).
+claim_task() {
+  local task="$1"
+  local safe
+  safe="$(printf '%s' "$task" | tr -cs 'A-Za-z0-9_.-' '-')"
+  mkdir "$TASK_LOCK_ROOT/$safe" 2>/dev/null
+}
+
 allocate_free_port() {
   local lease owner
   while (( NEXT_PG_PORT <= 65535 )); do
@@ -401,8 +421,31 @@ run_one_task() {
 
   {
     echo "=== isolated PG on 127.0.0.1:$PGPORT (socket=$PGSOCKET) ==="
-    if ! start_isolated_pg "$PGDATA" "$PGSOCKET" "$PGPORT" "${OUTDIR}/postgres.log" "${OUTDIR}/db_check.log"; then
-      echo "[error] failed to start isolated postgres"
+    local pg_attempts=2
+    local attempt=1
+    local pg_started=0
+    while (( attempt <= pg_attempts )); do
+      if start_isolated_pg "$PGDATA" "$PGSOCKET" "$PGPORT" "${OUTDIR}/postgres.log" "${OUTDIR}/db_check.log"; then
+        pg_started=1
+        break
+      fi
+      if (( attempt < pg_attempts )); then
+        echo "[warn] PostgreSQL start failed (attempt $attempt), retrying with new port..."
+        # Clean up the failed PGDATA so initdb can rerun cleanly.
+        rm -rf -- "$PGDATA"
+        if allocate_free_port; then
+          PGPORT="$ALLOCATED_PG_PORT"
+          echo "PGPORT=$PGPORT" > "${OUTDIR}/isolation.env"
+          log "[retry] $TASK moved to pg_port=$PGPORT"
+        else
+          echo "[error] unable to allocate retry port for $TASK"
+          break
+        fi
+      fi
+      attempt=$((attempt + 1))
+    done
+    if (( pg_started == 0 )); then
+      echo "[error] failed to start isolated postgres after $pg_attempts attempts"
       append_summary "${TASK},pg_fail,1,${OUTDIR},${PGPORT},$(( $(date +%s) - START_TS ))"
       return 1
     fi
@@ -462,12 +505,12 @@ SQL
         "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/emails-mcp/src/emails_mcp/server.py" \
       || ! cp -f "${PROJECT_ROOT}/local_servers/excel-mcp-server/src/excel_mcp/__main__.py" \
         "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/excel-mcp-server/src/excel_mcp/__main__.py" \
-      || ! cp -f "${PROJECT_ROOT}/local_servers/woocommerce-mcp/dist/index.js" \
-        "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/woocommerce-mcp/dist/index.js" \
       || ! cp -f "${PROJECT_ROOT}/local_servers/Office-Word-MCP-Server/word_document_server/main.py" \
         "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/Office-Word-MCP-Server/word_document_server/main.py" \
       || ! cp -f "${PROJECT_ROOT}/configs/mcp_servers/word.yaml" \
-        "${ENROOT_DATA_PATH}/${INST}/workspace/configs/mcp_servers/word.yaml"; then
+        "${ENROOT_DATA_PATH}/${INST}/workspace/configs/mcp_servers/word.yaml" \
+      || ! cp -f "${PROJECT_ROOT}/configs/mcp_servers/yahoo-finance.yaml" \
+        "${ENROOT_DATA_PATH}/${INST}/workspace/configs/mcp_servers/yahoo-finance.yaml"; then
       echo "[error] failed to refresh Enroot runtime harness"
       append_summary "${TASK},rootfs_fail,1,${OUTDIR},${PGPORT},$(( $(date +%s) - START_TS ))"
       return 1
@@ -535,6 +578,29 @@ SQL
     # Note: no http_proxy passthrough — the eval endpoint is reached directly
     # (no_proxy covers it) and MCP servers stay fully local.
 
+    # WooCommerce tasks need the PG REST backend on :8081 before MCP connects.
+    # Enroot uses the host network namespace, so 127.0.0.1:8081 is SHARED across
+    # all tasks/smokes. Never reuse a pre-existing listener — it may point at
+    # another task's (or a dead smoke) Postgres. Always (re)bind to THIS task's PG.
+    # NOTE: do NOT use `pkill -f pg-rest-server` here — the pattern appears in
+    # this bash -c cmdline and would SIGTERM ourselves (exit 143).
+    WC_START='
+if [[ -f /opt/local_servers/woocommerce-mcp/dist/services/pg-rest-server.js ]]; then
+  # Free :8081 via port only (safe; does not match this shell cmdline).
+  fuser -k 8081/tcp >/dev/null 2>&1 || true
+  sleep 0.3
+  # Prefer TCP to the isolated PG: unix socket path differs across namespaces,
+  # but host-network 127.0.0.1:$PG_PORT is unambiguous.
+  nohup env PG_HOST=127.0.0.1 node /opt/local_servers/woocommerce-mcp/dist/services/pg-rest-server.js >/tmp/wc-rest.log 2>&1 &
+  for i in $(seq 1 25); do
+    if curl -fsS -m 2 http://127.0.0.1:8081/health >/dev/null 2>&1; then
+      echo "[wc-rest] up on :8081 -> PG 127.0.0.1:${PG_PORT}"
+      break
+    fi
+    sleep 0.4
+  done
+fi
+'
     echo "=== run kimi_main.py (cwd=/workspace) ==="
     set +e
     # Enroot does not provide daemon lifecycle management.  Run each case in
@@ -544,7 +610,7 @@ SQL
     # cleanup_worker terminates the whole group before deleting the rootfs,
     # preventing orphan listeners and NFS .nfs* remnants.
     setsid enroot start -r -w -m "${PGSOCKET}:/run/toolathlon_pg" "${ENV_ARGS[@]}" "$INST" \
-      /bin/bash -c "cd /workspace && exec /opt/venv/bin/python3 kimi_harness/kimi_main.py --eval_config /workspace/scripts/eval_config.json --task_dir '${TASK}' --max_steps '${MAX_STEPS}' --debug" &
+      /bin/bash -c "${WC_START}cd /workspace && exec /opt/venv/bin/python3 kimi_harness/kimi_main.py --eval_config /workspace/scripts/eval_config.json --task_dir '${TASK}' --max_steps '${MAX_STEPS}' --debug" &
     ENROOT_LAUNCH_PID=$!
     WORKER_PGID="$(ps -o pgid= -p "$ENROOT_LAUNCH_PID" 2>/dev/null | tr -d ' ')"
     [[ -n "$WORKER_PGID" ]] || WORKER_PGID="$ENROOT_LAUNCH_PID"
@@ -606,7 +672,11 @@ rm -f "$FIFO"
 mkfifo "$FIFO"
 exec 3<>"$FIFO"
 rm -f "$FIFO"
-cleanup_fifo() { exec 3>&- 2>/dev/null || true; rm -f "$FIFO" 2>/dev/null || true; }
+cleanup_fifo() {
+  exec 3>&- 2>/dev/null || true
+  rm -f "$FIFO" 2>/dev/null || true
+  rm -rf -- "$TASK_LOCK_ROOT" 2>/dev/null || true
+}
 cleanup_parent() {
   local pid
   trap - HUP INT TERM
@@ -634,6 +704,11 @@ NEXT_PG_PORT="$PG_PORT_BASE"
 ALLOCATED_PG_PORT=""
 for TASK in "${TASKS[@]}"; do
   read -u 3
+  if ! claim_task "$TASK"; then
+    log "[skip] $TASK already claimed by another slot (duplicate dispatch)"
+    echo >&3
+    continue
+  fi
   if ! allocate_free_port; then
     log "[error] unable to allocate an isolated PostgreSQL port for $TASK"
     FAILED=$((FAILED + 1))

@@ -72,6 +72,13 @@ def build_mcp_servers(
         yaml_env = {k: res(v) for k, v in params.get("env", {}).items()}
         cwd = res(params.get("cwd", agent_workspace))
 
+        # Boundary hardening: deny the terminal tool access to tool/harness
+        # source trees (deny takes priority over ALLOWED_DIR). The agent runs
+        # capability-masked, but this adds a second layer so `cat /opt/...`
+        # and similar are refused at the tool boundary too.
+        if name == "terminal" and os.environ.get("KIMI_DISABLE_BOUNDARY") != "1":
+            yaml_env["DENIED_PATHS"] = "/opt/local_servers,/opt/kimi-code"
+
         # toolathlon: full_env = {**yaml_env, **os.environ} — os.environ wins.
         # kimi merges process env underneath config env, so to reproduce the
         # same winner we inline only the yaml keys that os.environ overrides.

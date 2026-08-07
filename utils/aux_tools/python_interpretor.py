@@ -1,6 +1,7 @@
 """python_execute local tool for CAMEL."""
 import os
 import subprocess
+import sys
 import time
 import uuid
 
@@ -30,12 +31,13 @@ def make_python_execute(agent_workspace: str):
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(code)
 
-        cmd = f"uv run --directory {workspace} ./.python_tmp/{filename}"
+        python_bin = os.environ.get("PYTHON_EXECUTE_BIN") or sys.executable
+        cmd = [python_bin, file_path]
         start = time.time()
         try:
             result = subprocess.run(
-                cmd, shell=True, capture_output=True,
-                text=True, encoding="utf-8", timeout=timeout,
+                cmd, cwd=workspace, capture_output=True, text=True,
+                encoding="utf-8", timeout=timeout,
             )
         except subprocess.TimeoutExpired:
             return f"=== TIMEOUT ===\nExceeded {timeout}s limit."

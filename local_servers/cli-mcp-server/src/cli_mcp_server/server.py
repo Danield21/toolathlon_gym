@@ -172,20 +172,21 @@ class CommandExecutor:
         Checks if a given path is safe to access within allowed directory boundaries.
 
         Validates that the absolute resolved path is within the allowed directory
-        to prevent directory traversal attacks.
-
-        Args:
-            path (str): The path to validate.
-
-        Returns:
-            bool: True if path is within allowed directory, False otherwise.
-                Returns False if path resolution fails for any reason.
-
-        Private method intended for internal use only.
+        to prevent directory traversal attacks. Paths under explicitly denied
+        prefixes (DENIED_PATHS env, e.g. tool/harness source) are rejected first,
+        regardless of the allowed-directory outcome.
         """
         try:
             # Resolve any symlinks and get absolute path
             real_path = os.path.abspath(os.path.realpath(path))
+
+            # Deny-listed prefixes take priority over everything else.
+            denied = os.getenv("DENIED_PATHS", "")
+            for prefix in [p for p in denied.split(",") if p.strip()]:
+                p = os.path.normpath(prefix.strip())
+                if real_path == p or real_path.startswith(p + os.sep):
+                    return False
+
             allowed_dir_real = os.path.abspath(os.path.realpath(self.allowed_dir))
 
             # Check if the path starts with allowed_dir
