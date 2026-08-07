@@ -5,7 +5,7 @@
 #   bash scripts/enroot_build_agent.sh
 #
 # Requires proxy for apt/npm/pip on this cluster:
-#   export http_proxy=http://127.0.0.1:7890 https_proxy=http://127.0.0.1:7890
+#   export http_proxy=http://127.0.0.1:7891 https_proxy=http://127.0.0.1:7891
 
 set -euo pipefail
 
@@ -20,8 +20,8 @@ BUILD_NAME="toolathlon-pack-build"
 PROVISION_SCRIPT="${RUNTIME_ROOT}/tmp/provision_agent.sh"
 BUILD_LOG="${RUNTIME_ROOT}/logs/build_agent.log"
 
-export http_proxy="${http_proxy:-http://127.0.0.1:7890}"
-export https_proxy="${https_proxy:-http://127.0.0.1:7890}"
+export http_proxy="${http_proxy:-http://127.0.0.1:7891}"
+export https_proxy="${https_proxy:-http://127.0.0.1:7891}"
 export HTTP_PROXY="$http_proxy" HTTPS_PROXY="$https_proxy"
 export no_proxy="${no_proxy:-127.0.0.1,localhost}"
 export NO_PROXY="$no_proxy"
@@ -111,14 +111,39 @@ for dir in \
   /opt/local_servers/12306-mcp; do
   if [[ -f "$dir/package.json" ]]; then
     echo "=== npm: $dir ==="
-    (cd "$dir" && npm install --ignore-scripts && (npm run build 2>/dev/null || true)) || true
+    if (cd "$dir" && npm install --ignore-scripts && npm run build); then
+      echo "    [ok] built $dir"
+    else
+      # Previously this was `(npm run build 2>/dev/null || true) || true`, which
+      # silently swallowed failures and produced incomplete dist/ output (e.g.
+      # woocommerce-mcp shipped without dist/services/* -> broken MCP). Warn loudly.
+      echo "    [WARN] BUILD FAILED for $dir — server may be non-functional at runtime" >&2
+    fi
   fi
 done
+
+# Sanity check: woocommerce-mcp must ship a complete dist (services + pg backend).
+if [[ ! -f /opt/local_servers/woocommerce-mcp/dist/services/pg-rest-server.js ]]; then
+  echo "    [WARN] woocommerce-mcp/dist/services/pg-rest-server.js missing — 8081 PG backend will not start" >&2
+fi
+
+YAHOO_FINANCE_MCP=/opt/local_servers/yahoo-finance-mcp
+if [[ -f "$YAHOO_FINANCE_MCP/pyproject.toml" ]]; then
+  echo "=== uv lock/sync: $YAHOO_FINANCE_MCP ==="
+  (cd "$YAHOO_FINANCE_MCP" && uv lock && uv sync)
+  "$YAHOO_FINANCE_MCP/.venv/bin/python" <<'PY'
+import pandas  # noqa: F401
+import psycopg2  # noqa: F401
+import yfinance
+
+assert yfinance.__file__.endswith("yfinance.py"), yfinance.__file__
+print("Yahoo Finance MCP local shim imports")
+PY
+fi
 
 for dir in \
   /opt/local_servers/arxiv-mcp-server \
   /opt/local_servers/arxiv-latex-mcp \
-  /opt/local_servers/yahoo-finance-mcp \
   /opt/local_servers/emails-mcp \
   /opt/local_servers/mcp-snowflake-server \
   /opt/local_servers/mcp-scholarly \
@@ -156,6 +181,15 @@ chmod +x "$PROVISION_SCRIPT"
 # ---------------------------------------------------------------------------
 # Create / refresh build rootfs from ubuntu
 # ---------------------------------------------------------------------------
+# Build-rootfs cleanup (#6): never leave the build instance behind, even on failure.
+cleanup_build() {
+  if [[ -d "${ENROOT_DATA_PATH}/${BUILD_NAME}" ]]; then
+    log "Cleaning up build rootfs $BUILD_NAME ..."
+    enroot remove -f "$BUILD_NAME" 2>/dev/null || rm -rf "${ENROOT_DATA_PATH}/${BUILD_NAME}" 2>/dev/null || true
+  fi
+}
+trap cleanup_build EXIT
+
 log "Preparing build rootfs: $BUILD_NAME"
 if [[ -d "${ENROOT_DATA_PATH}/${BUILD_NAME}" ]]; then
   log "Removing existing $BUILD_NAME ..."
