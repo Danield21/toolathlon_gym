@@ -88,13 +88,19 @@ class SMTPBackend:
                    html_body: Optional[str] = None,
                    cc: Optional[str] = None, 
                    bcc: Optional[str] = None,
-                   attachments: Optional[List[str]] = None) -> tuple[bool, Optional[str]]:
+                   attachments: Optional[List[str]] = None,
+                   from_addr: Optional[str] = None,
+                   from_name: Optional[str] = None) -> tuple[bool, Optional[str]]:
         """Send email with optional HTML, CC, BCC, and attachments
         
         Returns:
             tuple[bool, Optional[str]]: (success, message_string_for_saving)
         """
-        
+
+        # Resolve effective sender identity
+        effective_addr = from_addr or self.config.email
+        effective_name = from_name if from_name is not None else self.config.name
+
         # Validate recipients
         valid, error = validate_email_list(to)
         if not valid:
@@ -136,12 +142,12 @@ class SMTPBackend:
             msg['Subject'] = Header(subject, 'utf-8')
             
             # Format From header with name if provided, with Chinese support
-            if self.config.name:
+            if effective_name:
                 # Encode name for Chinese characters
-                encoded_name = Header(self.config.name, 'utf-8')
-                msg['From'] = formataddr((str(encoded_name), self.config.email))
+                encoded_name = Header(effective_name, 'utf-8')
+                msg['From'] = formataddr((str(encoded_name), effective_addr))
             else:
-                msg['From'] = self.config.email
+                msg['From'] = effective_addr
             msg['To'] = to
             
             if cc:
@@ -157,10 +163,10 @@ class SMTPBackend:
                     msg = MIMEMultipart('mixed')
                     msg['Subject'] = subject
                     # Format From header with name if provided
-                    if self.config.name:
-                        msg['From'] = formataddr((self.config.name, self.config.email))
+                    if effective_name:
+                        msg['From'] = formataddr((effective_name, effective_addr))
                     else:
-                        msg['From'] = self.config.email
+                        msg['From'] = effective_addr
                     msg['To'] = to
                     if cc:
                         msg['Cc'] = cc

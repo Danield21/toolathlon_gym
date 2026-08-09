@@ -150,6 +150,8 @@ class EmailService:
                    cc: Optional[str] = None,
                    bcc: Optional[str] = None,
                    attachments: Optional[List[str]] = None,
+                   from_addr: Optional[str] = None,
+                   from_name: Optional[str] = None,
                    save_to_sent: bool = True) -> bool:
         """Send email and optionally save to Sent folder"""
         try:
@@ -161,7 +163,9 @@ class EmailService:
                 html_body=html_body,
                 cc=cc,
                 bcc=bcc,
-                attachments=attachments
+                attachments=attachments,
+                from_addr=from_addr,
+                from_name=from_name,
             )
             
             # If sending was successful and save_to_sent is True, save to Sent folder

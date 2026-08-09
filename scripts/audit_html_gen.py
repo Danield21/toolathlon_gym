@@ -502,6 +502,25 @@ A single step firing N Agent calls concurrently counts as one parallel phase.</p
     needed_local = cfg.get("needed_local_tools") or []
     sys_agent = (cfg.get("system_prompts") or {}).get("agent") or ""
     task_str = cfg.get("task_str") or ""
+
+    # Fallback: some evaluators overwrite traj_log.json with just {pass,fail},
+    # wiping the config the harness wrote. Recover what we can from sibling
+    # files so the audit page always shows the prompt + instruction.
+    if not sys_agent:
+        _ap = inner / "agent_main.md"
+        if _ap.exists():
+            _t = _ap.read_text(errors="replace")
+            # agent_main.md frontmatter ends at the second '---'; the body
+            # after that is the system prompt text.
+            _parts = _t.split("---", 2)
+            if len(_parts) >= 3:
+                sys_agent = _parts[2].strip()
+    if not task_str:
+        _rl = (case_dir / "run.log").read_text(errors="replace") if (case_dir / "run.log").exists() else ""
+        import re as _re
+        _m = _re.search(r"\[kimi\] launching: kimi -p (.+?)(?:\s*\.\.\.\s*\(home=|$)", _rl, _re.S)
+        if _m:
+            task_str = _m.group(1).strip()
     body.append(f"""<section id="prompts"><h2>Prompts &amp; Tool Grants</h2>
 <h3>Allowed MCP servers ({len(needed_mcp)})</h3><p>{html.escape(', '.join(needed_mcp) or '—')}</p>
 <h3>Allowed local tools ({len(needed_local)})</h3><p>{html.escape(', '.join(needed_local) or '—')}</p>

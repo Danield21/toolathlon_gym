@@ -110,6 +110,35 @@ class GoogleFormsServer {
           },
         },
         {
+          name: 'add_checkbox_question',
+          description: 'Add a checkbox (select-all-that-apply) question to the form',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              formId: {
+                type: 'string',
+                description: 'Form ID',
+              },
+              questionTitle: {
+                type: 'string',
+                description: 'Question title',
+              },
+              options: {
+                type: 'array',
+                items: {
+                  type: 'string'
+                },
+                description: 'Array of checkbox choices',
+              },
+              required: {
+                type: 'boolean',
+                description: 'Whether required (optional, default is false)',
+              }
+            },
+            required: ['formId', 'questionTitle', 'options'],
+          },
+        },
+        {
           name: 'get_form',
           description: 'Get form details',
           inputSchema: {
@@ -149,6 +178,8 @@ class GoogleFormsServer {
             return await this.addTextQuestion(request.params.arguments);
           case 'add_multiple_choice_question':
             return await this.addMultipleChoiceQuestion(request.params.arguments);
+          case 'add_checkbox_question':
+            return await this.addCheckboxQuestion(request.params.arguments);
           case 'get_form':
             return await this.getForm(request.params.arguments);
           case 'get_form_responses':
@@ -250,6 +281,35 @@ class GoogleFormsServer {
       throw new McpError(
         ErrorCode.InternalError,
         `Failed to add multiple choice question: ${error.message}`
+      );
+    }
+  }
+
+  private async addCheckboxQuestion(args: any) {
+    if (!args.formId || !args.questionTitle || !args.options || !Array.isArray(args.options)) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        'Form ID, question title, and options array are required'
+      );
+    }
+
+    try {
+      const result = await pgForms.addCheckboxQuestion(
+        args.formId, args.questionTitle, args.options, args.required || false
+      );
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    } catch (error: any) {
+      console.error('Error adding checkbox question:', error);
+      throw new McpError(
+        ErrorCode.InternalError,
+        `Failed to add checkbox question: ${error.message}`
       );
     }
   }

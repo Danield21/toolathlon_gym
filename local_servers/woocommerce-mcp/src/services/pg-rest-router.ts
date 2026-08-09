@@ -356,8 +356,19 @@ export class PgRestRouter {
 
     const whereClause = conditions.length > 0 ? ' WHERE ' + conditions.join(' AND ') : '';
 
-    // Ordering
-    const orderBy = params.orderby || 'id';
+    // Ordering — map WooCommerce REST API orderby aliases to actual PG columns.
+    // The WC REST API accepts orderby=date / modified / title, but the PG mock
+    // stores these as date_created / date_modified / name. Without this map,
+    // agent calls like woo_orders_list(orderby:"date") produce ORDER BY "date"
+    // which fails because there is no "date" column.
+    const ORDER_BY_ALIASES: Record<string, string> = {
+      date: 'date_created',
+      modified: 'date_modified',
+      title: 'name',
+      id: 'id',
+    };
+    const rawOrderBy = params.orderby || 'id';
+    const orderBy = ORDER_BY_ALIASES[rawOrderBy] || rawOrderBy;
     const order = params.order === 'asc' ? 'ASC' : 'DESC';
     const orderClause = ` ORDER BY ${this.quoteIdent(orderBy)} ${order}`;
 

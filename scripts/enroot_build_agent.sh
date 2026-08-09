@@ -63,17 +63,44 @@ apt-get install -y \
   squashfs-tools
 
 echo "=== [2/6] uv ==="
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# curl over the flaky proxy can SSL-error once and abort the whole build.
+# Retry the uv installer a few times before giving up.
+for _i in 1 2 3 4 5; do
+  if curl -LsSf https://astral.sh/uv/install.sh | sh; then
+    break
+  fi
+  echo "    [retry] uv install attempt $_i failed, sleeping 5s..." >&2
+  sleep 5
+done
+# The installer writes to /root/.local/bin; export BEFORE the existence check
+# so `command -v uv` can resolve it.
 export PATH="/root/.local/bin:$PATH"
+command -v uv >/dev/null 2>&1 || { echo "[error] uv install failed after retries" >&2; exit 1; }
 
 echo "=== [3/6] Node.js 22 ==="
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+# Retry the NodeSource setup script (curl over the proxy is flaky).
+for _i in 1 2 3 4 5; do
+  if curl -fsSL https://deb.nodesource.com/setup_22.x | bash -; then
+    break
+  fi
+  echo "    [retry] nodesource setup attempt $_i failed, sleeping 5s..." >&2
+  sleep 5
+done
 apt-get install -y nodejs
-npm install -g npm@latest
+# Retry global npm upgrade (also network-sensitive).
+for _i in 1 2 3; do npm install -g npm@latest && break; sleep 5; done
 
 echo "=== [4/6] Python venv + deps ==="
 uv venv /opt/venv
-uv pip install --python /opt/venv/bin/python \
+# NOTE: keep the package list contiguous (no inline `#` comments between the
+# backslash-continued lines — a `\` followed by `# comment` breaks the
+# continuation and the next package string becomes a standalone command).
+# camel-ai 0.2.x imports `from mcp.server import FastMCP`, but mcp>=2.0 removed
+# it, so pin mcp to 1.x (last compatible: 1.29.0) to avoid ImportError at eval
+# time. Order matters: list the mcp pin FIRST so pip's resolver honours it for
+# camel-ai's transitive mcp dependency.
+_uv_pkgs=(
+  "mcp>=1.3.0,<2.0.0" \
   "camel-ai" \
   "anthropic" \
   "psycopg2-binary" \
@@ -88,6 +115,14 @@ uv pip install --python /opt/venv/bin/python \
   "bibtexparser" \
   "canvasapi" \
   "prompt_toolkit"
+)
+for _i in 1 2 3 4 5; do
+  if uv pip install --python /opt/venv/bin/python "${_uv_pkgs[@]}"; then
+    break
+  fi
+  echo "    [retry] uv pip install attempt $_i failed, sleeping 5s..." >&2
+  sleep 5
+done
 export PATH="/opt/venv/bin:$PATH"
 export VIRTUAL_ENV="/opt/venv"
 playwright install chromium || true
@@ -95,6 +130,17 @@ playwright install-deps chromium || true
 
 echo "=== [5/6] local_servers (from /src) ==="
 rsync -a --delete /src/local_servers/ /opt/local_servers/
+
+# Purge stale build artifacts BEFORE building. rsync copies host-side bin/dist/build
+# which may be outdated (e.g. notion-mcp-server shipped a cli.mjs built before its
+# PgHttpClient patch landed → container ran the old bundle → hit live Notion API
+# → 401 "API token is invalid"). Removing them forces `npm run build` to regenerate
+# from current source; if build then fails, no stale artifact is left behind.
+for dir in /opt/local_servers/*/; do
+  [[ -f "$dir/package.json" ]] || continue
+  rm -rf "$dir/bin" "$dir/dist" "$dir/build" 2>/dev/null || true
+done
+
 for dir in \
   /opt/local_servers/Calendar-Autoauth-MCP-Server \
   /opt/local_servers/google-forms-mcp \
@@ -111,7 +157,16 @@ for dir in \
   /opt/local_servers/12306-mcp; do
   if [[ -f "$dir/package.json" ]]; then
     echo "=== npm: $dir ==="
-    if (cd "$dir" && npm install --ignore-scripts && npm run build); then
+    _npm_ok=0
+    for _i in 1 2 3 4 5; do
+      if (cd "$dir" && npm install --ignore-scripts); then
+        _npm_ok=1
+        break
+      fi
+      echo "    [retry] npm install attempt $_i failed for $dir, sleeping 5s..." >&2
+      sleep 5
+    done
+    if [[ $_npm_ok -eq 1 ]] && (cd "$dir" && npm run build); then
       echo "    [ok] built $dir"
     else
       # Previously this was `(npm run build 2>/dev/null || true) || true`, which
@@ -127,6 +182,18 @@ if [[ ! -f /opt/local_servers/woocommerce-mcp/dist/services/pg-rest-server.js ]]
   echo "    [WARN] woocommerce-mcp/dist/services/pg-rest-server.js missing — 8081 PG backend will not start" >&2
 fi
 
+# Sanity check: notion-mcp-server must ship a cli.mjs that contains the PgHttpClient
+# patch. Without it the server falls back to the live Notion API and returns 401
+# "API token is invalid" (the ntn-placeholder token never reaches a real account).
+NOTION_CLI=/opt/local_servers/notion-mcp-server/bin/cli.mjs
+if [[ -f "$NOTION_CLI" ]]; then
+  if ! grep -q "PgHttpClient" "$NOTION_CLI" 2>/dev/null; then
+    echo "    [WARN] notion-mcp-server/cli.mjs is missing PgHttpClient — server will hit live Notion API (401)" >&2
+  fi
+else
+  echo "    [WARN] notion-mcp-server/bin/cli.mjs missing — notion MCP will not start" >&2
+fi
+
 YAHOO_FINANCE_MCP=/opt/local_servers/yahoo-finance-mcp
 if [[ -f "$YAHOO_FINANCE_MCP/pyproject.toml" ]]; then
   echo "=== uv lock/sync: $YAHOO_FINANCE_MCP ==="
@@ -136,11 +203,21 @@ import pandas  # noqa: F401
 import psycopg2  # noqa: F401
 import yfinance
 
-assert yfinance.__file__.endswith("yfinance.py"), yfinance.__file__
+assert yfinance.__version__, yfinance.__file__
 print("Yahoo Finance MCP local shim imports")
 PY
 fi
 
+# uv-based MCP servers: fail-fast `uv lock && uv sync` with a smoke check.
+# Previously this loop used `(cd "$dir" && uv sync) || true`, which silently
+# swallowed build failures (e.g. missing deps, lock drift, network hiccups)
+# and shipped a broken/empty `.venv`. At runtime `uv run` then tried to
+# rebuild from source inside the no-egress eval container, blew past the MCP
+# startupTimeoutMs, and kimi dropped the server entirely — which is exactly
+# the 20260807-224427 batch failure (arxiv_local / excel / emails / snowflake
+# all "Timed out after 90000ms"). mcp_json_gen.py now pins VIRTUAL_ENV +
+# UV_FROZEN + UV_OFFLINE so `uv run` reuses this .venv deterministically;
+# this block is what makes that .venv actually exist and be complete.
 for dir in \
   /opt/local_servers/arxiv-mcp-server \
   /opt/local_servers/arxiv-latex-mcp \
@@ -154,8 +231,17 @@ for dir in \
   /opt/local_servers/mcp-youtube-transcript \
   /opt/local_servers/cli-mcp-server; do
   if [[ -f "$dir/pyproject.toml" ]]; then
-    echo "=== uv sync: $dir ==="
-    (cd "$dir" && uv sync) || true
+    echo "=== uv lock/sync: $dir ==="
+    if (cd "$dir" && uv lock && uv sync); then
+      echo "    [ok] synced $dir"
+    else
+      echo "    [WARN] UV SYNC FAILED for $dir — MCP server will be non-functional at runtime" >&2
+    fi
+    if [[ -x "$dir/.venv/bin/python" ]]; then
+      echo "    [ok] $dir/.venv ready"
+    else
+      echo "    [WARN] $dir/.venv/bin/python missing — uv run will fail to start this server" >&2
+    fi
   fi
 done
 

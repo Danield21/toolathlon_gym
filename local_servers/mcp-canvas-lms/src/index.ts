@@ -294,6 +294,30 @@ const TOOLS: Tool[] = [
     }
   },
   {
+    name: "canvas_list_assignment_submissions",
+    description: "List all submissions for an assignment (teacher/admin perspective)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        course_id: { type: "number", description: "ID of the course" },
+        assignment_id: { type: "number", description: "ID of the assignment" }
+      },
+      required: ["course_id", "assignment_id"]
+    }
+  },
+  {
+    name: "canvas_list_quiz_submissions",
+    description: "List all quiz submissions for a quiz (teacher/admin perspective)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        course_id: { type: "number", description: "ID of the course" },
+        quiz_id: { type: "number", description: "ID of the quiz" }
+      },
+      required: ["course_id", "quiz_id"]
+    }
+  },
+  {
     name: "canvas_submit_assignment",
     description: "Submit work for an assignment",
     inputSchema: {
@@ -1064,6 +1088,17 @@ const TOOLS: Tool[] = [
     }
   },
   {
+    name: "canvas_list_course_users",
+    description: "List all users enrolled in a specific course, returning each user's id, name, email, login_id and other profile fields. Use this to look up the human-readable names and emails of a course's members (e.g. to identify the instructors/teachers by name when you only have enrollment user_ids, since canvas_get_course_grades returns user_id without a name).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        course_id: { type: "number", description: "ID of the course" }
+      },
+      required: ["course_id"]
+    }
+  },
+  {
     name: "canvas_list_account_courses",
     description: "List courses for an account",
     inputSchema: {
@@ -1558,6 +1593,34 @@ class CanvasMCPServer {
             };
           }
 
+          case "canvas_list_assignment_submissions": {
+            const { course_id, assignment_id } = args as {
+              course_id: number;
+              assignment_id: number;
+            };
+            if (!course_id || !assignment_id) {
+              throw new Error("Missing required fields: course_id and assignment_id");
+            }
+            const submissions = await this.client.getSubmissions(course_id, assignment_id);
+            return {
+              content: [{ type: "text", text: JSON.stringify(submissions, null, 2) }]
+            };
+          }
+
+          case "canvas_list_quiz_submissions": {
+            const { course_id, quiz_id } = args as {
+              course_id: number;
+              quiz_id: number;
+            };
+            if (!course_id || !quiz_id) {
+              throw new Error("Missing required fields: course_id and quiz_id");
+            }
+            const submissions = await this.client.listQuizSubmissions(course_id, quiz_id);
+            return {
+              content: [{ type: "text", text: JSON.stringify(submissions, null, 2) }]
+            };
+          }
+
           case "canvas_submit_assignment": {
             const submitArgs = args as unknown as SubmitAssignmentArgs;
             const { course_id, assignment_id, submission_type } = submitArgs;
@@ -1722,10 +1785,20 @@ class CanvasMCPServer {
           case "canvas_get_account": {
             const { account_id } = args as { account_id: number };
             if (!account_id) throw new Error("Missing required field: account_id");
-            
+
             const account = await this.client.getAccount(account_id);
             return {
               content: [{ type: "text", text: JSON.stringify(account, null, 2) }]
+            };
+          }
+
+          case "canvas_list_course_users": {
+            const { course_id } = args as { course_id: number };
+            if (!course_id) throw new Error("Missing required field: course_id");
+
+            const users = await this.client.listUsers(course_id);
+            return {
+              content: [{ type: "text", text: JSON.stringify(users, null, 2) }]
             };
           }
 

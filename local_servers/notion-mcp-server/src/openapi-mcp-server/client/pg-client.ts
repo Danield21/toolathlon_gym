@@ -214,31 +214,111 @@ export class PgHttpClient {
     const values: any[] = [database_id]
     let idx = 2
 
-    // Apply basic filter support
-    if (filter && filter.property && filter.property !== 'and' && filter.property !== 'or') {
-      const propName = filter.property
-      // Determine the filter type (e.g., rich_text, title, number, checkbox, select, etc.)
-      const filterTypes = ['rich_text', 'title', 'number', 'checkbox', 'select', 'multi_select', 'date', 'url', 'email', 'phone_number', 'status']
-      for (const ft of filterTypes) {
-        if (filter[ft]) {
-          const condition = filter[ft]
-          if (condition.equals !== undefined) {
-            query += ` AND properties->'${propName}'->'${ft}'->>'content' = $${idx}`
-            values.push(String(condition.equals))
-            idx++
-          } else if (condition.contains !== undefined) {
-            query += ` AND properties->'${propName}'->'${ft}'->>'content' ILIKE $${idx}`
-            values.push(`%${condition.contains}%`)
-            idx++
-          } else if (condition.starts_with !== undefined) {
-            query += ` AND properties->'${propName}'->'${ft}'->>'content' ILIKE $${idx}`
-            values.push(`${condition.starts_with}%`)
-            idx++
-          }
-          break
-        }
+    // Apply basic filter support — including `and` / `or` compound filters.
+    // Builds a list of parameterised SQL fragments and joins them with AND/OR
+    // so we never emit a stray leading operator (which would be a syntax error).
+    const filterTypes = ['rich_text', 'title', 'number', 'checkbox', 'select',
+      'multi_select', 'date', 'url', 'email', 'phone_number', 'status']
+
+    const propScalarExpr = (propName: string, ft: string): string | null => {
+      switch (ft) {
+        case 'number':
+          return `(properties->>'${propName}')::numeric`
+        case 'checkbox':
+          return `(properties->>'${propName}')::boolean`
+        case 'date':
+          return `(properties->>'${propName}')::date`
+        case 'rich_text':
+        case 'title':
+        case 'select':
+        case 'multi_select':
+        case 'url':
+        case 'email':
+        case 'phone_number':
+        case 'status':
+          return `properties->'${propName}'->'${ft}'->>'content'`
+        default:
+          return null
       }
     }
+
+    // Returns the SQL fragment for a leaf filter (no leading AND/OR) and pushes
+    // any bound parameters into `values`. Returns null if the filter is not a
+    // recognised leaf.
+    const leafFragment = (f: any): string | null => {
+      if (!f || !f.property) return null
+      const propName = f.property
+      for (const ft of filterTypes) {
+        const cond = f[ft]
+        if (cond === undefined) continue
+        const col = propScalarExpr(propName, ft)
+        if (col === null) break
+        for (const [op, sqlOp, cast] of [
+          ['equals', '=', false],
+          ['does_not_equal', '<>', false],
+          ['greater_than', '>', true],
+          ['less_than', '<', true],
+          ['greater_than_or_equal_to', '>=', true],
+          ['less_than_or_equal_to', '<=', true],
+        ] as [string, string, boolean][]) {
+          if (cond[op] !== undefined) {
+            if (cast && ft !== 'number') continue
+            const frag = `${col} ${sqlOp} $${idx}`
+            values.push(cond[op])
+            idx++
+            return frag
+          }
+        }
+        if (cond.contains !== undefined) {
+          const frag = `${col} ILIKE $${idx}`
+          values.push(`%${cond.contains}%`)
+          idx++
+          return frag
+        }
+        if (cond.does_not_contain !== undefined) {
+          const frag = `${col} NOT ILIKE $${idx}`
+          values.push(`%${cond.does_not_contain}%`)
+          idx++
+          return frag
+        }
+        if (cond.starts_with !== undefined) {
+          const frag = `${col} ILIKE $${idx}`
+          values.push(`${cond.starts_with}%`)
+          idx++
+          return frag
+        }
+        if (cond.ends_with !== undefined) {
+          const frag = `${col} ILIKE $${idx}`
+          values.push(`%${cond.ends_with}`)
+          idx++
+          return frag
+        }
+        if (cond.is_empty !== undefined) {
+          return `${col} IS ${cond.is_empty ? 'NULL' : 'NOT NULL'}`
+        }
+        if (cond.checked !== undefined && ft === 'checkbox') {
+          return `${col} = ${cond.checked ? 'TRUE' : 'FALSE'}`
+        }
+        break
+      }
+      return null
+    }
+
+    const buildFilter = (f: any): string | null => {
+      if (!f) return null
+      if (Array.isArray(f.and)) {
+        const parts = f.and.map((s: any) => buildFilter(s)).filter((x: any) => x)
+        return parts.length ? `(${parts.join(' AND ')})` : null
+      }
+      if (Array.isArray(f.or)) {
+        const parts = f.or.map((s: any) => buildFilter(s)).filter((x: any) => x)
+        return parts.length ? `(${parts.join(' OR ')})` : null
+      }
+      return leafFragment(f)
+    }
+
+    const filterSql = buildFilter(filter)
+    if (filterSql) query += ` AND ${filterSql}`
 
     // Apply sorts
     if (sorts && Array.isArray(sorts) && sorts.length > 0) {

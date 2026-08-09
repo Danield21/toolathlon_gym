@@ -26,6 +26,12 @@ DB_CONFIG = {
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
+# Fixed analysis date. The task schedules follow-up calls starting on
+# 2026-03-09; "today" for the recency calc is the day before. Pinning this
+# removes the eval-flakiness from CURRENT_DATE (results drift day by day and
+# across timezones otherwise).
+AS_OF_DATE = "2026-03-08"
+
 
 def check(name, condition, detail=""):
     global PASS_COUNT, FAIL_COUNT
@@ -66,10 +72,10 @@ def compute_expected_values():
         ),
         health AS (
             SELECT c."CUSTOMER_ID", c."CUSTOMER_NAME", c."SEGMENT", c."REGION",
-                ROUND(GREATEST(0, 100 - (CURRENT_DATE - COALESCE(os.last_order_date, c."SIGNUP_DATE")))::numeric, 2) as recency_score,
+                ROUND(GREATEST(0, 100 - (DATE '2026-03-08' - COALESCE(os.last_order_date, c."SIGNUP_DATE")))::numeric, 2) as recency_score,
                 ROUND(LEAST(100, COALESCE(os.order_count, 0) * 10)::numeric, 2) as frequency_score,
                 ROUND(LEAST(100, c."LIFETIME_VALUE" / 50.0)::numeric, 2) as monetary_score,
-                ROUND((0.4 * GREATEST(0, 100 - (CURRENT_DATE - COALESCE(os.last_order_date, c."SIGNUP_DATE"))) +
+                ROUND((0.4 * GREATEST(0, 100 - (DATE '2026-03-08' - COALESCE(os.last_order_date, c."SIGNUP_DATE"))) +
                 0.3 * LEAST(100, COALESCE(os.order_count, 0) * 10) +
                 0.3 * LEAST(100, c."LIFETIME_VALUE" / 50.0))::numeric, 2) as health_score
             FROM sf_data."SALES_DW__PUBLIC__CUSTOMERS" c
