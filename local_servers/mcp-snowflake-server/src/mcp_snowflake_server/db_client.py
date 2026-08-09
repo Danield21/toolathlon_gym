@@ -121,6 +121,20 @@ def _translate_query(query: str):
             "ORDER BY ordinal_position"
         )
 
+    # ── MEDIAN(expr) → PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY expr) ──
+    # PostgreSQL has no native MEDIAN aggregate; Snowflake does. Translate it so
+    # agent queries like SELECT MEDIAN(SALARY) ... work against the PG backing
+    # store. Handles a single level of nested parentheses in the argument.
+    def _replace_median(m):
+        inner = m.group(1).strip()
+        return f"PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {inner})"
+    q = re.sub(
+        r"\bMEDIAN\s*\(([^()]*(?:\([^()]*\)[^()]*)*)\)",
+        _replace_median,
+        q,
+        flags=re.IGNORECASE,
+    )
+
     # ── Regular queries: DB.SCHEMA.TABLE → sf_data."DB__SCHEMA__TABLE" ─
     def _replace_ref(match):
         d, s, t = match.group(1).upper(), match.group(2).upper(), match.group(3).upper()
@@ -135,7 +149,77 @@ def _translate_query(query: str):
         _replace_ref,
         q,
     )
+
+    # ── Quote bare identifiers as uppercase to preserve Snowflake case ──
+    # Snowflake stores unquoted identifiers as uppercase; PostgreSQL folds them
+    # to lowercase. Our mock tables store columns as uppercase quoted
+    # ("ORDER_DATE"), so agent queries like `SELECT ORDER_DATE FROM ...`
+    # resolve to lowercase `order_date` in PG and fail with
+    # `column does not exist`. Wrap each remaining bare identifier as
+    # "UPPERCASE" so PG preserves the case.
+    # Run AFTER _replace_ref so three-part table refs (now sf_data."...")
+    # and the information_schema branch are not disturbed; only column /
+    # alias identifiers are folded here.
+    translated = _snowflake_fold(translated)
     return translated
+
+
+_SQL_KEYWORDS = frozenset({
+    "select", "from", "where", "group", "order", "by", "having", "limit",
+    "offset", "join", "left", "right", "inner", "outer", "on", "as", "and",
+    "or", "not", "in", "is", "null", "distinct", "union", "all", "case",
+    "when", "then", "else", "end", "count", "sum", "avg", "min", "max",
+    "round", "coalesce", "greatest", "least", "between", "like", "ilike",
+    "asc", "desc", "with", "over", "partition", "qualify", "from",
+    "cast", "extract", "date", "interval", "true", "false",
+    # PG-only schema ref produced by _replace_ref must not be re-quoted.
+    "sf_data",
+})
+
+
+def _snowflake_fold(q: str) -> str:
+    """Quote bare identifiers as uppercase to preserve Snowflake case.
+
+    Skips: already-quoted identifiers, string literals, SQL keywords, function
+    calls (identifier immediately followed by '('), and numeric literals.
+    """
+    out = []
+    i = 0
+    while i < len(q):
+        # Skip double-quoted identifiers / strings
+        if q[i] == '"':
+            j = q.index('"', i + 1) + 1 if '"' in q[i + 1:] else len(q)
+            out.append(q[i:j] if j <= len(q) else q[i:])
+            i = j
+            continue
+        # Skip single-quoted string literals
+        if q[i] == "'":
+            j = i + 1
+            while j < len(q) and q[j] != "'":
+                if q[j] == "\\" and j + 1 < len(q):
+                    j += 1
+                j += 1
+            out.append(q[i:j + 1])
+            i = j + 1
+            continue
+        # Identifier?
+        m = re.match(r'[A-Za-z_]\w*', q[i:])
+        if m:
+            word = m.group(0)
+            end = i + len(word)
+            # Skip SQL keywords
+            if word.lower() in _SQL_KEYWORDS:
+                out.append(word)
+            # Skip function calls (next non-space char is '(')
+            elif end < len(q) and q[end:].lstrip()[:1] == '(':
+                out.append(word)
+            else:
+                out.append(f'"{word.upper()}"')
+            i = end
+        else:
+            out.append(q[i])
+            i += 1
+    return ''.join(out)
 
 
 # ---------------------------------------------------------------------------

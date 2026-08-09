@@ -55,7 +55,7 @@ PG_RUNTIME_ROOT="${ENV_PG_RUNTIME_ROOT:-${PG_RUNTIME_ROOT:-/dev/shm/toolathlon_p
 PG_PORT_LEASE_ROOT="${PG_PORT_LEASE_ROOT:-/dev/shm/toolathlon_pg_port_leases_${UID}}"
 PG_TEST_ONLY="${PG_TEST_ONLY:-0}"
 INIT_SQL="${PROJECT_ROOT}/db/init.sql.gz"
-AGENT_TEMPLATE="${ENROOT_DATA_PATH}/toolathlon-pack"
+AGENT_TEMPLATE="${AGENT_TEMPLATE:-${ENROOT_DATA_PATH}/toolathlon-pack}"
 AGENT_SQSH="${TOOLATHLON_AGENT_SQSH}"
 
 # Default: only real cases containing task_config.json. This intentionally
@@ -196,7 +196,13 @@ start_isolated_pg() {
   mkdir -p "$pgdata" "$socket_dir"
   chmod 700 "$pgdata" "$socket_dir"
   if [[ ! -f "$pgdata/PG_VERSION" ]]; then
-    initdb -D "$pgdata" -U "$PGUSER" --auth-local=trust --auth-host=md5 --encoding=UTF8 --locale=C >/dev/null
+    # --auth-local=scram-sha-256 requires the superuser to have a password at
+    # initdb time; pass it via a transient pwfile (deleted right after).
+    local _pwfile; _pwfile="$(mktemp)"
+    printf '%s\n' "$PGPASSWORD" > "$_pwfile"
+    initdb -D "$pgdata" -U "$PGUSER" --pwfile="$_pwfile" \
+      --auth-local=scram-sha-256 --auth-host=md5 --encoding=UTF8 --locale=C >/dev/null
+    rm -f "$_pwfile"
     cat >>"$pgdata/postgresql.conf" <<EOF
 listen_addresses = '127.0.0.1'
 port = ${port}

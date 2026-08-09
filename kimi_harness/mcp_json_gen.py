@@ -35,6 +35,42 @@ def _resolve(value, local_servers_path: str, agent_workspace: str, task_dir: str
             .replace("${task_dir}", task_dir))
 
 
+def _uv_project_dir(args, cwd):
+    """The directory whose `.venv` uv will use.
+
+    `uv --directory <dir> run ...` uses `<dir>/.venv`; otherwise uv falls back
+    to the project root discovered from `cwd`. Returns an absolute path.
+    """
+    for i, a in enumerate(args):
+        if a == "--directory" and i + 1 < len(args):
+            return os.path.abspath(args[i + 1])
+        if isinstance(a, str) and a.startswith("--directory="):
+            return os.path.abspath(a.split("=", 1)[1])
+    return os.path.abspath(cwd)
+
+
+def _pin_uv_env(final_env, args, cwd):
+    """Force `uv run` to reuse the image-build `.venv` offline.
+
+    The eval container exports `VIRTUAL_ENV=/opt/venv`, which uv sees as
+    mismatched with each MCP server's own `.venv` and therefore *ignores* the
+    pre-synced env, triggering a full rebuild from source on every cold start.
+    Under no-egress eval containers that rebuild hangs until the MCP
+    startupTimeoutMs fires and kimi drops the server (root cause of the
+    20260807-224427 batch failing). Pin VIRTUAL_ENV at the server's own .venv
+    and lock uv to frozen+offline so it never tries to reach the network.
+    """
+    project_dir = _uv_project_dir(args, cwd)
+    venv = os.path.join(project_dir, ".venv")
+    final_env["VIRTUAL_ENV"] = venv
+    # `--frozen`/`--offline` env equivalents (uv 0.5+). Frozen = honor uv.lock
+    # as-is (no re-resolve); offline = never hit the network. Together they
+    # make `uv run` reuse the built .venv deterministically.
+    final_env["UV_FROZEN"] = "true"
+    final_env["UV_OFFLINE"] = "true"
+    return final_env
+
+
 def build_mcp_servers(
     needed_servers,
     agent_workspace: str,
@@ -98,6 +134,12 @@ def build_mcp_servers(
         for k, v in pg_bridge.items():
             if v is not None:
                 final_env[k] = v
+
+        # uv-launched MCP servers: pin to the pre-built `.venv` and forbid any
+        # network re-sync, so `uv run` reuses the image-build env deterministically.
+        # See _pin_uv_env for the VIRTUAL_ENV-mismatch root cause.
+        if command == "uv":
+            _pin_uv_env(final_env, args, cwd)
 
         timeout_s = max(float(cfg.get("client_session_timeout_seconds", 60)),
                         timeout_min_s)

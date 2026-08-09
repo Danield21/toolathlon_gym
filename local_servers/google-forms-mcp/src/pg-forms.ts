@@ -83,6 +83,34 @@ export async function addMultipleChoiceQuestion(
 }
 
 /**
+ * Add a checkbox question to a form.
+ * Inserts into gform.questions with question_type = 'choiceQuestion' and
+ * config.type = 'CHECKBOX' (Google Forms' "Select all that apply" variant).
+ */
+export async function addCheckboxQuestion(
+  formId: string,
+  questionTitle: string,
+  options: string[],
+  required: boolean = false
+) {
+  const config = {
+    type: 'CHECKBOX',
+    options: options.map((option: string) => ({ value: option })),
+  };
+  const posResult = await pool.query(
+    `SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM gform.questions WHERE form_id = $1`,
+    [formId]
+  );
+  const nextPos = posResult.rows[0].next_pos;
+  await pool.query(
+    `INSERT INTO gform.questions (form_id, title, question_type, required, config, position)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [formId, questionTitle, 'choiceQuestion', required, JSON.stringify(config), nextPos]
+  );
+  return { success: true, message: 'Checkbox question added successfully', questionTitle, options, required };
+}
+
+/**
  * Get form details including all questions.
  * Returns data shaped like the Google Forms API get response:
  *   { formId, info: { title, documentTitle, description }, items: [...], responderUri, revisionId }

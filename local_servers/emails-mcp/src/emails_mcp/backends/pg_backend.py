@@ -577,6 +577,8 @@ class PgSMTPBackend:
         cc: Optional[str] = None,
         bcc: Optional[str] = None,
         attachments: Optional[List[str]] = None,
+        from_addr: Optional[str] = None,
+        from_name: Optional[str] = None,
     ) -> tuple:
         """Compose and 'send' an email by inserting into the database.
 
@@ -584,6 +586,13 @@ class PgSMTPBackend:
             tuple[bool, Optional[str]]: (success, RFC822 message string)
         """
         self.ensure_connected()
+
+        # Resolve effective sender identity. If the caller passes explicit
+        # from_addr / from_name (e.g. the task instructs the agent to send "as"
+        # a specific persona), use those; otherwise fall back to the mailbox
+        # identity from EmailConfig.
+        effective_addr = from_addr or self.config.email
+        effective_name = from_name if from_name is not None else self.config.name
 
         try:
             # ---- Build the MIME message (for the returned RFC822 string) ----
@@ -600,11 +609,11 @@ class PgSMTPBackend:
             from email.header import Header
 
             msg["Subject"] = Header(subject, "utf-8")
-            if self.config.name:
-                encoded_name = Header(self.config.name, "utf-8")
-                msg["From"] = formataddr((str(encoded_name), self.config.email))
+            if effective_name:
+                encoded_name = Header(effective_name, "utf-8")
+                msg["From"] = formataddr((str(encoded_name), effective_addr))
             else:
-                msg["From"] = self.config.email
+                msg["From"] = effective_addr
             msg["To"] = to
             if cc:
                 msg["Cc"] = cc
@@ -620,10 +629,10 @@ class PgSMTPBackend:
                     original_msg = msg
                     msg = MIMEMultipart("mixed")
                     msg["Subject"] = Header(subject, "utf-8")
-                    if self.config.name:
-                        msg["From"] = formataddr((self.config.name, self.config.email))
+                    if effective_name:
+                        msg["From"] = formataddr((effective_name, effective_addr))
                     else:
-                        msg["From"] = self.config.email
+                        msg["From"] = effective_addr
                     msg["To"] = to
                     if cc:
                         msg["Cc"] = cc

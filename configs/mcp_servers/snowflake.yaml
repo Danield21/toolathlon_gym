@@ -25,7 +25,6 @@ params:
     - "toolathlon_gym"
     - "--schema"
     - "sf"
-    - "--allow_write"
     - "--exclude-json-results"
   env:
     PG_USER: eigent

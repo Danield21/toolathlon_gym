@@ -116,7 +116,8 @@ def register_email_tools(mcp: FastMCP, email_service: EmailService):
     
     @mcp.tool()
     async def send_email(to: str, subject: str, body: str, html_body: str = None,
-                        cc: str = None, bcc: str = None, attachments: List[str] = None) -> str:
+                        cc: str = None, bcc: str = None, attachments: List[str] = None,
+                        from_addr: str = None, from_name: str = None) -> str:
         """Send an email with optional HTML body, CC, BCC, and attachments
         
         Args:
@@ -127,6 +128,8 @@ def register_email_tools(mcp: FastMCP, email_service: EmailService):
             cc: CC recipients, comma-separated (optional)
             bcc: BCC recipients, comma-separated (optional)
             attachments: List of file paths to attach (optional)
+            from_addr: Sender email address (optional, overrides mailbox identity)
+            from_name: Sender display name (optional, overrides mailbox identity)
         """
         try:
             success = email_service.send_email(
@@ -136,7 +139,9 @@ def register_email_tools(mcp: FastMCP, email_service: EmailService):
                 html_body=html_body,
                 cc=cc,
                 bcc=bcc,
-                attachments=attachments
+                attachments=attachments,
+                from_addr=from_addr,
+                from_name=from_name,
             )
             
             if success:

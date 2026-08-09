@@ -46,6 +46,89 @@ def str_match(a, b):
     return str(a).strip().lower() == str(b).strip().lower()
 
 
+def regenerate_gt_from_pg(gt_dir, launch_time=None):
+    """Regenerate groundtruth Reading_Plan.xlsx from PG so the GT mirrors the
+    exact data the agent receives through the arxiv MCP (single source of
+    truth). Idempotent: overwrite the GT file every eval run.
+
+    This fixes the "hand-written simplified GT vs PG full data" mismatch that
+    caused 8 false-positive failures: the prior GT truncated authors, titles
+    and abstracts, so any agent that faithfully copied the MCP output was
+    penalised by strict ``str_match`` comparison.
+    """
+    conn = psycopg2.connect(**DB)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, title, authors, summary, categories, published "
+        "FROM arxiv.papers ORDER BY id"
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    paper_map = {}
+    for r in rows:
+        pid = r[0]
+        authors = r[2] if isinstance(r[2], list) else json.loads(r[2] or "[]")
+        categories = r[4] if isinstance(r[4], list) else json.loads(r[4] or "[]")
+        paper_map[pid] = {
+            "id": pid,
+            "title": r[1] or "",
+            "authors": [str(a) for a in authors],
+            "summary": r[3] or "",
+            "categories": [str(c) for c in categories],
+            "published": r[5],
+        }
+
+    wb = openpyxl.Workbook()
+
+    # Sheet 1: Papers (matches existing GT header order)
+    ws1 = wb.active
+    ws1.title = "Papers"
+    ws1.append([
+        "ArXiv_ID", "Title", "Authors", "Published_Date",
+        "Category", "Abstract_Summary", "Assigned_Session",
+    ])
+    for i, pid in enumerate(ARXIV_IDS, 1):
+        p = paper_map.get(pid)
+        if not p:
+            continue
+        published = p["published"]
+        if hasattr(published, "strftime"):
+            published_str = published.strftime("%Y-%m-%d")
+        else:
+            published_str = str(published)[:10]
+        ws1.append([
+            pid,
+            p["title"],
+            "; ".join(p["authors"]),
+            published_str,
+            ", ".join(p["categories"]),
+            p["summary"][:100],
+            i,
+        ])
+
+    # Sheet 2: Schedule (weekly sessions starting the Monday of launch week)
+    ws2 = wb.create_sheet("Schedule")
+    ws2.append(["Session_Number", "Session_Date", "Paper_Count", "Topics_Covered"])
+    from datetime import datetime as _dt, timedelta as _td
+    try:
+        ref = _dt.strptime(launch_time, "%Y-%m-%d") if launch_time else _dt(2026, 3, 9)
+    except (TypeError, ValueError):
+        ref = _dt(2026, 3, 9)
+    monday = ref - _td(days=ref.weekday())
+    for i, pid in enumerate(ARXIV_IDS):
+        p = paper_map.get(pid)
+        title = p["title"] if p else pid
+        abbreviated = title[:40] + ("..." if len(title) > 40 else "")
+        ws2.append([i + 1, (monday + _td(weeks=i)).strftime("%Y-%m-%d"), 1, abbreviated])
+
+    gt_path = os.path.join(gt_dir, "Reading_Plan.xlsx")
+    wb.save(gt_path)
+    print(f"[GT] Regenerated from PG: {gt_path}")
+    return gt_path
+
+
 def check_excel(agent_ws, groundtruth_ws="."):
     print("\n=== Check 1: Reading_Plan.xlsx ===")
     path = os.path.join(agent_ws, "Reading_Plan.xlsx")
@@ -233,6 +316,13 @@ def main():
     args = parser.parse_args()
 
     print("=== Evaluation: arxiv-reading-plan-excel-gcal-email ===")
+
+    # Regenerate GT from PG so the ground truth mirrors the data the agent sees
+    # via the arxiv MCP — eliminates the hand-written GT / PG drift.
+    try:
+        regenerate_gt_from_pg(args.groundtruth_workspace, args.launch_time)
+    except Exception as e:
+        print(f"[GT] WARNING: regenerate failed ({e}); using committed GT file")
 
     check_excel(args.agent_workspace, args.groundtruth_workspace)
     excel_failures = FAIL_COUNT  # capture failures so far (Excel only)

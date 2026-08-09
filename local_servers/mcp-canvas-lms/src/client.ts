@@ -797,6 +797,22 @@ export class CanvasClient {
     await this.client.delete(`/courses/${courseId}/quizzes/${quizId}`);
   }
 
+  /**
+   * List all quiz submissions for a quiz (teacher/admin perspective).
+   * Mirrors Canvas' `/courses/:id/quizzes/:id/submissions` GET endpoint.
+   */
+  async listQuizSubmissions(courseId: number, quizId: number): Promise<any[]> {
+    const response = await this.client.get(`/courses/${courseId}/quizzes/${quizId}/submissions`);
+    const data = response.data;
+    if (Array.isArray(data?.quiz_submissions)) {
+      return data.quiz_submissions;
+    }
+    if (Array.isArray(data)) {
+      return data;
+    }
+    return data ? [data] : [];
+  }
+
   async startQuizAttempt(courseId: number, quizId: number): Promise<QuizSubmission> {
     try {
       const response = await this.client.post(`/courses/${courseId}/quizzes/${quizId}/submissions`);
