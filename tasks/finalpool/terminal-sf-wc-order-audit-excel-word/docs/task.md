@@ -2,9 +2,9 @@ You are a financial auditor responsible for reconciling sales data between the c
 
 Start by reading the Audit_Procedures.pdf document in your workspace. It outlines the reconciliation methodology and the specific metrics you need to compute.
 
-First, query the data warehouse to get a summary of all orders. You need to group orders by their status (Delivered, Shipped, Processing, Cancelled) and calculate the total count and total revenue for each status. Also compute the overall average order value across all orders, and the total number of distinct customers.
+First, query the data warehouse to get a summary of all orders. You need to group orders by their status (Delivered, Shipped, Processing, Cancelled) and calculate the total count and total revenue for each status. Also compute the overall average order value across all orders.
 
-Next, query the online store system to retrieve all products and their details. Get the list of all orders from the store, including order totals and statuses. Also retrieve customer information from the store.
+Next, query the online store system to retrieve all products and their details. Get the list of all orders from the store, including order totals and statuses. Also retrieve customer information from the store. Note: the online store API returns results in pages of 10 by default; increase the page size (for example to 100) or paginate through every page so that you retrieve the complete set of products, orders, and customers rather than only the first 10 of each.
 
 Now write and run a Python script called audit_analysis.py in your workspace. This script should read the data from both systems (you can hardcode the values you gathered) and compute the following: the total order count from the data warehouse, the total order count from the online store, the difference between them, the average order value from each system, and a category-level revenue breakdown from the data warehouse by ship mode (Economy, Express, Next Day, Standard).
 
@@ -16,6 +16,6 @@ The second sheet should be named Store_Summary and contain columns Metric and Va
 
 The third sheet should be named ShipMode_Breakdown and contain columns Ship_Mode, Order_Count, and Total_Revenue. Include rows for Economy, Express, Next Day, and Standard shipping modes from the data warehouse.
 
-The fourth sheet should be named Reconciliation and contain columns Metric, DW_Value, Store_Value, and Difference. Include rows comparing Total Order Count, Average Order Value, and Total Revenue between the two systems. The Difference column should be the data warehouse value minus the store value.
+The fourth sheet should be named Reconciliation and contain columns Metric, DW_Value, Store_Value, and Difference. Include rows comparing Total Order Count, Average Order Value, and Total Revenue between the two systems. The Difference column should be the data warehouse value minus the store value. For the store side, Total Revenue is the sum of the order `total` field across all store orders and Average Order Value is computed across all store orders (every status), consistent with the data warehouse side, which sums revenue across all statuses including Cancelled.
 
 Finally, create a Word document called Audit_Findings.docx in your workspace. The document should have a title "Order Reconciliation Audit Report". Include a section discussing the data warehouse summary with order counts and revenue by status. Include another section on the online store summary. Add a section on the ship mode breakdown showing how revenue distributes across shipping methods. End with a reconciliation findings section that highlights the key differences between the two systems and provides recommendations for alignment.

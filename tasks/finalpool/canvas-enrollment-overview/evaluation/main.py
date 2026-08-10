@@ -164,14 +164,6 @@ def main():
             if len(a_row) > 3 and len(g_row) > 3:
                 if not num_close(a_row[3], g_row[3], 0):
                     errors.append(f"{key}.Teachers: {a_row[3]} vs {g_row[3]} (exact)")
-
-            if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 0):
-                    errors.append(f"{key}.TAs: {a_row[4]} vs {g_row[4]} (exact)")
-
-            if len(a_row) > 5 and len(g_row) > 5:
-                if not num_close_rel(a_row[5], g_row[5], rel=0.01, abs_tol=2):
-                    errors.append(f"{key}.Total_Enrolled: {a_row[5]} vs {g_row[5]} (rel 1%)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")

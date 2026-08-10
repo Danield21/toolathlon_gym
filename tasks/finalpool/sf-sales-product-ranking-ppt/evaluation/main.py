@@ -46,6 +46,35 @@ def num_close(a, b, rel_tol=0.05, abs_tol=0.5):
         return False
 
 
+def norm_name(s):
+    """Lowercase and collapse whitespace."""
+    return " ".join(str(s or "").lower().split()).rstrip(".")
+
+
+def base_name(s):
+    """Strip variable promotional suffixes (e.g. 'with No Cost EMI ...')."""
+    n = norm_name(s)
+    for sep in (" with ", " - "):
+        idx = n.find(sep)
+        if idx >= 10:
+            n = n[:idx]
+    return n.strip()
+
+
+def product_name_match(agent_name, exp_name):
+    """Relaxed name match: GT names may carry promotional suffixes that the
+    data source omits, so compare base names / prefixes instead of exact text."""
+    a = norm_name(agent_name)
+    e = norm_name(exp_name)
+    if a == e:
+        return True
+    ab, eb = base_name(a), base_name(e)
+    if len(eb) >= 10 and ab == eb:
+        return True
+    shorter, longer = (a, e) if len(a) <= len(e) else (e, a)
+    return len(shorter) >= 10 and longer.startswith(shorter)
+
+
 def get_expected_top20():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
@@ -154,7 +183,7 @@ def check_excel(agent_workspace, expected_top20, expected_cat):
 
             agent_name = str(agent_row[1] or "").strip()
             check(f"Rank {i+1} product_name matches",
-                  agent_name == exp_name,
+                  product_name_match(agent_name, exp_name),
                   f"Got '{agent_name}' vs '{exp_name}'")
             try:
                 ar = float(agent_row[3])
@@ -265,14 +294,12 @@ def check_pptx(agent_workspace, expected_top20):
 
     # Top product appears somewhere in PPTX
     if expected_top20:
-        all_text_lower = " ".join(slide_texts).lower()
-        top_name = expected_top20[0][0].lower()
-        # Match by significant prefix (full name may be too long)
-        # Use first 30 chars as anchor
-        prefix = top_name[:30]
-        check("PPTX mentions top-1 product (by name prefix)",
-              prefix in all_text_lower,
-              f"Looking for '{prefix}'")
+        all_text_norm = norm_name(" ".join(slide_texts))
+        # GT name may carry a promotional suffix; anchor on the base name
+        anchor = base_name(expected_top20[0][0])
+        check("PPTX mentions top-1 product (by base name)",
+              anchor in all_text_norm,
+              f"Looking for '{anchor}'")
 
 
 def check_gsheet(expected_top20):
@@ -332,9 +359,10 @@ def check_gsheet(expected_top20):
         first_row = grid[data_rows[0]]
         # product name is likely in col 1 (after Rank)
         candidates = [first_row.get(1), first_row.get(0), first_row.get(2)]
-        top_name = expected_top20[0][0].lower()
-        prefix = top_name[:30]
-        match = any(c and prefix in str(c).lower() for c in candidates)
+        top_name = expected_top20[0][0]
+        anchor = base_name(top_name)
+        match = any(c and (product_name_match(str(c), top_name)
+                           or anchor in norm_name(c)) for c in candidates)
         check("'Top 20' rank-1 row has top product",
               match,
               f"Got: {candidates}")

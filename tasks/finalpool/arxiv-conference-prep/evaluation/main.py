@@ -14,21 +14,24 @@ import os
 import sys
 import json
 from argparse import ArgumentParser
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import psycopg2
 from pptx import Presentation
 
-def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
-    return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
-
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
-    "dbname": "toolathlon_gym",
-    "user": "eigent",
-    "password": "camel",
+    "port": int(os.environ.get("PGPORT", "5432")),
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
+
+UTC = ZoneInfo("UTC")
+# The conference is at the San Francisco Convention Center; the conference-local
+# (America/Los_Angeles) reading of an event instant is always a valid view.
+LA = ZoneInfo("America/Los_Angeles")
 
 TARGET_PAPER_KEYWORDS = [
     "instructgpt",
@@ -37,6 +40,72 @@ TARGET_PAPER_KEYWORDS = [
     "constitutional ai",
     "direct preference optimization",
     "proximal policy optimization",
+]
+
+# The task asks to EXCLUDE non-RLHF papers such as self-play / board-game papers.
+# We only reject a deck when a slide is *dedicated* to such a noise paper
+# (see _is_dedicated_noise_slide); mentioning AlphaZero/self-play in an overview,
+# comparison, or exclusion context is legitimate and must not be penalized.
+NOISE_KEYWORDS = [
+    "alphazero",
+    "alpha zero",
+    "self-play",
+    "self play",
+    "board game",
+    "chess",
+    "shogi",
+    "go game",
+]
+
+# A slide containing any of these is treated as a context/structural slide
+# (overview, summary, comparison, exclusion, an RLHF-related slide, a
+# references/bibliography slide, a related-work slide, or an appendix/scope
+# slide), not as a dedicated noise-paper slide. The references/related-work/
+# appendix/scope entries protect legitimate slides that merely *mention* an
+# excluded paper (e.g. a References slide listing "AlphaZero: Mastering Chess
+# and Shogi by Self-Play", or a "Related Work" slide) without naming one of the
+# RLHF target papers or the generic exclusion words below.
+CONTEXT_KEYWORDS = [
+    "rlhf",
+    "reinforcement learning from human feedback",
+    "human feedback",
+    "overview",
+    "introduction",
+    "agenda",
+    "table of contents",
+    "summary",
+    "conclusion",
+    "synthesis",
+    "themes",
+    "key takeaways",
+    "comparison",
+    "contrast",
+    "exclud",
+    "filter",
+    "omitt",
+    "not include",
+    "not relevant",
+    "reference",
+    "references",
+    "bibliography",
+    "citation",
+    "citations",
+    "cited",
+    "further reading",
+    "works cited",
+    "appendix",
+    "supplement",
+    "supplementary",
+    "related work",
+    "related works",
+    "prior work",
+    "out of scope",
+    "beyond the scope",
+    "beyond scope",
+    "not discussed",
+    "not covered",
+    "did not cover",
+    "we do not cover",
 ]
 
 PASS_COUNT = 0
@@ -68,6 +137,26 @@ def slide_text(slide):
                 for cell in row.cells:
                     texts.append(cell.text)
     return " ".join(texts)
+
+
+def _is_dedicated_noise_slide(text):
+    """True only when a slide is dedicated to a non-RLHF noise paper.
+
+    A slide is flagged as a dedicated noise-paper slide only if it contains a
+    noise signature (AlphaZero / self-play / board game / chess / shogi / Go)
+    AND does NOT discuss RLHF, any target RLHF paper, or serve as an
+    overview/summary/comparison/exclusion context. This keeps the anti-check
+    aligned with the task intent ("exclude self-play board-game papers as one
+    of the RLHF papers") while not penalizing legitimate contrast mentions.
+    """
+    low = text.lower()
+    if not any(kw in low for kw in NOISE_KEYWORDS):
+        return False
+    if any(kw in low for kw in CONTEXT_KEYWORDS):
+        return False
+    if any(kw in low for kw in TARGET_PAPER_KEYWORDS):
+        return False
+    return True
 
 
 def slide_title(slide):
@@ -105,11 +194,17 @@ def check_pptx(agent_workspace):
         has_rlhf = "rlhf" in first_text or "reinforcement learning from human feedback" in first_text
         record("Title slide mentions RLHF", has_rlhf, f"First slide text: {first_text[:100]}")
 
-    # Check last slide has summary/conclusion
+    # Check a summary/conclusion slide exists anywhere in the deck. The task
+    # asks for a summary slide; it does not forbid extra trailing slides such as
+    # references / thank-you / Q&A, so we do not require it to be the last slide.
     if slides:
-        last_text = slide_text(slides[-1]).lower()
-        has_summary = any(kw in last_text for kw in ["summary", "conclusion", "themes", "synthesis"])
-        record("Last slide has summary/conclusion", has_summary, f"Last slide: {last_text[:100]}")
+        summary_keywords = ["summary", "conclusion", "themes", "synthesis"]
+        has_summary = any(
+            any(kw in slide_text(s).lower() for kw in summary_keywords)
+            for s in slides
+        )
+        record("Summary/conclusion slide present", has_summary,
+               "No slide contains summary/conclusion/themes/synthesis")
 
     # Check paper keywords appear across all slides (require 4+, tighter than prior 3+)
     all_text = " ".join(slide_text(s) for s in slides).lower()
@@ -134,13 +229,14 @@ def check_pptx(agent_workspace):
         f"Found {papers_present}/5 papers",
     )
 
-    # Anti-check: reject papers about self-play / AlphaZero / board games (task says exclude)
-    has_alphazero = "alphazero" in all_text or "alpha zero" in all_text
-    has_selfplay = "self-play" in all_text or "self play" in all_text
-    has_board = "board game" in all_text or "chess" in all_text or "go game" in all_text
-    record("No AlphaZero / self-play / board game slides",
-           not (has_alphazero or has_selfplay or has_board),
-           f"alphazero={has_alphazero}, selfplay={has_selfplay}, board={has_board}")
+    # Anti-check: reject slides *dedicated* to a non-RLHF paper (AlphaZero /
+    # self-play / board games) as required by the task. The check is per-slide
+    # and scoped so that overview / summary / comparison mentions of AlphaZero
+    # in otherwise-RLHF context are not penalized.
+    noise_slides = [s for s in slides if _is_dedicated_noise_slide(slide_text(s))]
+    record("No slide dedicated to AlphaZero / self-play / board-game paper",
+           len(noise_slides) == 0,
+           f"{len(noise_slides)} slide(s) dedicated to a non-RLHF paper")
 
 
 def check_calendar():
@@ -150,7 +246,7 @@ def check_calendar():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     cur.execute("""
-        SELECT summary, description, start_datetime, end_datetime, location
+        SELECT summary, description, start_datetime, start_timezone, end_datetime, location
         FROM gcal.events
         ORDER BY start_datetime
     """)
@@ -160,18 +256,17 @@ def check_calendar():
 
     # Look for RLHF event, prefer one matching 2026-04-10
     rlhf_candidates = []
-    for summary, description, start_dt, end_dt, *rest in events:
+    for summary, description, start_dt, start_tz, end_dt, location in events:
         summary_lower = (summary or "").lower()
         desc_lower = (description or "").lower() if description else ""
         if "rlhf" in summary_lower or "reinforcement learning" in summary_lower or "rlhf" in desc_lower:
-            location = rest[0] if rest else None
-            rlhf_candidates.append((summary, description, start_dt, end_dt, location))
+            rlhf_candidates.append((summary, description, start_dt, start_tz, end_dt, location))
 
     # Prefer a candidate that is on the target date; fall back to the first
     rlhf_event = None
     for cand in rlhf_candidates:
-        _, _, sdt, _, _ = cand
-        if sdt is not None and sdt.strftime("%Y-%m-%d") == "2026-04-10":
+        _, _, sdt, _, _, _ = cand
+        if sdt is not None and sdt.astimezone(UTC).strftime("%Y-%m-%d") == "2026-04-10":
             rlhf_event = cand
             break
     if rlhf_event is None and rlhf_candidates:
@@ -184,22 +279,64 @@ def check_calendar():
     # If a candidate event exists, become blocking (wrong-date/wrong-location shouldn't pass).
     # Full absence is still runtime_only (GT self-test).
     if rlhf_event:
-        summary, description, start_dt, end_dt, location = rlhf_event
+        summary, description, start_dt, start_tz, end_dt, location = rlhf_event
         if start_dt is not None:
-            start_date_str = start_dt.strftime("%Y-%m-%d")
-            record("Calendar event on 2026-04-10", start_date_str == "2026-04-10",
-                   f"Event date is {start_date_str}")
+            # Guard against naive datetimes (should not happen for timestamptz,
+            # but be defensive): treat a missing tzinfo as UTC.
+            if start_dt.tzinfo is None:
+                start_dt = start_dt.replace(tzinfo=UTC)
 
-            # Duration 8 hours (9-17)
+            # The conference is in San Francisco. When the agent recorded a
+            # timezone on the event, respect it; otherwise assume the conference
+            # local timezone.
+            ref_tz = UTC
+            if start_tz:
+                try:
+                    ref_tz = ZoneInfo(start_tz)
+                except (ZoneInfoNotFoundError, ValueError):
+                    ref_tz = UTC
+
+            # Four interpretations of the same instant, so the evaluation is
+            # robust to (i) agents that correctly write SF-local time with an
+            # RFC3339 offset but omit the optional timeZone field (in which case
+            # start_timezone is NULL and we fall back to UTC), (ii) agents that
+            # write naive or 'Z' datetimes (which PostgreSQL parses in the
+            # session timezone), (iii) the session timezone of the judge's own
+            # postgres connection, and (iv) the conference-local (San
+            # Francisco) reading, which is always a valid interpretation since
+            # the event's location is the San Francisco Convention Center.
+            local_dt = start_dt.astimezone(ref_tz)   # event/declared timezone
+            utc_dt = start_dt.astimezone(UTC)        # UTC reading
+            sess_dt = start_dt                        # session wall clock
+            sf_dt = start_dt.astimezone(LA)          # conference-local reading
+
+            def _is_target(dt):
+                return dt.strftime("%Y-%m-%d") == "2026-04-10" and dt.hour == 9
+
+            date_ok = any(
+                dt.strftime("%Y-%m-%d") == "2026-04-10"
+                for dt in (sess_dt, local_dt, utc_dt, sf_dt)
+            )
+            record("Calendar event on 2026-04-10", date_ok,
+                   f"Session {sess_dt.strftime('%Y-%m-%d %H:%M')}, "
+                   f"SF {sf_dt.strftime('%Y-%m-%d %H:%M')}, "
+                   f"local {local_dt.strftime('%Y-%m-%d %H:%M')}, "
+                   f"UTC {utc_dt.strftime('%Y-%m-%d %H:%M')}")
+
+            # Duration 8 hours (9-17); duration is timezone-invariant.
             if end_dt:
                 duration_hours = (end_dt - start_dt).total_seconds() / 3600
                 record("Event duration exactly 8 hours", abs(duration_hours - 8.0) <= 0.25,
                        f"Got {duration_hours} hours")
 
-            # Check start time is 9:00 (task says 9am-5pm)
-            start_hour = start_dt.hour
-            record("Event starts at 9:00", start_hour == 9,
-                   f"Got hour {start_hour}")
+            # Start time 9:00 (task says 9am-5pm). Accept 9:00 on 2026-04-10 in
+            # ANY of the four interpretations above.
+            record("Event starts at 9:00",
+                   any(_is_target(dt) for dt in (sess_dt, local_dt, utc_dt, sf_dt)),
+                   f"Session {sess_dt.strftime('%Y-%m-%d %H:%M')}, "
+                   f"SF {sf_dt.strftime('%Y-%m-%d %H:%M')}, "
+                   f"local {local_dt.strftime('%Y-%m-%d %H:%M')}, "
+                   f"UTC {utc_dt.strftime('%Y-%m-%d %H:%M')}")
         else:
             record("Calendar event on 2026-04-10", False, "start_datetime is NULL")
 
@@ -274,9 +411,21 @@ def check_email():
                "collaborators@rlhf-lab.org" in primary_recipient,
                f"Primary: {primary_recipient}")
 
-        # Check body mentions conference date
+        # Check body mentions conference date. Accept the task's own phrasing
+        # ("April 10, 2026") plus common compact/alternate formats a correct
+        # agent might use ("April 10th", "Apr 10", "2026-04-10", "4/10/2026",
+        # "10 April").
         body_lower = (body_text or "").lower()
-        has_date = "april 10" in body_lower or "2026-04-10" in body_lower or "april 10, 2026" in body_lower
+        date_forms = [
+            "april 10",
+            "2026-04-10",
+            "10 april",
+            "apr 10",
+            "4/10/2026",
+            "4-10-2026",
+            "04/10/2026",
+        ]
+        has_date = any(form in body_lower for form in date_forms)
         record("Email body mentions conference date", has_date,
                "Date not found in email body")
         # Check body mentions location (per task)

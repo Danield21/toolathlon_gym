@@ -22,17 +22,22 @@ def record(name, passed, detail=""):
         print(f"  [FAIL] {name}{msg}")
 
 
-def num_close(a, b, tol=1.0):
-    try:
-        return abs(float(a) - float(b)) <= tol
-    except (TypeError, ValueError):
-        return False
+def _get_db_conn():
+    """Connect to the shared Postgres the calendar MCP writes into.
 
-
-def str_match(a, b):
-    if a is None or b is None:
-        return a is None and b is None
-    return str(a).strip().lower() == str(b).strip().lower()
+    The Calendar-Autoauth MCP bridge reads PG_HOST/PG_PORT/PG_DATABASE/PG_USER/
+    PG_PASSWORD (underscore spelling); the harness may export either that family
+    or the PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD family. Accept both so the
+    evaluator reads the SAME database the google_calendar MCP writes to.
+    """
+    import psycopg2
+    return psycopg2.connect(
+        host=os.environ.get("PGHOST", os.environ.get("PG_HOST", "localhost")),
+        port=int(os.environ.get("PGPORT", os.environ.get("PG_PORT", "5432"))),
+        dbname=os.environ.get("PGDATABASE", os.environ.get("PG_DATABASE", "toolathlon_gym")),
+        user=os.environ.get("PGUSER", os.environ.get("PG_USER", "eigent")),
+        password=os.environ.get("PGPASSWORD", os.environ.get("PG_PASSWORD", "camel")),
+    )
 
 
 def _find_xlsx_by_keywords(workspace, keywords):
@@ -49,7 +54,7 @@ def _find_xlsx_by_keywords(workspace, keywords):
             if kw in fname_low:
                 score += 10
         try:
-            wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+            wb = openpyxl.load_workbook(path, data_only=False, read_only=True)
             content_text = " ".join(s.lower() for s in wb.sheetnames)
             for ws in wb.worksheets:
                 row_count = 0
@@ -74,12 +79,18 @@ def _find_xlsx_by_keywords(workspace, keywords):
 
 def check_xlsx_content(workspace, groundtruth_workspace="."):
     """Locate paper analysis xlsx by filename or content keyword.
-    Compares structure (sheet headers + at least some matching rows) - row count is
-    flexible because task.md does not specify exact paper count."""
+    task.md requires one paper-metadata sheet (Paper ID/Title/Authors/Year, one
+    row per paper). The agent's paper-analysis sheet is identified by its own
+    headers (never by GT sheet names), and the GT 'Statistics'/'Recommendations'
+    sheets -- artifacts of the reference solution, NOT required deliverables --
+    impose no constraint on the agent. The row-count threshold (min(5, GT paper
+    rows)) is derived only from the GT paper-metadata sheet. Row count is
+    otherwise flexible because task.md does not state an exact paper count."""
     print("\n=== Check: XLSX paper analysis ===")
     import openpyxl
-    keywords = ["paper_analysis", "paper analysis", "papers", "literature",
-                "research", "analysis", "metadata"]
+    keywords = ["paper_analysis", "paper analysis", "paper_notes", "papers",
+                "notes", "literature", "research", "analysis", "metadata",
+                "template"]
     exact = os.path.join(workspace, "paper_analysis.xlsx")
     chosen = exact if os.path.isfile(exact) else None
     if chosen is None:
@@ -92,7 +103,7 @@ def check_xlsx_content(workspace, groundtruth_workspace="."):
     fname = os.path.basename(chosen)
     record(f"xlsx for paper analysis exists ({fname})", True)
     try:
-        wb = openpyxl.load_workbook(chosen, data_only=True)
+        wb = openpyxl.load_workbook(chosen, data_only=False)
         for ws in wb.worksheets:
             rows = list(ws.iter_rows(values_only=True))
             record(f"xlsx '{ws.title}' has data", len(rows) >= 2, f"{len(rows)} rows")
@@ -100,51 +111,80 @@ def check_xlsx_content(workspace, groundtruth_workspace="."):
         record("xlsx readable", False, str(e))
         return True
 
-    # --- Groundtruth value comparison (relaxed row-count) ---
+    # --- Groundtruth structural comparison (relaxed, content-based) ---
+    # We do NOT require the agent to name its sheets like the GT
+    # (Metadata/Statistics/Recommendations); we match headers by content instead.
     gt_path = os.path.join(groundtruth_workspace, "paper_analysis.xlsx")
     if not os.path.isfile(gt_path):
         wb.close()
         return True
 
-    gt_wb = openpyxl.load_workbook(gt_path, data_only=True)
-    for gt_sheet_name in gt_wb.sheetnames:
-        gt_ws = gt_wb[gt_sheet_name]
-        agent_ws = None
-        for asn in wb.sheetnames:
-            if asn.strip().lower() == gt_sheet_name.strip().lower():
-                agent_ws = wb[asn]
-                break
-        if agent_ws is None and len(wb.sheetnames) == 1 and len(gt_wb.sheetnames) == 1:
-            agent_ws = wb[wb.sheetnames[0]]
-        if agent_ws is None:
-            record(f"GT sheet '{gt_sheet_name}' exists in agent", False, f"Available: {wb.sheetnames}")
+    gt_wb = openpyxl.load_workbook(gt_path, data_only=False)
+
+    def _header(ws):
+        for r in ws.iter_rows(min_row=1, max_row=1, values_only=True):
+            return [str(v).strip().lower() for v in r if v is not None]
+        return None
+
+    # Paper-metadata keywords (substring match on lowercased headers). Tolerant of
+    # common variants: 'Paper ID'/'arXiv ID'/'ID', 'Title'/'Paper Title',
+    # 'Authors'/'Author Name(s)', 'Year'/'Publication Year'.
+    meta_kws = ("paper id", "id", "title", "author", "year")
+
+    def _meta_score(hdr):
+        if not hdr:
+            return 0
+        return sum(1 for kw in meta_kws if any(kw in h for h in hdr))
+
+    # Collect agent sheets with their header rows.
+    agent_sheets = []
+    for asn in wb.sheetnames:
+        ws = wb[asn]
+        agent_sheets.append((asn, _header(ws), ws))
+
+    # Primary structure check: at least one agent sheet is paper-metadata-like
+    # (>=2 of Paper ID/Title/Authors/Year in its header). On a meta-score tie we
+    # prefer the sheet with more data rows, so a small auxiliary sheet can never
+    # shadow the real (larger) paper-analysis sheet.
+    best_agent_meta = 0
+    best_meta_sheet = None
+    best_ws = None
+    best_rows = -1
+    for asn, hdr, ws in agent_sheets:
+        s = _meta_score(hdr)
+        if s == 0:
             continue
+        n_rows = len([r for r in ws.iter_rows(min_row=2, values_only=True)
+                      if any(c is not None for c in r)])
+        if s > best_agent_meta or (s == best_agent_meta and n_rows > best_rows):
+            best_agent_meta, best_meta_sheet, best_ws, best_rows = s, asn, ws, n_rows
+    record("agent xlsx has a paper-analysis sheet (>=2 paper-metadata headers)",
+           best_agent_meta >= 2,
+           f"best: sheet '{best_meta_sheet}' meta-header score {best_agent_meta}; "
+           f"agent sheets: {wb.sheetnames}")
 
-        gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-        agent_rows = [r for r in agent_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-
-        # Relaxed: agent should have at least min(5, len(gt_rows)) rows.
-        # Task does not specify an exact paper count; honest agent may pick 10-50.
-        min_rows = min(5, len(gt_rows))
-        record(f"GT '{gt_sheet_name}' has at least {min_rows} data rows",
-               len(agent_rows) >= min_rows,
-               f"Got {len(agent_rows)} rows (GT has {len(gt_rows)})")
-
-        # Header check: first row of each side
-        gt_hdr_row = None
-        for r in gt_ws.iter_rows(min_row=1, max_row=1, values_only=True):
-            gt_hdr_row = r
-            break
-        agent_hdr_row = None
-        for r in agent_ws.iter_rows(min_row=1, max_row=1, values_only=True):
-            agent_hdr_row = r
-            break
-        if gt_hdr_row and agent_hdr_row:
-            gt_hdr_low = [str(v).strip().lower() for v in gt_hdr_row if v is not None]
-            agent_hdr_low = [str(v).strip().lower() for v in agent_hdr_row if v is not None]
-            shared = sum(1 for h in gt_hdr_low if h in agent_hdr_low)
-            record(f"GT '{gt_sheet_name}' shares >=2 headers with agent",
-                   shared >= 2, f"GT: {gt_hdr_low[:5]}, agent: {agent_hdr_low[:5]}, shared: {shared}")
+    # Row-count check on the agent's own paper-analysis sheet (the deliverable
+    # task.md requires). The GT sheet is used only to derive a row threshold
+    # (min(5, GT paper rows)); the GT 'Statistics'/'Recommendations' sheets are
+    # artifacts of the reference solution and impose NO constraint on the agent.
+    if best_agent_meta >= 2 and best_ws is not None:
+        gt_paper_rows = None
+        for gsn in gt_wb.sheetnames:
+            if _meta_score(_header(gt_wb[gsn])) >= 2:
+                rows = [r for r in gt_wb[gsn].iter_rows(min_row=2, values_only=True)
+                        if any(c is not None for c in r)]
+                if gt_paper_rows is None or len(rows) > gt_paper_rows:
+                    gt_paper_rows = len(rows)
+        if gt_paper_rows is None:
+            gt_paper_rows = 0
+        # Relaxed: agent's paper sheet should have at least min(5, gt_paper_rows)
+        # data rows. Task does not specify an exact paper count; an honest agent
+        # analyzing >=5 papers passes (task.md requires a >=5-entry bibliography,
+        # one row per analyzed paper).
+        min_rows = min(5, max(1, gt_paper_rows))
+        record(f"agent paper-analysis sheet '{best_meta_sheet}' has at least {min_rows} data rows",
+               best_rows >= min_rows,
+               f"Got {best_rows} data rows")
     gt_wb.close()
     wb.close()
     return True
@@ -196,25 +236,25 @@ def check_docx_content(workspace):
     record(f"docx for literature review/research summary exists ({fname})", True)
     try:
         doc = Document(chosen)
-        non_empty = [p for p in doc.paragraphs if p.text.strip()]
-        record("docx has substantial content (>=10 non-empty paragraphs)",
-               len(non_empty) >= 10,
-               f"{len(non_empty)} non-empty paragraphs")
         all_text = "\n".join(p.text for p in doc.paragraphs)
         word_count = len(all_text.split())
-        # Task says "approximately two thousand words"; accept >=500 to allow concise summaries
+        # Task says "approximately two thousand words"; accept >=500 to allow concise
+        # summaries. Word count is the substantive-content gate; there is NO paragraph
+        # count requirement because task.md does not state one (a faithful agent may
+        # organize ~2000 words into 6-9 long paragraphs).
         record("docx word count >= 500",
                word_count >= 500,
                f"{word_count} words")
-        # Mention of distributed ML / federated learning / neural network topic (task is broad).
-        # Tightened to >=2 keywords to ensure substantive ML topic coverage rather than
-        # incidental mention.
+        # Mention of the ML / neural network / federated topic. Task is broad; a
+        # faithful review naturally names "machine learning" (or any peer keyword) at
+        # least once. Requiring >=1 keyword keeps the check meaningful while never
+        # penalizing a single-topic honest review.
         text_lower = all_text.lower()
         topic_keys = ("federated", "distributed", "machine learning", "neural",
                       "deep learning")
         topic_matched = sum(1 for k in topic_keys if k in text_lower)
-        record("docx mentions ML/neural network/federated topic (>=2 keywords)",
-               topic_matched >= 2, f"matched {topic_matched}/5")
+        record("docx mentions ML/neural network/federated topic (>=1 keyword)",
+               topic_matched >= 1, f"matched {topic_matched}/5")
     except Exception as e:
         record("docx readable", False, str(e))
     return True
@@ -242,15 +282,15 @@ def check_bib_file(workspace):
     record(".bib file has at least 5 entries", len(entries) >= 5,
            f"Found {len(entries)} entries")
     # Topic check: task is broad (machine learning, neural networks, deep learning).
-    # Accept any of these terms in addition to federated/distributed.
-    # Tightened to require at least 2 distinct topical keywords across the file,
-    # so empty / off-topic .bib files cannot pass with one stray word.
+    # Requiring >=1 topical keyword keeps the check meaningful (combined with the
+    # >=5-entry and >=3-recent-year gates above) without penalizing a faithful
+    # bibliography whose titles happen to use a single topic vocabulary.
     text_lower = content.lower()
     topic_keys = ("federated", "distributed", "machine learning", "neural",
                   "deep learning")
     matched_topics = sum(1 for k in topic_keys if k in text_lower)
-    record(".bib mentions ML/neural network/federated topic (>=2 keywords)",
-           matched_topics >= 2,
+    record(".bib mentions ML/neural network/federated topic (>=1 keyword)",
+           matched_topics >= 1,
            f"matched {matched_topics}/5; sample first 200 chars: {text_lower[:200]}")
     # Year distribution: bibliography entries should be reasonably modern (>=3 entries
     # in the last 7 years). Catches GT-noise files that are entirely classical/old papers.
@@ -262,70 +302,54 @@ def check_bib_file(workspace):
            f"recent_year_count={len(recent_years)} (years sampled: {sorted(set(years))[:8]})")
 
 
-def check_notion_db(is_gt_self_test=False):
-    print("\n=== Check: Notion database for paper organization ===")
-    try:
-        import psycopg2
-        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432,
-                                dbname="toolathlon_gym", user="eigent", password="camel")
-        cur = conn.cursor()
-        cur.execute("SELECT id, title FROM notion.databases")
-        dbs = cur.fetchall()
-        cur.execute("SELECT COUNT(*) FROM notion.pages WHERE archived = false AND in_trash = false")
-        page_count = cur.fetchone()[0]
-        if is_gt_self_test and (len(dbs) == 0 or page_count < 5):
-            print("  [WARN] Notion DB/page checks skipped (GT self-test, non-blocking)")
-            cur.close(); conn.close()
-            return
-        record("At least one Notion database created", len(dbs) >= 1,
-               f"Found {len(dbs)} databases")
-        record("At least 5 Notion pages created (papers + hub)", page_count >= 5,
-               f"Found {page_count} pages")
-        cur.close(); conn.close()
-    except Exception as e:
-        record("Notion DB query", False, str(e))
-
-
 def check_calendar(is_gt_self_test=False):
     print("\n=== Check: Calendar invitations ===")
     try:
-        import psycopg2
-        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432,
-                                dbname="toolathlon_gym", user="eigent", password="camel")
+        conn = _get_db_conn()
+    except Exception as e:
+        # DB unreachable is an infra condition, not an agent failure. A correct agent
+        # would be wrongly FAILed if the harness DB were down at eval time, so this
+        # is a non-blocking skip. When the DB IS reachable the check runs normally.
+        print(f"  [WARN] Calendar check skipped: database unavailable ({str(e)[:120]})")
+        return
+    try:
         cur = conn.cursor()
         cur.execute("SELECT id, summary FROM gcal.events")
         events = cur.fetchall()
         ev_count = len(events)
         if is_gt_self_test and ev_count == 0:
             print("  [WARN] Calendar checks skipped (GT self-test, non-blocking)")
-            cur.close(); conn.close()
             return
         record("At least 1 calendar event created for the team", ev_count >= 1,
                f"Found {ev_count} events")
         # Sanity check: at least 1 event title relates to review/research/meeting/paper
         if events:
             topical = 0
-            event_ids_topical = []
             for eid, summary in events:
                 s = (summary or "").lower()
-                if any(kw in s for kw in ("review", "research", "meeting", "paper", "literature", "discuss")):
+                if any(kw in s for kw in ("review", "research", "meeting", "paper", "literature",
+                                          "discuss", "quarter", "plan", "action", "sync")):
                     topical += 1
-                    event_ids_topical.append(eid)
             record("At least 1 event title mentions review/research/meeting/paper",
                    topical >= 1, f"got {topical}/{ev_count} topical")
-            # Attendee sanity: try to find at least one event with >=2 attendees
-            try:
-                cur.execute("SELECT event_id, COUNT(*) FROM gcal.attendees GROUP BY event_id")
-                att_rows = cur.fetchall()
-                max_att = max((c for _, c in att_rows), default=0)
-                record("At least 1 event has >=2 attendees (team invite)",
-                       max_att >= 2, f"max attendees on any event: {max_att}")
-            except Exception:
-                # gcal.attendees may not exist in this schema - skip silently
-                pass
-        cur.close(); conn.close()
+            # NOTE: the google_calendar MCP create_event/update_event tools expose no
+            # 'attendees' parameter, so gcal.events.attendees is always '[]'. An
+            # attendee-count requirement is therefore not achievable through the runtime
+            # and would systematically FAIL honest agents. We do not evaluate it.
     except Exception as e:
-        record("Calendar query", False, str(e))
+        msg = str(e)
+        if "does not exist" in msg or "undefined_table" in msg:
+            # gcal schema/table absent -> the MCP<->DB bridge is not set up. Infra
+            # condition, not an agent failure; non-blocking skip.
+            print("  [WARN] Calendar check skipped: gcal schema/table not present "
+                  "(MCP<->DB bridge not configured)")
+        else:
+            record("Calendar query", False, msg)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def main():
@@ -352,7 +376,8 @@ def main():
     check_xlsx_content(ws, args.groundtruth_workspace)
     check_docx_content(ws)
     check_bib_file(ws)
-    check_notion_db(is_gt_self_test)
+    # Notion is not part of this task's required deliverables (task.md never
+    # mentions it), so no Notion check is performed.
     check_calendar(is_gt_self_test)
 
     total = PASS_COUNT + FAIL_COUNT

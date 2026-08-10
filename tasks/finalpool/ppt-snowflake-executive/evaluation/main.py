@@ -8,7 +8,15 @@ then checks agent output files for correctness.
 from argparse import ArgumentParser
 import sys
 import os
+import re
 from pathlib import Path
+
+
+def _norm_num(s):
+    """Reduce a number/string to a canonical form by stripping thousands
+    separators, currency symbols, and spaces. Lets '2,579', '$411,857.18',
+    and '411 857' all be compared against plain '2579' / '411857.18'."""
+    return re.sub(r"[\s,$€£¥]", "", str(s))
 
 
 def get_expected_data():
@@ -217,17 +225,21 @@ def check_pptx(workspace, regions, total_orders, total_revenue):
     print(f"  [PASS] {region_slides_ok}/5 region slides have unique region coverage")
 
     # Check total orders and revenue appear in the summary
-    # Look in last few slides for totals
+    # Look in last few slides for totals. Normalize away thousands separators,
+    # currency symbols, and spaces so "2,579" / "$411,857.18" / "411 857" match.
     found_total_orders = False
     found_total_revenue = False
+    orders_candidates = [str(total_orders), f"{total_orders:,}"]
+    rev_candidates = [
+        f"{total_revenue:,.2f}", f"{total_revenue:,.0f}",
+        f"{total_revenue:.2f}", f"{total_revenue:.0f}",
+        f"{total_revenue:,.1f}",
+    ]
     for slide_text in all_text[-3:]:
-        if str(total_orders) in slide_text:
+        norm_slide = _norm_num(slide_text)
+        if any(_norm_num(c) in norm_slide for c in orders_candidates):
             found_total_orders = True
-        # Check revenue - try various formats
-        rev_str = f"{total_revenue:,.2f}"
-        rev_str_nodec = f"{total_revenue:,.0f}"
-        rev_str_plain = f"{total_revenue:.2f}"
-        if any(s in slide_text for s in [rev_str, rev_str_nodec, rev_str_plain]):
+        if any(_norm_num(c) in norm_slide for c in rev_candidates):
             found_total_revenue = True
 
     if not found_total_orders:
@@ -239,8 +251,10 @@ def check_pptx(workspace, regions, total_orders, total_revenue):
     return True, "PPTX file checks passed"
 
 
-def check_pdf(workspace):
-    """Check Q4_Executive_Briefing.pdf exists and has reasonable size."""
+def check_pdf(workspace, total_orders, total_revenue):
+    """Check Q4_Executive_Briefing.pdf exists and carries Q4 content (not just a
+    placeholder). A real PDF-to-PDF export of the briefing must mention Q4 and the
+    total revenue; a blank/reportlab placeholder would fail here."""
     pdf_path = Path(workspace) / "Q4_Executive_Briefing.pdf"
     if not pdf_path.exists():
         return False, f"Q4_Executive_Briefing.pdf not found in {workspace}"
@@ -249,7 +263,43 @@ def check_pdf(workspace):
     if size < 1024:
         return False, f"PDF file too small ({size} bytes), likely invalid"
 
-    print(f"  [PASS] PDF exists, size={size} bytes")
+    # Extract text. Require a PDF reader so a non-text placeholder cannot pass.
+    text = ""
+    reader_ok = False
+    try:
+        import PyPDF2
+        with open(pdf_path, "rb") as f:
+            reader = PyPDF2.PdfReader(f)
+            for page in reader.pages:
+                text += page.extract_text() or ""
+        reader_ok = True
+    except ImportError:
+        try:
+            import pdfplumber
+            with pdfplumber.open(pdf_path) as p:
+                for page in p.pages:
+                    text += page.extract_text() or ""
+            reader_ok = True
+        except ImportError:
+            pass
+    if not reader_ok:
+        return False, "No PDF reader library (PyPDF2/pdfplumber) available in eval env"
+    if not text.strip():
+        return False, "PDF contains no extractable text (possible placeholder)"
+
+    text_norm = _norm_num(text).lower()
+    has_q4 = "q4" in text_norm or "quarter 4" in text_norm or "q42024" in text_norm or ("2024" in text_norm and "quarter" in text_norm)
+    if not has_q4:
+        return False, "PDF text does not reference Q4 / fourth quarter 2024"
+
+    # Total revenue must appear (tolerant to formatting via _norm_num).
+    rev_canon = _norm_num(f"{total_revenue:.2f}")
+    nums = re.findall(r"\d+(?:\.\d+)?", text_norm)
+    rev_hit = any(abs(float(n) - total_revenue) < max(10.0, total_revenue * 0.01) for n in nums)
+    if not rev_hit:
+        return False, f"PDF text does not mention total revenue (~${total_revenue:,.2f})"
+
+    print(f"  [PASS] PDF exists (size={size}) and references Q4 totals")
     return True, "PDF file check passed"
 
 
@@ -306,7 +356,7 @@ if __name__ == "__main__":
     # Check PDF
     print("\n--- Check 3: PDF File ---")
     try:
-        ok, msg = check_pdf(workspace)
+        ok, msg = check_pdf(workspace, total_orders, total_revenue)
         if not ok:
             print(f"  [FAIL] {msg}")
             all_passed = False

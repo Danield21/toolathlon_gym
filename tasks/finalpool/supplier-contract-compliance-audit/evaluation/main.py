@@ -9,6 +9,7 @@ Verifies the agent produced concrete supplier compliance audit deliverables:
   - Calendar meetings with under-performing suppliers
 """
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -17,10 +18,10 @@ import psycopg2
 
 DB = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
-    "dbname": "toolathlon_gym",
-    "user": "eigent",
-    "password": "camel",
+    "port": int(os.environ.get("PGPORT", "5432")),
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 PASS_COUNT = 0
@@ -38,17 +39,155 @@ def record(name, passed, detail=""):
         print(f"  [FAIL] {name}{msg}")
 
 
-def num_close(a, b, tol=1.0):
+def _to_float(v):
+    """Robustly coerce a value to float, or None if not parseable.
+
+    Handles int/float, None, and strings with thousands separators, currency
+    symbols ($, ¥, €), percent signs, and surrounding whitespace.
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    for ch in (",", "$", "¥", "€", "%", " "):
+        s = s.replace(ch, "")
     try:
-        return abs(float(a) - float(b)) <= tol
-    except (TypeError, ValueError):
-        return False
+        return float(s)
+    except ValueError:
+        return None
+
+
+def num_close(a, b, tol=1.0):
+    fa, fb = _to_float(a), _to_float(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= tol
+    # One side not numeric: fall back to case-insensitive string comparison
+    if a is None or b is None:
+        return a is None and b is None
+    return str(a).strip().lower() == str(b).strip().lower()
 
 
 def str_match(a, b):
     if a is None or b is None:
         return a is None and b is None
     return str(a).strip().lower() == str(b).strip().lower()
+
+
+# Distinctive case-insensitive tokens that identify a supplier. A correct
+# deliverable may refer to "TechServices" or "Consulting Group" instead of
+# the exact full name in supplier_list.csv, so matching must accept these.
+SUPPLIER_TOKENS = {
+    "TechServices Inc": ["techservices", "tech services"],
+    "Global Logistics": ["global logistics"],
+    "Quality Manufacturing": ["quality manufacturing"],
+    "Consulting Group Ltd": ["consulting group", "consulting group ltd"],
+    "Support Solutions": ["support solutions"],
+}
+
+
+def _supplier_tokens(supplier):
+    return SUPPLIER_TOKENS.get(supplier, [supplier.lower()])
+
+
+def _supplier_mentioned(text_lower, supplier):
+    return any(tok in text_lower for tok in _supplier_tokens(supplier))
+
+
+def _mentioned_suppliers(text_lower):
+    return {s for s in SUPPLIERS if _supplier_mentioned(text_lower, s)}
+
+
+# The GT column labels are not fully derivable from task.md (e.g. the task's
+# phase-2/4 dimensions differ from "Scope Clarity"/"IP Rights"/...), so the
+# xlsx column check must accept reasonable synonyms rather than byte-equal
+# GT headers.
+#   - compliance_assessment.xlsx: only the supplier identity and an overall
+#     score column are mandated; dimension names are free-form.
+#   - corrective_actions.xlsx: all seven columns are explicitly listed in the
+#     task wording, so each must appear under some reasonable label.
+COLUMN_ALIASES = {
+    "assessment": {
+        "supplier": ["supplier", "vendor", "company", "provider"],
+        # Identifies the overall-score column. Dimension columns named
+        # "SLA Score" etc. are excluded here on purpose (see _is_score_col).
+        "score": ["overall", "compliance", "rating", "grade", "total"],
+    },
+    "actions": {
+        "supplier": ["supplier", "vendor", "company", "provider"],
+        "issue": ["issue", "finding", "problem", "non-compliance",
+                  "noncompliance", "non compliance", "gap"],
+        "required action": ["action", "remediation", "remedial"],
+        "owner": ["owner", "responsible", "assignee", "accountable", "point of contact"],
+        "target date": ["target date", "date", "deadline", "due"],
+        "est. cost": ["cost", "expense", "amount", "estimate", "budget"],
+        "status": ["status", "state", "progress"],
+    },
+}
+
+
+def _header_has(hdr_low, aliases):
+    return any(a in hdr_low for a in aliases)
+
+
+def _is_supplier_col(h):
+    return _header_has(h, COLUMN_ALIASES["assessment"]["supplier"])
+
+
+def _is_score_col(h):
+    hl = h.strip().lower()
+    if _header_has(h, COLUMN_ALIASES["assessment"]["score"]):
+        return True
+    # A bare "Score"/"Overall Score" column is the overall-score column; a
+    # dimension column is usually qualified ("SLA Score"), which is handled
+    # by the aliases above (it won't contain overall/compliance/rating/...).
+    return hl in ("score", "overall score", "total score", "final score")
+
+
+def _docx_text(doc):
+    """Full document text, including table cell content (python-docx
+    paragraphs alone miss text stored inside tables)."""
+    parts = [p.text for p in doc.paragraphs]
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                if cell.text:
+                    parts.append(cell.text)
+    return "\n".join(parts)
+
+
+def _launch_window(launch_time):
+    """Return a datetime marking the earliest acceptable entry for this run,
+    or None when launch_time is unavailable/unparseable (fall back to a full
+    table scan, preserving the old behaviour)."""
+    if not launch_time:
+        return None
+    s = str(launch_time).strip().strip('"')
+    if not s:
+        return None
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S %A",       # harness default, e.g. '2026-08-07 10:00:00 Thursday'
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            dt = datetime.datetime.strptime(s, fmt)
+            break
+        except ValueError:
+            continue
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    # Generous margin absorbs timezone ambiguity and clock skew so all
+    # entries created during the run are kept while clearly-stale leftovers
+    # from other tasks are excluded.
+    return dt - datetime.timedelta(days=1)
 
 
 # Suppliers from initial_workspace/supplier_list.csv (kept stable for audit topic)
@@ -89,7 +228,7 @@ def _find_xlsx_by_keywords(workspace, keywords, exclude=None,
             if ak in fname_low:
                 score -= 5
         try:
-            wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+            wb = openpyxl.load_workbook(path, data_only=False, read_only=True)
             content_text = " ".join(s.lower() for s in wb.sheetnames)
             for ws in wb.worksheets:
                 row_count = 0
@@ -112,6 +251,37 @@ def _find_xlsx_by_keywords(workspace, keywords, exclude=None,
     return [p for _, p in scored]
 
 
+def _resolve_deliverable(workspace, gt_fname, find_fn, keywords, anti_keywords,
+                         used_paths, glob_pattern):
+    """Resolve the file for a deliverable target with decreasing strictness:
+    1) exact GT filename, 2) best keyword match not already used,
+    3) best keyword match with reuse allowed (a single merged file can cover
+    several targets), 4) any file of the type.
+    Content checks later still gate quality, so these permissive fallbacks
+    only broaden *existence* detection and never let an unrelated file pass
+    on content.
+    """
+    exact = os.path.join(workspace, gt_fname)
+    if os.path.isfile(exact):
+        return exact
+    cands = find_fn(workspace, keywords, anti_keywords=anti_keywords)
+    for c in cands:
+        if c not in used_paths:
+            return c
+    if cands:
+        return cands[0]
+    import glob
+    any_files = sorted(glob.glob(os.path.join(workspace, glob_pattern)))
+    for p in any_files:
+        base = os.path.basename(p)
+        if base.startswith("~$") or base.startswith("."):
+            continue
+        # Last resort allows reuse of an already-picked file: content checks
+        # later still gate quality, so this only broadens existence detection.
+        return p
+    return None
+
+
 def check_xlsx_content(workspace, gt_workspace="."):
     """Locate compliance_assessment + corrective_actions xlsx by filename or content."""
     print("\n=== Check: XLSX files ===")
@@ -130,15 +300,9 @@ def check_xlsx_content(workspace, gt_workspace="."):
 
     used_paths = set()
     for gt_fname, label, keywords, anti in targets:
-        exact = os.path.join(workspace, gt_fname)
-        chosen = None
-        if os.path.isfile(exact) and exact not in used_paths:
-            chosen = exact
-        else:
-            cands = _find_xlsx_by_keywords(workspace, keywords,
-                                           exclude=used_paths,
-                                           anti_keywords=anti)
-            if cands: chosen = cands[0]
+        chosen = _resolve_deliverable(workspace, gt_fname,
+                                      _find_xlsx_by_keywords, keywords, anti,
+                                      used_paths, "*.xlsx")
         if chosen is None:
             record(f"xlsx for {label} exists", False,
                    f"No xlsx with keywords {keywords[:3]} found")
@@ -148,7 +312,7 @@ def check_xlsx_content(workspace, gt_workspace="."):
         fname = os.path.basename(chosen)
 
         try:
-            wb = openpyxl.load_workbook(chosen, data_only=True)
+            wb = openpyxl.load_workbook(chosen, data_only=False)
         except Exception as e:
             record(f"xlsx {fname} readable", False, str(e))
             continue
@@ -160,19 +324,19 @@ def check_xlsx_content(workspace, gt_workspace="."):
                     if cell is not None:
                         all_text += str(cell) + "\n"
         all_text_lower = all_text.lower()
+        mentioned = _mentioned_suppliers(all_text_lower)
         if "compliance" in label and "assessment" in label:
             record(f"{fname} mentions every supplier",
-                   all(s.lower() in all_text_lower for s in SUPPLIERS),
-                   f"Missing: {[s for s in SUPPLIERS if s.lower() not in all_text_lower]}")
+                   len(mentioned) == len(SUPPLIERS),
+                   f"Missing: {[s for s in SUPPLIERS if s not in mentioned]}")
         else:
-            mentioned = sum(1 for s in SUPPLIERS if s.lower() in all_text_lower)
             record(f"{fname} mentions at least 4 of 5 suppliers",
-                   mentioned >= 4,
-                   f"Mentioned {mentioned} suppliers")
+                   len(mentioned) >= 4,
+                   f"Mentioned {len(mentioned)} suppliers")
 
         gt_path = os.path.join(gt_workspace, gt_fname)
         if os.path.isfile(gt_path):
-            gt_wb = openpyxl.load_workbook(gt_path, data_only=True)
+            gt_wb = openpyxl.load_workbook(gt_path, data_only=False)
             for gt_sname in gt_wb.sheetnames:
                 gt_ws = gt_wb[gt_sname]
                 a_ws = None
@@ -201,9 +365,28 @@ def check_xlsx_content(workspace, gt_workspace="."):
                 gt_hdr_idx = find_header_row(gt_rows)
                 a_hdrs = [str(v).strip().lower() if v else "" for v in a_rows[a_hdr_idx]]
                 gt_hdrs = [str(v).strip().lower() if v else "" for v in gt_rows[gt_hdr_idx]]
-                missing_hdrs = [h for h in gt_hdrs if h and h not in a_hdrs]
-                record(f"{fname}/{gt_sname}: required columns present",
-                       len(missing_hdrs) == 0, f"missing {missing_hdrs}")
+                hdrs = [h for h in a_hdrs if h]
+                if "assessment" in gt_fname:
+                    # compliance_assessment.xlsx: dimension names are not
+                    # mandated, so require only supplier + an overall score
+                    # column + a couple of dimension columns.
+                    has_supplier = any(_is_supplier_col(h) for h in hdrs)
+                    has_score = any(_is_score_col(h) for h in hdrs)
+                    dims = [h for h in hdrs if not _is_supplier_col(h) and not _is_score_col(h)]
+                    ok = has_supplier and has_score and len(dims) >= 2
+                    detail = (f"supplier_col={has_supplier}, score_col={has_score}, "
+                              f"dimension_cols={len(dims)} (need >= 2)")
+                else:
+                    # corrective_actions.xlsx: all seven columns are explicitly
+                    # required by the task wording; accept any reasonable label.
+                    missing_hdrs = [
+                        gt_h for gt_h, aliases in COLUMN_ALIASES["actions"].items()
+                        if not any(_header_has(h, aliases) for h in hdrs)
+                    ]
+                    ok = len(missing_hdrs) == 0
+                    detail = (f"missing {missing_hdrs}" if missing_hdrs
+                              else "all 7 required columns present")
+                record(f"{fname}/{gt_sname}: required columns present", ok, detail)
 
                 a_data_count = sum(1 for r in a_rows[a_hdr_idx + 1:] if any(v is not None for v in r))
                 record(f"{fname}/{gt_sname}: at least 5 data rows", a_data_count >= 5,
@@ -234,7 +417,7 @@ def _find_docx_by_keywords(workspace, keywords, exclude=None,
                 score -= 5
         try:
             doc = Document(path)
-            text_low = "\n".join(p.text for p in doc.paragraphs).lower()
+            text_low = _docx_text(doc).lower()
             for kw in keywords:
                 if kw in text_low:
                     score += 1
@@ -246,34 +429,52 @@ def _find_docx_by_keywords(workspace, keywords, exclude=None,
     return [p for _, p in scored]
 
 
+DOCX_RULES = [
+    {
+        "gt_fname": "audit_findings.docx",
+        "label": "audit findings docx",
+        "keywords": ["audit_findings", "audit findings", "findings", "detailed", "narrative"],
+        "anti": ["summary", "overview"],
+        "min_len": 300,
+        "require_all_suppliers": True,
+        "topic": ["compliance", "audit"],
+        "signal": ["find", "recommend", "issue", "gap", "risk", "impact", "evidence"],
+    },
+    {
+        "gt_fname": "audit_summary.docx",
+        "label": "audit summary docx",
+        "keywords": ["audit_summary", "audit summary", "summary", "executive", "overview"],
+        "anti": ["findings_detail", "narrative"],
+        "min_len": 300,
+        "require_all_suppliers": False,
+        "topic": ["compliance", "audit"],
+        "signal": ["find", "recommend", "issue", "gap", "risk", "overview", "summary"],
+    },
+]
+
+
 def check_docx_content(workspace):
-    """Locate audit findings + audit summary docx by filename or content keyword."""
+    """Locate audit findings + audit summary docx by filename or content keyword.
+
+    The findings document is the detailed per-supplier report, so every
+    supplier must be named (matching tolerates partial names) and the text
+    must be substantive. The summary is an executive overview; task.md only
+    asks for "overall compliance status, key findings, and strategic
+    recommendations", so it is NOT required to name every supplier nor to be
+    800+ chars -- it is held to topical keywords and a modest length floor.
+    """
     print("\n=== Check: DOCX files ===")
     from docx import Document
 
-    targets = [
-        ("audit_findings.docx", "audit findings docx",
-         ["audit_findings", "audit findings", "findings", "detailed", "narrative"],
-         ["summary", "overview"]),
-        ("audit_summary.docx", "audit summary docx",
-         ["audit_summary", "audit summary", "summary", "executive", "overview"],
-         ["findings_detail", "narrative"]),
-    ]
-
     used_paths = set()
-    for gt_fname, label, keywords, anti in targets:
-        exact = os.path.join(workspace, gt_fname)
-        chosen = None
-        if os.path.isfile(exact) and exact not in used_paths:
-            chosen = exact
-        else:
-            cands = _find_docx_by_keywords(workspace, keywords,
-                                            exclude=used_paths,
-                                            anti_keywords=anti)
-            if cands: chosen = cands[0]
+    for rule in DOCX_RULES:
+        gt_fname, label = rule["gt_fname"], rule["label"]
+        chosen = _resolve_deliverable(workspace, gt_fname,
+                                      _find_docx_by_keywords, rule["keywords"],
+                                      rule["anti"], used_paths, "*.docx")
         if chosen is None:
             record(f"docx for {label} exists", False,
-                   f"No docx with keywords {keywords[:3]} found")
+                   f"No docx with keywords {rule['keywords'][:3]} found")
             continue
         used_paths.add(chosen)
         fname = os.path.basename(chosen)
@@ -283,25 +484,37 @@ def check_docx_content(workspace):
         except Exception as e:
             record(f"docx {fname} readable", False, str(e))
             continue
-        text = "\n".join(p.text for p in doc.paragraphs)
+        text = _docx_text(doc)
         text_lower = text.lower()
-        for s in SUPPLIERS:
-            record(f"{fname} mentions supplier '{s}'",
-                   s.lower() in text_lower, "missing")
-        record(f"{fname} has >= 800 chars", len(text) >= 800, f"got {len(text)}")
-        for kw in ("compliance", "finding", "recommendation"):
-            record(f"{fname} mentions '{kw}'",
-                   kw in text_lower, f"missing in {fname}")
+        if rule["require_all_suppliers"]:
+            mentioned = _mentioned_suppliers(text_lower)
+            for s in SUPPLIERS:
+                record(f"{fname} mentions supplier '{s}'", s in mentioned, "missing")
+        record(f"{fname} has >= {rule['min_len']} chars",
+               len(text) >= rule["min_len"], f"got {len(text)}")
+        topic_ok = any(k in text_lower for k in rule["topic"])
+        record(f"{fname} mentions {'/'.join(rule['topic'])}", topic_ok, "missing")
+        signal_ok = any(k in text_lower for k in rule["signal"])
+        record(f"{fname} discusses findings/recommendations", signal_ok, "missing")
 
 
 def check_pdf(workspace):
     print("\n=== Check: PDF compliance report ===")
+    import glob
     pdf_candidates = []
     for f in os.listdir(workspace):
         if f.lower().endswith(".pdf") and "compliance" in f.lower():
             pdf_candidates.append(f)
-    record("Compliance PDF report present", len(pdf_candidates) >= 1,
-           f"found pdfs: {pdf_candidates}")
+    # "Professional audit report format" can legitimately be delivered as a
+    # docx (audit_findings / audit_summary) without a derived PDF. A
+    # compliance PDF is therefore only *required* when no report docx exists.
+    report_docx = [p for p in glob.glob(os.path.join(workspace, "*.docx"))
+                   if not os.path.basename(p).startswith("~$")
+                   and not os.path.basename(p).startswith(".")]
+    satisfied = len(pdf_candidates) >= 1 or len(report_docx) >= 1
+    record("Compliance PDF report present (or docx audit report)",
+           satisfied,
+           f"pdfs: {pdf_candidates}, report docx: {len(report_docx)}")
 
 
 def _read_supplier_contacts(workspace):
@@ -326,7 +539,7 @@ def _read_supplier_contacts(workspace):
     return domains, emails
 
 
-def check_email(agent_workspace):
+def check_email(agent_workspace, launch_time):
     print("\n=== Check: Audit emails to suppliers ===")
     try:
         conn = psycopg2.connect(**DB)
@@ -342,13 +555,30 @@ def check_email(agent_workspace):
         conn.close()
         return
     placeholders = ",".join(["%s"] * len(folder_ids))
-    cur.execute(f"SELECT subject, to_addr, body_text FROM email.messages WHERE folder_id IN ({placeholders})", folder_ids)
+    sql = (f"SELECT subject, to_addr, body_text FROM email.messages "
+           f"WHERE folder_id IN ({placeholders})")
+    params = list(folder_ids)
+    win = _launch_window(launch_time)
+    if win is not None:
+        # Scope to this run's messages so stale rows from other tasks /
+        # earlier runs don't produce false PASS.
+        sql += " AND created_at >= %s"
+        params.append(win)
+    cur.execute(sql, params)
     sent = cur.fetchall()
     cur.close()
     conn.close()
 
-    record("At least 1 audit-related email sent",
-           any(("audit" in (s or "").lower()) or ("compliance" in (s or "").lower()) for s, _, _ in sent),
+    # An email that carries the audit report should be recognizable either by
+    # its subject or its body (the report text itself contains audit/compliance
+    # language), so a generic subject on an otherwise-correct report email does
+    # not produce a false negative.
+    audit_subject_or_body = any(
+        ("audit" in ((s or "") + (b or "")).lower())
+        or ("compliance" in ((s or "") + (b or "")).lower())
+        for s, _, b in sent
+    )
+    record("At least 1 audit-related email sent", audit_subject_or_body,
            f"found {len(sent)} sent emails")
     # Derive expected supplier domains/emails from supplier_list.csv.
     # Falls back to the supplierN.com convention (which the bundled CSV uses).
@@ -372,7 +602,7 @@ def check_email(agent_workspace):
            f"found supplier domains: {matched_domains}")
 
 
-def check_gcal():
+def check_gcal(launch_time):
     print("\n=== Check: Calendar meetings with suppliers ===")
     try:
         conn = psycopg2.connect(**DB)
@@ -380,7 +610,15 @@ def check_gcal():
     except psycopg2.Error as e:
         record("DB connect", False, str(e))
         return
-    cur.execute("SELECT id, summary, description FROM gcal.events")
+    sql = "SELECT id, summary, description FROM gcal.events"
+    params = []
+    win = _launch_window(launch_time)
+    if win is not None:
+        # Scope to this run's events so stale rows from other tasks / earlier
+        # runs don't produce false PASS.
+        sql += " WHERE created >= %s"
+        params.append(win)
+    cur.execute(sql, params)
     events = cur.fetchall()
     cur.close()
     conn.close()
@@ -419,8 +657,8 @@ def main():
     check_docx_content(ws)
     check_pdf(ws)
     if not is_gt_self_test:
-        check_email(ws)
-        check_gcal()
+        check_email(ws, args.launch_time)
+        check_gcal(args.launch_time)
     else:
         print("  [SKIP] email and gcal checks (GT self-test mode)")
 

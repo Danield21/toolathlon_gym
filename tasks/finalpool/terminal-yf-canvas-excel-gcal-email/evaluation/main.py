@@ -17,12 +17,23 @@ from datetime import datetime, timedelta
 import openpyxl
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
+# All DB settings come from environment variables with local defaults so the
+# evaluator connects to the same database the agent used (the harness injects
+# PGHOST/PGPORT/PGDATABASE per task container).
+DB = dict(host=os.environ.get("PGHOST", "localhost"),
+          port=int(os.environ.get("PGPORT", "5432")),
           dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
-          user="eigent", password="camel")
+          user=os.environ.get("PGUSER", "eigent"),
+          password=os.environ.get("PGPASSWORD", "camel"))
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+
+# Sentinel marking a cell that is an uncalculated Excel formula (its cached
+# value is None because the workbook was never opened/recalculated by a
+# spreadsheet application). We cannot numerically assess such a cell, so the
+# corresponding check is skipped instead of failing the agent.
+UNEVAL = object()
 
 
 def check(name, condition, detail=""):
@@ -35,11 +46,90 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}: {str(detail)[:300]}")
 
 
+def _to_float(v):
+    """Robustly convert a value to float.
+
+    Supports int/float, and strings with thousands separators, currency
+    symbols, a trailing '%' or leading/trailing whitespace. Returns None when
+    the value cannot be parsed (including None and uncalculated formulas).
+    """
+    if v is None or v is UNEVAL:
+        return None
+    if isinstance(v, bool):
+        return float(v)
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip()
+        for ch in (",", "$", "€", "¥", "£", "%", " ", "\t", "\n"):
+            s = s.replace(ch, "")
+        if s == "":
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return None
+
+
+def _to_int(v):
+    f = _to_float(v)
+    if f is None:
+        return None
+    return int(f)
+
+
 def num_close(a, b, tol=2.0):
-    try:
-        return abs(float(a) - float(b)) <= tol
-    except (TypeError, ValueError):
-        return False
+    """Compare two values numerically (with a tolerance), falling back to a
+    case-insensitive string comparison only when a numeric comparison is not
+    possible on one side (per R3: parse both, compare; otherwise string)."""
+    fa = _to_float(a)
+    fb = _to_float(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= tol
+    # One side unparseable -> tolerant string comparison so e.g. a stray
+    # label/unit in the agent cell does not produce a hard FAIL by itself.
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+def check_num(name, a, b, tol=2.0):
+    """Emit a check for a numeric comparison.
+
+    An uncalculated Excel formula cell (UNEVAL) FAILS rather than being
+    skipped: docs/task.md requires every number to be written as a literal
+    value ("do not use Excel formulas"), so a formula cell whose value was
+    never calculated is a task violation, not a value we can grade. This keeps
+    the numeric checks from being silently bypassed (a model writing formulas
+    everywhere must not sail through). A formula with a cached value resolves
+    to that value and is graded normally, so a recalculated workbook is still
+    tolerated.
+    """
+    if a is UNEVAL or b is UNEVAL:
+        check(name, False,
+              f"expected literal {b}, got an uncalculated Excel formula cell "
+              "(the task requires literal values, not formulas)")
+        return
+    check(name, num_close(a, b, tol), f"Expected {b}, got {a}")
+
+
+def num_close_any(a, expected_values, tol=2.0):
+    """True if `a` is numerically close to any of the expected values."""
+    return any(num_close(a, b, tol) for b in expected_values)
+
+
+def check_num_any(name, a, expected_values, tol=2.0):
+    """Emit a check that passes when `a` matches any of several expected
+    values. Used where the task wording admits more than one legitimate
+    interpretation (see get_expected_tiers). Uncalculated formula cells still
+    FAIL, exactly like check_num."""
+    if a is UNEVAL:
+        check(name, False,
+              f"expected a literal value in {expected_values}, got an "
+              "uncalculated Excel formula cell (the task requires literal "
+              "values, not formulas)")
+        return
+    check(name, num_close_any(a, expected_values, tol),
+          f"Expected one of {expected_values}, got {a}")
 
 
 def get_sheet(wb, name):
@@ -50,10 +140,22 @@ def get_sheet(wb, name):
 
 
 def get_expected_tiers():
-    """Query Canvas DB for expected tier counts."""
-    try:
-        conn = psycopg2.connect(**DB)
-        cur = conn.cursor()
+    """Query Canvas DB for the expected tier counts.
+
+    The task's tiering rule ("average score as a percentage, score divided by
+    points possible times 100, across all graded submissions") admits two
+    defensible readings:
+      (a) per-student average of the per-submission percentages
+          AVG(score / points_possible * 100)         -- the reading clarified
+          in docs/task.md;
+      (b) per-student weighted average
+          SUM(score) / SUM(points_possible) * 100.
+    Both are computed and returned keyed by interpretation ('a' / 'b'). A
+    graded cell is accepted if it matches EITHER interpretation within the
+    check's tolerance, so a model that read the task the other way is never
+    falsely failed, while genuinely wrong counts still fail both.
+    """
+    def _query(inner_sql):
         cur.execute("""
             SELECT sub.course_id,
               SUM(CASE WHEN avg_pct < 60 THEN 1 ELSE 0 END) as needs_support,
@@ -61,34 +163,56 @@ def get_expected_tiers():
               SUM(CASE WHEN avg_pct >= 75 THEN 1 ELSE 0 END) as proficient,
               COUNT(*) as total
             FROM (
+              %s
+            ) sub
+            GROUP BY sub.course_id
+            ORDER BY sub.course_id
+        """ % inner_sql)
+        out = {}
+        for row in cur.fetchall():
+            out[int(row[0])] = {
+                'needs_support': int(row[1]),
+                'developing': int(row[2]),
+                'proficient': int(row[3]),
+                'total': int(row[4]),
+            }
+        return out
+
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        interp_a = _query("""
               SELECT a.course_id, s.user_id,
                 AVG(CASE WHEN a.points_possible > 0 THEN s.score / a.points_possible * 100 ELSE NULL END) as avg_pct
               FROM canvas.submissions s
               JOIN canvas.assignments a ON s.assignment_id = a.id
               WHERE a.course_id IN (16, 17) AND s.score IS NOT NULL AND a.points_possible > 0
               GROUP BY a.course_id, s.user_id
-            ) sub
-            GROUP BY sub.course_id
-            ORDER BY sub.course_id
         """)
-        result = {}
-        for row in cur.fetchall():
-            result[int(row[0])] = {
-                'needs_support': int(row[1]),
-                'developing': int(row[2]),
-                'proficient': int(row[3]),
-                'total': int(row[4])
-            }
+        interp_b = _query("""
+              SELECT a.course_id, s.user_id,
+                SUM(s.score)::numeric
+                  / NULLIF(SUM(CASE WHEN a.points_possible > 0 THEN a.points_possible ELSE NULL END), 0) * 100 as avg_pct
+              FROM canvas.submissions s
+              JOIN canvas.assignments a ON s.assignment_id = a.id
+              WHERE a.course_id IN (16, 17) AND s.score IS NOT NULL AND a.points_possible > 0
+              GROUP BY a.course_id, s.user_id
+        """)
         cur.close()
         conn.close()
-        return result
+        return {cid: {'a': interp_a[cid], 'b': interp_b[cid]} for cid in interp_a}
     except Exception as e:
         print(f"  [WARN] Could not query Canvas: {e}")
         return {}
 
 
 def get_expected_market_events():
-    """Query YF DB for expected top 3 market events."""
+    """Query YF DB for expected top 3 market events.
+
+    The 30-day window is anchored to the most recent trading date present in
+    the data (MAX(date)), which is deterministic and matches the task wording
+    ("most recent 30 days of trading data").
+    """
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
@@ -116,118 +240,181 @@ def get_expected_market_events():
         return []
 
 
+def load_workbook_pair(path):
+    """Load a workbook twice: once raw (data_only=False) and once for cached
+    formula values (data_only=True). Reading with data_only=False means a cell
+    holding a literal value is always read correctly; formula cells fall back
+    to their cached value so a correctly-recalculated workbook still passes.
+    """
+    wb_raw = None
+    wb_cached = None
+    try:
+        wb_raw = openpyxl.load_workbook(path, data_only=False)
+    except Exception as e:
+        print(f"  [WARN] Could not open workbook {path}: {e}")
+        return None, None
+    try:
+        wb_cached = openpyxl.load_workbook(path, data_only=True)
+    except Exception:
+        wb_cached = None
+    return wb_raw, wb_cached
+
+
+def cell_value(wb_cached, sheet_title, cell):
+    """Resolve a cell's value.
+
+    - Literal values are returned as-is.
+    - Formula cells return their cached value when available (the workbook was
+      opened by Excel / recalculated).
+    - Uncalculated formula cells (cache is None) return the UNEVAL sentinel so
+      callers can skip the numeric check rather than fail the agent.
+    """
+    v = cell.value
+    if isinstance(v, str) and v.startswith('='):
+        if wb_cached is not None and sheet_title in wb_cached.sheetnames:
+            cv = wb_cached[sheet_title].cell(row=cell.row, column=cell.column).value
+            if cv is not None:
+                return cv
+        return UNEVAL
+    return v
+
+
+def read_data_rows(wb_raw, wb_cached, ws):
+    """Return data rows (from row 2 down) as resolved value lists, skipping
+    rows that are completely empty or made up entirely of uncalculated
+    formulas."""
+    rows = []
+    for row in ws.iter_rows(min_row=2, values_only=False):
+        vals = [cell_value(wb_cached, ws.title, c) for c in row]
+        if any(v is not None and v is not UNEVAL and str(v).strip() != "" for v in vals):
+            rows.append(vals)
+    return rows
+
+
 def check_excel(agent_workspace, groundtruth_workspace):
     print("\n=== Checking Financial_Literacy_Workshops.xlsx ===")
     agent_file = os.path.join(agent_workspace, "Financial_Literacy_Workshops.xlsx")
-    gt_file = os.path.join(groundtruth_workspace, "Financial_Literacy_Workshops.xlsx")
+    # groundtruth file is kept for archival/consistency; expected values below
+    # are computed live from the DB (which is the source of truth).
 
     check("Excel file exists", os.path.isfile(agent_file), agent_file)
     if not os.path.isfile(agent_file):
         return
 
-    try:
-        agent_wb = openpyxl.load_workbook(agent_file, data_only=True)
-    except Exception as e:
-        check("Excel readable", False, str(e))
+    wb_raw, wb_cached = load_workbook_pair(agent_file)
+    if wb_raw is None:
+        check("Excel readable", False, "Could not open workbook")
         return
 
-    check("Has 3 sheets", len(agent_wb.sheetnames) >= 3, f"Got {agent_wb.sheetnames}")
+    check("Has 3 sheets", len(wb_raw.sheetnames) >= 3, f"Got {wb_raw.sheetnames}")
 
     expected_tiers = get_expected_tiers()
     expected_events = get_expected_market_events()
 
     # Student_Tiers sheet
     print("  Checking Student_Tiers...")
-    st_sheet = get_sheet(agent_wb, "Student_Tiers")
-    check("Sheet 'Student_Tiers' exists", st_sheet is not None, f"Sheets: {agent_wb.sheetnames}")
+    st_sheet = get_sheet(wb_raw, "Student_Tiers")
+    check("Sheet 'Student_Tiers' exists", st_sheet is not None, f"Sheets: {wb_raw.sheetnames}")
     if st_sheet:
-        rows = list(st_sheet.iter_rows(min_row=2, values_only=True))
-        check("Student_Tiers has 2 rows", len(rows) == 2, f"Got {len(rows)}")
-        for row in rows:
-            if not row or row[0] is None:
-                continue
-            cid = int(row[0])
-            if cid in expected_tiers:
-                exp = expected_tiers[cid]
-                check(f"Course {cid} Needs_Support",
-                      num_close(row[2], exp['needs_support'], 1),
-                      f"Expected {exp['needs_support']}, got {row[2]}")
-                check(f"Course {cid} Developing",
-                      num_close(row[3], exp['developing'], 1),
-                      f"Expected {exp['developing']}, got {row[3]}")
-                check(f"Course {cid} Proficient",
-                      num_close(row[4], exp['proficient'], 10),
-                      f"Expected {exp['proficient']}, got {row[4]}")
-                check(f"Course {cid} Total",
-                      num_close(row[5], exp['total'], 10),
-                      f"Expected {exp['total']}, got {row[5]}")
+        try:
+            rows = read_data_rows(wb_raw, wb_cached, st_sheet)
+            check("Student_Tiers has 2 rows", len(rows) == 2, f"Got {len(rows)}")
+            for row in rows:
+                try:
+                    cid = _to_int(row[0]) if row[0] is not UNEVAL else None
+                    if cid is None:
+                        continue
+                    if cid in expected_tiers:
+                        exp = expected_tiers[cid]
+                        check_num_any(f"Course {cid} Needs_Support",
+                                      row[2],
+                                      [exp['a']['needs_support'], exp['b']['needs_support']], 1)
+                        check_num_any(f"Course {cid} Developing",
+                                      row[3],
+                                      [exp['a']['developing'], exp['b']['developing']], 1)
+                        check_num_any(f"Course {cid} Proficient",
+                                      row[4],
+                                      [exp['a']['proficient'], exp['b']['proficient']], 10)
+                        check_num_any(f"Course {cid} Total",
+                                      row[5],
+                                      [exp['a']['total'], exp['b']['total']], 10)
+                except Exception as e:
+                    print(f"  [WARN] Student_Tiers row check failed: {e}")
+        except Exception as e:
+            print(f"  [WARN] Student_Tiers sheet check failed: {e}")
 
     # Market_Events sheet
     print("  Checking Market_Events...")
-    me_sheet = get_sheet(agent_wb, "Market_Events")
-    check("Sheet 'Market_Events' exists", me_sheet is not None, f"Sheets: {agent_wb.sheetnames}")
+    me_sheet = get_sheet(wb_raw, "Market_Events")
+    check("Sheet 'Market_Events' exists", me_sheet is not None, f"Sheets: {wb_raw.sheetnames}")
     if me_sheet:
-        rows = list(me_sheet.iter_rows(min_row=2, values_only=True))
-        check("Market_Events has 3 rows", len(rows) == 3, f"Got {len(rows)}")
-        if expected_events and rows:
-            # Check top event matches
-            for i, exp_event in enumerate(expected_events):
-                if i < len(rows) and rows[i]:
-                    row = rows[i]
-                    # Check symbol
-                    row_sym = str(row[1]).strip().upper() if row[1] else ""
-                    check(f"Event {i+1} symbol is {exp_event['symbol']}",
-                          row_sym == exp_event['symbol'],
-                          f"Got {row_sym}")
-                    # Check change_pct
-                    if row[2] is not None:
-                        check(f"Event {i+1} change_pct",
-                              num_close(row[2], exp_event['change_pct'], 0.5),
-                              f"Expected {exp_event['change_pct']}, got {row[2]}")
+        try:
+            rows = read_data_rows(wb_raw, wb_cached, me_sheet)
+            check("Market_Events has 3 rows", len(rows) == 3, f"Got {len(rows)}")
+            if expected_events and rows:
+                # Check events in order (the task requires sorting by abs change desc)
+                for i, exp_event in enumerate(expected_events):
+                    if i >= len(rows):
+                        break
+                    try:
+                        row = rows[i]
+                        sym = str(row[1]).strip().upper() if row[1] not in (None, UNEVAL) else ""
+                        check(f"Event {i+1} symbol is {exp_event['symbol']}",
+                              sym == exp_event['symbol'],
+                              f"Got {sym}")
+                        check_num(f"Event {i+1} change_pct",
+                                  row[2], exp_event['change_pct'], 0.5)
+                    except Exception as e:
+                        print(f"  [WARN] Market_Events row {i+1} check failed: {e}")
+        except Exception as e:
+            print(f"  [WARN] Market_Events sheet check failed: {e}")
 
     # Workshop_Schedule sheet
     print("  Checking Workshop_Schedule...")
-    ws_sheet = get_sheet(agent_wb, "Workshop_Schedule")
-    check("Sheet 'Workshop_Schedule' exists", ws_sheet is not None, f"Sheets: {agent_wb.sheetnames}")
+    ws_sheet = get_sheet(wb_raw, "Workshop_Schedule")
+    check("Sheet 'Workshop_Schedule' exists", ws_sheet is not None, f"Sheets: {wb_raw.sheetnames}")
     if ws_sheet:
-        rows = list(ws_sheet.iter_rows(min_row=2, values_only=True))
-        check("Workshop_Schedule has 3 rows", len(rows) == 3, f"Got {len(rows)}")
+        try:
+            rows = read_data_rows(wb_raw, wb_cached, ws_sheet)
+            check("Workshop_Schedule has 3 rows", len(rows) == 3, f"Got {len(rows)}")
 
-        topics_found = set()
-        for row in rows:
-            if row and row[1]:
-                topics_found.add(str(row[1]).strip().lower())
-
-        check("Has 'Intro to Markets' workshop",
-              any("intro" in t and "market" in t for t in topics_found),
-              f"Topics: {topics_found}")
-        check("Has 'Portfolio Basics' workshop",
-              any("portfolio" in t and "basic" in t for t in topics_found),
-              f"Topics: {topics_found}")
-        check("Has 'Risk Management' workshop",
-              any("risk" in t and "manage" in t for t in topics_found),
-              f"Topics: {topics_found}")
-
-        # Check expected attendance for Needs Support tier
-        if expected_tiers and rows:
-            ns_total = sum(t.get('needs_support', 0) for t in expected_tiers.values())
-            dev_total = sum(t.get('developing', 0) for t in expected_tiers.values())
-            prof_total = sum(t.get('proficient', 0) for t in expected_tiers.values())
+            topics_found = set()
             for row in rows:
-                if row and row[2]:
-                    tier = str(row[2]).strip().lower()
-                    if "needs" in tier or "support" in tier:
-                        check("Needs Support attendance",
-                              num_close(row[3], ns_total, 2),
-                              f"Expected {ns_total}, got {row[3]}")
-                    elif "develop" in tier:
-                        check("Developing attendance",
-                              num_close(row[3], dev_total, 2),
-                              f"Expected {dev_total}, got {row[3]}")
-                    elif "proficient" in tier:
-                        check("Proficient attendance",
-                              num_close(row[3], prof_total, 50),
-                              f"Expected {prof_total}, got {row[3]}")
+                if row[1] not in (None, UNEVAL) and str(row[1]).strip():
+                    topics_found.add(str(row[1]).strip().lower())
+
+            check("Has 'Intro to Markets' workshop",
+                  any("intro" in t and "market" in t for t in topics_found),
+                  f"Topics: {topics_found}")
+            check("Has 'Portfolio Basics' workshop",
+                  any("portfolio" in t and "basic" in t for t in topics_found),
+                  f"Topics: {topics_found}")
+            check("Has 'Risk Management' workshop",
+                  any("risk" in t and "manage" in t for t in topics_found),
+                  f"Topics: {topics_found}")
+
+            # Check expected attendance for each tier (accept either
+            # interpretation of the tiering rule, see get_expected_tiers).
+            if expected_tiers and rows:
+                ns_vals = [sum(t[k].get('needs_support', 0) for t in expected_tiers.values())
+                           for k in ('a', 'b')]
+                dev_vals = [sum(t[k].get('developing', 0) for t in expected_tiers.values())
+                            for k in ('a', 'b')]
+                prof_vals = [sum(t[k].get('proficient', 0) for t in expected_tiers.values())
+                             for k in ('a', 'b')]
+                for row in rows:
+                    try:
+                        tier = str(row[2]).strip().lower() if row[2] not in (None, UNEVAL) else ""
+                        if "needs" in tier or "support" in tier:
+                            check_num_any("Needs Support attendance", row[3], ns_vals, 2)
+                        elif "develop" in tier:
+                            check_num_any("Developing attendance", row[3], dev_vals, 2)
+                        elif "proficient" in tier:
+                            check_num_any("Proficient attendance", row[3], prof_vals, 50)
+                    except Exception as e:
+                        print(f"  [WARN] Workshop_Schedule row check failed: {e}")
+        except Exception as e:
+            print(f"  [WARN] Workshop_Schedule sheet check failed: {e}")
 
 
 def check_calendar():
@@ -383,10 +570,18 @@ def main():
     task_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     gt_dir = args.groundtruth_workspace or os.path.join(task_root, "groundtruth_workspace")
 
-    check_excel(args.agent_workspace, gt_dir)
-    check_calendar()
-    check_emails()
-    check_scripts_and_outputs(args.agent_workspace)
+    # Isolate each check section so an unexpected exception in one cannot abort
+    # the whole evaluation and prevent the res_log_file from being written.
+    for fn in (check_excel, check_calendar, check_emails, check_scripts_and_outputs):
+        try:
+            if fn is check_excel:
+                fn(args.agent_workspace, gt_dir)
+            elif fn is check_scripts_and_outputs:
+                fn(args.agent_workspace)
+            else:
+                fn()
+        except Exception as e:
+            check(f"{getattr(fn, '__name__', 'check')} did not crash", False, str(e)[:300])
 
     total = PASS_COUNT + FAIL_COUNT
     accuracy = PASS_COUNT / total * 100 if total > 0 else 0
@@ -395,7 +590,12 @@ def main():
     if args.res_log_file:
         with open(args.res_log_file, "w") as f:
             json.dump(result, f, indent=2)
-    sys.exit(0 if accuracy >= 70 else 1)
+    # 80% pass bar. The numeric core (tier counts, change %, attendance) is
+    # ~14 of the ~53 checks. If a submission gets every structural artifact
+    # right but every number wrong it lands around 74%; the 80% bar prevents
+    # such a submission from passing while a correct solution (~100%) and one
+    # with a handful of minor misses (~90%+) clear it comfortably.
+    sys.exit(0 if accuracy >= 80 else 1)
 
 
 if __name__ == "__main__":

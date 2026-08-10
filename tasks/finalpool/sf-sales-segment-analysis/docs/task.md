@@ -1,4 +1,4 @@
-I need to understand our customer segments better. Please pull data from the sales data warehouse and analyze revenue contribution by customer segment.
+I need to understand our customer segments better. Please pull data from the sales data warehouse and analyze revenue contribution by customer segment. Base the revenue and order counts on all orders regardless of order status (include Delivered, Shipped, Processing, and Cancelled).
 
 Create an Excel file called Sales_Segment_Report.xlsx with two sheets. The "Segment Analysis" sheet should have columns Segment, Customers (distinct count), Orders (distinct count), Revenue rounded to 2 decimals, Avg_Order_Value rounded to 2 decimals, and Revenue_Share_Pct showing each segment's share of total revenue rounded to 1 decimal. Sort by Revenue descending.
 

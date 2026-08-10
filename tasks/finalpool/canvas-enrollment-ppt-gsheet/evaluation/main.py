@@ -7,6 +7,7 @@ attacks).
 """
 import argparse
 import os
+import re
 import sys
 import openpyxl
 from pptx import Presentation
@@ -118,6 +119,15 @@ def check_excel(agent_workspace, gt_dir):
                 record(f"{key}.Students", ok,
                        f"agent={a_row[3]}, expected={g_row[3]} (tol=2)")
 
+            # Cols 4-7: Teachers, TAs, Active, Completed (N1: previously
+            # unchecked — only Total_Enrollments and Students were validated).
+            extra_cols = {4: "Teachers", 5: "TAs", 6: "Active", 7: "Completed"}
+            for ci, cname in extra_cols.items():
+                if len(a_row) > ci and len(g_row) > ci and g_row[ci] is not None:
+                    ok = num_close(a_row[ci], g_row[ci], 2)
+                    record(f"{key}.{cname}", ok,
+                           f"agent={a_row[ci]}, expected={g_row[ci]} (tol=2)")
+
     # ----- Summary -----
     a_rows = load_sheet_rows(agent_wb, "Summary")
     g_rows = load_sheet_rows(gt_wb, "Summary")
@@ -182,8 +192,12 @@ def check_pptx(agent_workspace):
             title_text += shape.text_frame.text.lower() + " "
     record("Title slide has 'enrollment'", "enrollment" in title_text,
            f"Found: {title_text[:100]}")
-    record("Title slide has subtitle date '2026-03-06'",
-           "2026-03-06" in title_text)
+    # Accept any YYYY-MM-DD date in the title-slide subtitle. The task prompt
+    # asks for today's date, so the check must not be pinned to the DB dump date.
+    date_match = re.search(r"\d{4}-\d{2}-\d{2}", title_text)
+    record("Title slide subtitle has a YYYY-MM-DD date",
+           date_match is not None,
+           f"Found: {title_text[:120]}")
 
     all_ppt_text = ""
     for slide in slides:

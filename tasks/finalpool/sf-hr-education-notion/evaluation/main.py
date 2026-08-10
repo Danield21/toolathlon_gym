@@ -2,10 +2,13 @@
 import argparse
 import json
 import os
+import re
 import sys
 
 import openpyxl
 import psycopg2
+
+EXPECTED_PAGE_TITLE = "Workforce Education Analysis"
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
@@ -41,6 +44,39 @@ def str_match(a, b):
     if a is None or b is None:
         return a is None and b is None
     return str(a).strip().lower() == str(b).strip().lower()
+
+
+def _normalize_title(s):
+    """Lowercase, replace punctuation with spaces, collapse whitespace."""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(s).lower()).split())
+
+
+def _levenshtein(a, b):
+    """Small-scale DP edit distance between two strings."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def titles_match(expected, actual):
+    """Exact Notion title match (task.md prescribes the exact title). After
+    normalization, the titles must be identical — no fuzzy/edit-distance
+    tolerance, so the model must follow the title given in task.md."""
+    e = _normalize_title(expected)
+    a = _normalize_title(actual)
+    if not e or not a:
+        return False
+    return e == a
 
 
 def get_sheet(wb, target):
@@ -216,14 +252,14 @@ def check_notion():
                         title_text += item["text"].get("content", "")
                     elif isinstance(item, dict) and "plain_text" in item:
                         title_text += item["plain_text"]
-        # Tighten: require exact phrase 'workforce education analysis'
-        if "workforce education analysis" in title_text.lower():
+        # Exact title match (task.md prescribes the exact page title)
+        if titles_match(EXPECTED_PAGE_TITLE, title_text):
             found_page = True
             page_id = page[0]
             break
 
     record("Notion page 'Workforce Education Analysis' found", found_page,
-           "No page with 'workforce education analysis' in title")
+           f"No page with exact title '{EXPECTED_PAGE_TITLE}'")
 
     notion_ok = found_page
     if found_page and page_id:

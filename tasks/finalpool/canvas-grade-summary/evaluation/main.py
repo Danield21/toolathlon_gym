@@ -146,7 +146,7 @@ def main():
             
             if len(a_row) > 1 and len(g_row) > 1:
                 if not num_close(a_row[1], g_row[1], 1):
-                    errors.append(f"{key}.Students_Submitted: {a_row[1]} vs {g_row[1]} (tol=1)")
+                    errors.append(f"{key}.Students_Graded: {a_row[1]} vs {g_row[1]} (tol=1)")
 
             if len(a_row) > 2 and len(g_row) > 2:
                 if not num_close(a_row[2], g_row[2], 0.5):

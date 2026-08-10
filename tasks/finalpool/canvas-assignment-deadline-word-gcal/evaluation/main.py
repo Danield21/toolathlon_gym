@@ -49,6 +49,23 @@ def num_close(a, b, tol=1.0):
         return str(a).strip().lower() == str(b).strip().lower()
 
 
+def _date_match(a, b):
+    """Compare two date-ish values by their YYYY-MM-DD portion.
+
+    A datetime cell ("2013-10-20 00:00:00") written by openpyxl must still match
+    the groundtruth's plain "2013-10-20" string. Non-date strings fall back to a
+    case-insensitive exact comparison.
+    """
+    def norm(v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            return s[:10]
+        return s.lower()
+    return norm(a) == norm(b)
+
+
 def load_sheet_by_name(wb, name):
     for sname in wb.sheetnames:
         if sname.strip().lower() == name.strip().lower():
@@ -122,6 +139,14 @@ def check_excel(agent_workspace, groundtruth_workspace):
                        num_close(a_row[1], g_row[1], 0.01),
                        f"got {a_row[1]}, expected {g_row[1]}")
 
+            # Due_Date (col 2), normalized so datetime cells still match.
+            if len(g_row) > 2 and len(a_row) > 2:
+                gt_due = g_row[2]
+                if gt_due is not None and str(gt_due).strip() not in {"", "TBD"}:
+                    record(f"{name}: Due_Date correct",
+                           _date_match(a_row[2], gt_due),
+                           f"got {a_row[2]}, expected {gt_due}")
+
     # Check Summary sheet
     a_summ = load_sheet_by_name(agent_wb, "Summary")
     g_summ = load_sheet_by_name(gt_wb, "Summary")
@@ -167,7 +192,7 @@ def check_excel(agent_workspace, groundtruth_workspace):
 # Check 2: Word document
 # ============================================================================
 
-def check_word(agent_workspace):
+def check_word(agent_workspace, groundtruth_workspace=None):
     print("\n=== Checking Assignment_Schedule_FFF2013J.docx ===")
 
     docx_path = os.path.join(agent_workspace, "Assignment_Schedule_FFF2013J.docx")
@@ -176,15 +201,63 @@ def check_word(agent_workspace):
         return False
     record("Word file exists", True)
 
+    # Load groundtruth assignments (name -> (points, due_date)) for the
+    # per-row Word-table verification. Empty if GT unavailable.
+    gt_assignments = {}
+    if groundtruth_workspace:
+        gt_path = os.path.join(groundtruth_workspace, "Assignment_Deadlines_FFF2013J.xlsx")
+        if os.path.isfile(gt_path):
+            try:
+                import openpyxl
+                gwb = openpyxl.load_workbook(gt_path, data_only=True)
+                for sn in gwb.sheetnames:
+                    if sn.strip().lower() == "all assignments":
+                        ws = gwb[sn]
+                        for r in ws.iter_rows(min_row=2, values_only=True):
+                            if r and r[0] is not None:
+                                due = str(r[2]).strip() if r[2] is not None else None
+                                if due in {"", "TBD"}:
+                                    due = None
+                                gt_assignments[str(r[0]).strip()] = (r[1], due)
+                        break
+            except Exception:
+                gt_assignments = {}
+    gt_lookup = {k.lower(): v for k, v in gt_assignments.items()}
+
     try:
         from docx import Document
         doc = Document(docx_path)
-        all_text = " ".join(p.text for p in doc.paragraphs).lower()
+        para_text = " ".join(p.text for p in doc.paragraphs)
+        # Content includes table cell text too: the task's required output is
+        # a heading plus an assignment table, so a correct document may have
+        # almost no paragraph text beyond the heading.
+        table_text = " ".join(
+            cell.text
+            for tbl in doc.tables
+            for row in tbl.rows
+            for cell in row.cells
+        )
+        all_text = (para_text + " " + table_text).lower()
         headings_text = " ".join(p.text for p in doc.paragraphs
                                  if p.style.name.startswith("Heading")).lower()
 
-        record("Word doc has content", len(all_text.strip()) >= 100,
-               f"Content length: {len(all_text.strip())}")
+        text_len = len(all_text.strip())
+        record("Word doc has content", text_len >= 100,
+               f"Content length: {text_len}")
+        # Diagnostics to locate why the document is (nearly) empty:
+        # generation truncation vs. Word MCP write failure.
+        if text_len < 100:
+            file_size = os.path.getsize(docx_path)
+            n_paras = len(doc.paragraphs)
+            n_tables = len(doc.tables)
+            print(f"  [DIAG] Word doc content below threshold: "
+                  f"file_size={file_size} bytes, paragraphs={n_paras}, "
+                  f"tables={n_tables}, paragraph_text_len={len(para_text.strip())}, "
+                  f"table_text_len={len(table_text.strip())}")
+            print(f"  [DIAG] First 200 chars of content: "
+                  f"{all_text.strip()[:200]!r}")
+            print("  [DIAG] Hint: empty content may be caused by generation "
+                  "truncation or a Word API issue.")
         # Heading must reference 'Foundations of Finance' AND 'Fall 2013' to
         # avoid passing on a generic 'Assignment' heading.
         head_combined = headings_text + " " + all_text
@@ -198,6 +271,7 @@ def check_word(agent_workspace):
         record("Word doc has at least 1 table", len(tables) >= 1,
                f"Found {len(tables)} tables")
 
+        table_rows_ok = True
         # Check table has assignment data and at least 13 rows + header.
         if tables:
             tbl = tables[0]
@@ -220,7 +294,33 @@ def check_word(agent_workspace):
                    n_cols >= 3,
                    f"cols={n_cols}")
 
-        return True
+            # Per-row verification: each GT assignment should appear in the
+            # table with a matching due date (YYYY-MM-DD) and points value.
+            # Tolerate at most one GT row missing/mismatched (13 -> >=12).
+            if gt_lookup:
+                import re
+                matched_rows = 0
+                for row in tbl.rows:
+                    cell_texts = [c.text.strip() for c in row.cells]
+                    name = next((t for t in cell_texts if t.lower() in gt_lookup), None)
+                    if name is None:
+                        continue
+                    gt_pts, gt_due = gt_lookup[name.lower()]
+                    date_cell = next((t for t in cell_texts
+                                      if re.fullmatch(r"\d{4}-\d{2}-\d{2}", t)), None)
+                    pts_cell = next((t for t in cell_texts
+                                     if re.fullmatch(r"\d+(?:\.\d+)?", t)), None)
+                    date_ok = gt_due is not None and date_cell is not None and _date_match(date_cell, gt_due)
+                    pts_ok = pts_cell is not None and num_close(float(pts_cell), gt_pts, 0.01)
+                    if date_ok and pts_ok:
+                        matched_rows += 1
+                expected_rows = len(gt_assignments)
+                table_rows_ok = matched_rows >= expected_rows - 1
+                record(f"Word table rows verified ({matched_rows}/{expected_rows} assignments with correct date + points)",
+                       table_rows_ok,
+                       "At most 1 GT assignment may be missing or mismatched")
+
+        return True and table_rows_ok
 
     except ImportError:
         size = os.path.getsize(docx_path)
@@ -407,7 +507,7 @@ def main():
     gt_dir = args.groundtruth_workspace or os.path.join(task_root, "groundtruth_workspace")
 
     excel_ok = check_excel(args.agent_workspace, gt_dir)
-    word_ok = check_word(args.agent_workspace)
+    word_ok = check_word(args.agent_workspace, gt_dir)
     gcal_ok = check_gcal()
     email_ok = check_emails()
 

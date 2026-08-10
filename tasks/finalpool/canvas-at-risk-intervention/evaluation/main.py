@@ -80,6 +80,40 @@ def _fetch_expected_per_course():
         return None, None
 
 
+def _top_risk_keywords(n=5):
+    """Return lowercase leading-subject keywords for the top-N courses by at-risk
+    count, derived from the database. Used so the email-body high-risk-course
+    check tracks the data instead of being hardcoded to specific course names."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT c.name,
+              COUNT(*) FILTER (WHERE (e.grades->>'current_score')::numeric < 50
+                                 AND e.grades->>'current_score' IS NOT NULL)::int AS atrisk
+            FROM canvas.enrollments e
+            JOIN canvas.courses c ON e.course_id = c.id
+            WHERE e.type = 'StudentEnrollment'
+            GROUP BY c.name
+            ORDER BY atrisk DESC, c.name
+            LIMIT %s
+        """, (n,))
+        seen = []
+        for name, _ in cur.fetchall():
+            # Drop the "(Fall 2014)" term suffix, then take the leading subject
+            # phrase up to the first '&' (e.g. "Creative Computing" from
+            # "Creative Computing & Culture (Fall 2014)").
+            base = str(name).split("(")[0].strip()
+            head = base.split("&")[0].strip().lower()
+            if head and head not in seen:
+                seen.append(head)
+        conn.close()
+        return seen
+    except Exception as e:
+        print(f"[WARN] top risk keywords: {e}")
+        return []
+
+
 def check_excel(agent_workspace, expected_per_course, expected_total):
     print("\n=== Checking Excel ===")
     xlsx_path = os.path.join(agent_workspace, "At_Risk_Report.xlsx")
@@ -232,7 +266,7 @@ def check_excel(agent_workspace, expected_per_course, expected_total):
                   f"keyword '{kw}' missing")
 
 
-def check_email(expected_total):
+def check_email(expected_total, risk_keywords):
     print("\n=== Checking Email ===")
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -262,12 +296,14 @@ def check_email(expected_total):
                 check(f"Email body mentions exact at-risk count {expected_total}",
                       str(expected_total) in body,
                       f"body sample: {body[:200]}")
-            # Body mentions courses with high at-risk counts (require >= 2 high-risk courses).
-            high_risk_terms = ["creative computing", "biochemistry", "data-driven"]
-            hits = sum(1 for t in high_risk_terms if t in body)
-            check("Email body lists multiple high-risk courses (>= 2)",
+            # Body mentions courses with high at-risk counts: require >= 2 of the
+            # top-N at-risk course keywords derived from the database (so the check
+            # tracks the data instead of being hardcoded to specific course names).
+            keywords = risk_keywords or ["creative computing", "biochemistry", "data-driven"]
+            hits = sum(1 for t in keywords if t in body)
+            check("Email body lists high-risk courses (>=2 top-course keywords)",
                   hits >= 2,
-                  f"hits={hits}; body sample: {body[:200]}")
+                  f"hits={hits}/{len(keywords)} keywords={keywords}; body sample: {body[:200]}")
         cur.close()
         conn.close()
     except Exception as e:
@@ -283,8 +319,9 @@ def main():
     args = parser.parse_args()
 
     expected_per_course, expected_total = _fetch_expected_per_course()
+    risk_keywords = _top_risk_keywords(5)
     check_excel(args.agent_workspace, expected_per_course, expected_total)
-    check_email(expected_total)
+    check_email(expected_total, risk_keywords)
 
     total = PASS_COUNT + FAIL_COUNT
     print(f"\n=== Results: {PASS_COUNT}/{total} passed ===")

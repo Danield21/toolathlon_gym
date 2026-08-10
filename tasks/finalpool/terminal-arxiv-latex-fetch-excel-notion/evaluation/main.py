@@ -1,13 +1,55 @@
 """Evaluation script for terminal-arxiv-latex-fetch-excel-notion."""
 import os
+import re
 import argparse, json, os, sys
 import openpyxl
 
+# All DB connection params come from env with defaults, so preprocess and evaluator
+# always talk to the same database regardless of harness port assignment (R1).
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
-    "user": "eigent", "password": "camel"
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel")
 }
+
+
+def _to_float(value):
+    """Robustly convert a cell value to float, or None if unparseable.
+
+    Handles ints, floats, and strings with thousand-separators, currency
+    symbols, percent signs, and stray text around a number. Returns None for
+    empty cells, booleans, or values with no extractable number, so callers
+    can safely skip them instead of crashing (R2).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        s = value.strip().replace(",", "").replace("$", "").replace("¥", "").replace("€", "").replace("%", "").strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            pass
+        m = re.search(r"-?\d+(?:\.\d+)?", s)
+        if m:
+            try:
+                return float(m.group())
+            except ValueError:
+                return None
+    return None
+
+
+def _effective_value(raw, ws_v, row_idx, col_idx):
+    """If a cell holds a formula string, return the cached value instead."""
+    if isinstance(raw, str) and raw.startswith("="):
+        cached = ws_v.cell(row=row_idx, column=col_idx).value
+        return cached
+    return raw
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -36,7 +78,8 @@ def check_excel(agent_workspace):
     if not os.path.exists(excel_path):
         return
 
-    wb = openpyxl.load_workbook(excel_path)
+    wb = openpyxl.load_workbook(excel_path)  # data_only=False: read headers/strings as written
+    wb_values = openpyxl.load_workbook(excel_path, data_only=True)  # cached values for any formulas
 
     # Paper_Sections sheet
     check("Paper_Sections sheet exists", "Paper_Sections" in wb.sheetnames)
@@ -47,18 +90,15 @@ def check_excel(agent_workspace):
         headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
         for col in ['Paper_ID', 'Paper_Title', 'Section_Title', 'Section_Word_Count']:
             check(f"Paper_Sections has {col}", col.lower() in headers, f"headers: {headers[:5]}")
-        # Check exact paper IDs present (stricter than substring; noise paper '2301.99901' must NOT match 'scaling laws')
+        # Check exact paper IDs present (stricter than substring; noise paper '2301.99901' must NOT match '2301')
         paper_ids = set(str(r[0]).strip() for r in data_rows if r[0])
-        # Allow either full ID or just the prefix
         def has_paper(target_full):
-            target_short = target_full.split('.')[0]
+            # Match the exact full ID, a prefix-extended form, or an 'arxiv:2301.07041'
+            # prefixed variant. Adjacent-digit guard stops noise '2301.99901' matching '2301'.
             for pid in paper_ids:
-                # Match full id or starts-with the target full prefix (e.g. '2301.07041' must match)
                 if pid == target_full or pid.startswith(target_full):
                     return True
-                # Allow form like 'arxiv:2301.07041'
                 if target_full in pid:
-                    # ensure adjacent characters are NOT digits (avoid noise '2301.99901' matching '2301')
                     idx = pid.find(target_full)
                     end = idx + len(target_full)
                     after_ok = end >= len(pid) or not pid[end].isdigit()
@@ -83,16 +123,23 @@ def check_excel(agent_workspace):
                 break
         if wc_idx_local is not None:
             positive_count = 0
-            for r in data_rows:
-                if r and len(r) > wc_idx_local and r[wc_idx_local] is not None:
-                    try:
-                        if float(r[wc_idx_local]) > 0:
-                            positive_count += 1
-                    except (ValueError, TypeError):
-                        pass
+            counted = 0
+            ws_v = wb_values[ws.title]
+            for row_idx, r in enumerate(data_rows, start=2):
+                if not r or len(r) <= wc_idx_local or r[wc_idx_local] is None:
+                    continue
+                raw = _effective_value(r[wc_idx_local], ws_v, row_idx, wc_idx_local + 1)
+                val = _to_float(raw)
+                if val is None:
+                    # Unparseable/uncached (e.g. a formula with no cached value): skip it
+                    # rather than counting it as a failing value (R2).
+                    continue
+                counted += 1
+                if val > 0:
+                    positive_count += 1
             check("All Section_Word_Count values are positive",
-                  positive_count == len([r for r in data_rows if r and len(r) > wc_idx_local and r[wc_idx_local] is not None]),
-                  f"only {positive_count} positive of {len(data_rows)}")
+                  counted > 0 and positive_count == counted,
+                  f"only {positive_count} positive of {counted} parseable values")
 
     # Conference_Schedule sheet
     check("Conference_Schedule sheet exists", "Conference_Schedule" in wb.sheetnames)
@@ -183,7 +230,6 @@ def check_notion():
                         if "paper" in k.lower() and "count" in k.lower():
                             v_str = json.dumps(v).lower()
                             # Look for numeric value 3
-                            import re
                             # Check 'number': 3 form
                             if re.search(r'"number"\s*:\s*3\b', v_str):
                                 paper_count_correct = True
@@ -200,11 +246,12 @@ def check_notion():
         if not found_page:
             check("Conference Prep page exists", False, f"Found {len(pages)} pages, none matching 'Conference Prep'")
 
-        # Check for content blocks - must summarize each of the 3 papers' contributions
+        # Check for content blocks - must summarize each of the 3 papers' contributions.
+        # Threshold is >= 3 (one descriptive block per paper) so a correct, concise page
+        # that adds one summary block per paper is not penalized (R11).
         cur.execute("SELECT COUNT(*) FROM notion.blocks")
         block_count = cur.fetchone()[0]
-        # Need at least 3 substantive blocks for 3 paper contributions
-        check("Notion has >= 6 content blocks", block_count >= 6, f"found {block_count} blocks")
+        check("Notion has >= 3 content blocks", block_count >= 3, f"found {block_count} blocks")
 
         # Check that block content references the 3 expected papers
         cur.execute("SELECT block_data FROM notion.blocks")
@@ -249,30 +296,32 @@ def check_reverse_validation(workspace):
     print("\n=== Reverse Validation ===")
     excel_path = os.path.join(workspace, "Conference_Prep_Tracker.xlsx")
     if os.path.exists(excel_path):
-        wb = openpyxl.load_workbook(excel_path, data_only=True)
-        # No unexpected sheets
-        expected_keywords = {"paper", "section", "conference", "schedule", "presentation", "note"}
-        unexpected = [s for s in wb.sheetnames
-                      if not any(kw in s.lower() for kw in expected_keywords)]
-        check("No unexpected sheets in Excel", len(unexpected) == 0,
-              f"Unexpected: {unexpected}")
+        wb = openpyxl.load_workbook(excel_path, data_only=False)
+        wb_values = openpyxl.load_workbook(excel_path, data_only=True)
+        # No "unexpected sheets" reverse check here: task.md requires the three
+        # named sheets but never forbids extra descriptive sheets, so a correct
+        # model may reasonably add e.g. a Summary / Key_References sheet. Flagging
+        # such sheets would be an unstated constraint that mis-FAILs valid work
+        # (fix2-R1). Sheet naming correctness is already covered by the positive
+        # "sheet exists" + column checks in check_excel.
 
         # Word counts should not be negative
         if "Paper_Sections" in wb.sheetnames:
             ws = wb["Paper_Sections"]
+            ws_v = wb_values[ws.title]
             headers = [str(c.value).strip().lower() if c.value else "" for c in ws[1]]
             wc_idx = next((i for i, h in enumerate(headers) if "word_count" in h), None)
             if wc_idx is not None:
-                for row in ws.iter_rows(min_row=2, values_only=True):
+                negative_found = False
+                for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
                     if row and len(row) > wc_idx and row[wc_idx] is not None:
-                        try:
-                            wc = float(row[wc_idx])
-                            if wc < 0:
-                                check("No negative word counts", False, f"Found {wc}")
-                                break
-                        except (ValueError, TypeError):
-                            pass
-                else:
+                        raw = _effective_value(row[wc_idx], ws_v, row_idx, wc_idx + 1)
+                        wc = _to_float(raw)
+                        if wc is not None and wc < 0:
+                            check("No negative word counts", False, f"Found {wc}")
+                            negative_found = True
+                            break
+                if not negative_found:
                     check("No negative word counts", True)
 
     # Notion: no duplicate Conference Prep pages

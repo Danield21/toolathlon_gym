@@ -14,15 +14,17 @@ import os
 import sys
 from argparse import ArgumentParser
 
+import re
+
 import psycopg2
 from docx import Document
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
-    "dbname": "toolathlon_gym",
-    "user": "eigent",
-    "password": "camel",
+    "port": int(os.environ.get("PGPORT", "5432")),
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 PASS_COUNT = 0
@@ -74,9 +76,13 @@ def check_word_doc(agent_workspace):
                 "follow instructions" in all_text or "human feedback" in all_text or
                 "ouyang" in all_text)
     # Use word boundary for 'opt' to avoid matching 'option', 'optimal', etc.
+    # A correct report may identify OPT by shorthand heading ('OPT'), by its
+    # descriptive subtitle, or by its key attributes; accept any of these.
     opt_word = _re.search(r"\bopt\b", all_text) is not None or "open pre-trained" in all_text
     has_opt = opt_word and ("open pre-trained transformer" in all_text or
+                             "pre-trained transformer" in all_text or
                              "open-source" in all_text or "175b" in all_text or
+                             "175 billion" in all_text or
                              "zhang" in all_text and "roller" in all_text)
 
     record("Mentions Scaling Laws paper", has_scaling, "No scaling laws content found")
@@ -88,6 +94,52 @@ def check_word_doc(agent_workspace):
                                "comparison of" in all_text or "comparing" in all_text)
     record("Has Comparative Analysis section title", has_comparative_section,
            "No comparative analysis section header found")
+
+
+def _extract_page_titles(properties):
+    """Extract page-title text from a stored notion.pages.properties jsonb value.
+
+    The notion MCP 'create_page' tool schema (scripts/notion-openapi.json,
+    POST /v1/pages) requires the agent to send `properties.title` as a raw
+    rich-text ARRAY, e.g. {"title": [{"text": {"content": "Paper: ..."}}]},
+    and pg-client.ts stores that payload verbatim. Some agents may instead
+    send the Notion-API-style WRAPPED object {"title": {"type": "title",
+    "title": [{"plain_text": "..."}]}}. Extract from both formats so a
+    schema-following agent always scores correctly.
+    """
+    if not isinstance(properties, dict):
+        return []
+    titles = []
+    # 1) Prefer keys whose name suggests a page title.
+    for key, val in properties.items():
+        if key.lower() not in ("title", "name", "page_title"):
+            continue
+        arr = val.get("title", []) if isinstance(val, dict) else (val if isinstance(val, list) else None)
+        if not isinstance(arr, list) or not arr:
+            continue
+        text = "".join(
+            (t.get("plain_text") if isinstance(t, dict) else "")
+            or (t.get("text", {}).get("content", "") if isinstance(t, dict) else "")
+            for t in arr
+        )
+        if text:
+            titles.append(text)
+    if titles:
+        return titles
+    # 2) Fallback: any property value that is a wrapped title object
+    #    ({"type": "title", "title": [...]}) under an unexpected key.
+    for val in properties.values():
+        if isinstance(val, dict) and val.get("type") == "title":
+            arr = val.get("title", [])
+            if isinstance(arr, list):
+                text = "".join(
+                    (t.get("plain_text") if isinstance(t, dict) else "")
+                    or (t.get("text", {}).get("content", "") if isinstance(t, dict) else "")
+                    for t in arr
+                )
+                if text:
+                    return [text]
+    return []
 
 
 def check_notion():
@@ -104,15 +156,8 @@ def check_notion():
     # Extract clean page titles (with the 'Paper:' prefix from task)
     page_titles = []
     for (props,) in pages:
-        if isinstance(props, dict):
-            for key, val in props.items():
-                if isinstance(val, dict) and val.get("type") == "title":
-                    title_arr = val.get("title", [])
-                    title_text = "".join(t.get("plain_text") or t.get("text", {}).get("content", "")
-                                          for t in title_arr if isinstance(t, dict))
-                    if title_text:
-                        page_titles.append(title_text.lower())
-                        break
+        for t in _extract_page_titles(props):
+            page_titles.append(t.lower())
 
     # Need at least 3 pages with the 'Paper:' prefix per task
     paper_pages = [t for t in page_titles if t.strip().startswith("paper:")]
@@ -122,7 +167,13 @@ def check_notion():
     all_titles = " ".join(page_titles)
     has_scaling = "scaling" in all_titles
     has_instruct = "instruct" in all_titles or "human feedback" in all_titles or "rlhf" in all_titles
-    has_opt = ("opt" in all_titles and ("pre-trained" in all_titles or "transformer" in all_titles))
+    # OPT page: accept the full title ('OPT: Open Pre-trained Transformer ...'),
+    # the common shorthand ('Paper: OPT'), or the descriptive subtitle alone.
+    has_opt = (
+        re.search(r"\bopt\b", all_titles) is not None
+        or "open pre-trained" in all_titles
+        or "pre-trained transformer" in all_titles
+    )
 
     record("Notion page covers Scaling Laws", has_scaling,
            f"titles: {page_titles[:5]}")
@@ -166,19 +217,31 @@ def check_email():
         subject, _, _, body_text = matching
         subject_lower = (subject or "").lower()
         body_lower = (body_text or "").lower()
-        # Require subject-level paper/analysis/report context AND body-level
-        # paper-specific keyword (word-boundary 'opt' to avoid 'option/optimal').
+        # Require subject-level paper/analysis/report context (fixed subject in
+        # task.md) AND a non-empty body that references the work/deliverables.
         subj_ok = (
             "paper" in subject_lower or "analysis" in subject_lower or "report" in subject_lower
         )
-        body_kw_ok = (
-            "scaling" in body_lower or "rlhf" in body_lower or "instruct" in body_lower
+        # task.md only asks the body to "summarize what you have done" and note
+        # that the Word doc + Notion pages are ready for review. Do NOT require a
+        # specific paper keyword (a literal agent may not name any paper). Accept
+        # any non-empty body that references the work/deliverables, in English or
+        # Chinese; paper-specific keywords remain accepted as evidence.
+        body_kw_ok = bool(body_text and body_text.strip()) and (
+            any(kw in body_lower for kw in (
+                # generic English work/deliverable descriptors
+                "paper", "analysis", "report", "three", "word", "notion",
+                "document", "page", "ready", "review", "deliverable", "summar",
+                # paper-specific keywords still accepted as evidence
+                "scaling", "rlhf", "instruct", "kaplan", "ouyang", "transformer",
+                # Chinese equivalents
+                "论文", "报告", "审阅", "检查", "就绪", "完成", "三篇", "分析",
+            ))
             or _re_em.search(r"\bopt\b", body_lower) is not None
-            or "kaplan" in body_lower or "ouyang" in body_lower or "transformer" in body_lower
         )
         record("Email mentions paper analysis (subject context)", subj_ok,
                f"Subject: {subject}")
-        record("Email body mentions paper-specific keyword", body_kw_ok,
+        record("Email body summarizes work / mentions deliverables", body_kw_ok,
                f"body preview: {body_text[:100] if body_text else ''}")
 
 

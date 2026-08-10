@@ -9,6 +9,7 @@ Checks:
 import argparse
 import json
 import os
+import re
 import sys
 
 import openpyxl
@@ -36,6 +37,30 @@ EXPECTED_STUDENTS = {
 EXPECTED_ASSIGNMENTS = {
     "AAA-2014J": 6, "BBB-2014J": 6, "CCC-2014J": 10,
     "DDD-2014J": 7, "EEE-2014J": 5, "FFF-2014J": 13, "GGG-2014J": 10,
+}
+
+# Expected course display names and instructor names (TeacherEnrollment) per
+# course. Used to verify Course_Name and Instructor_Names content — not just
+# sorting. Values are deterministic in this dataset (verified against the DB).
+EXPECTED_COURSE_NAMES = {
+    "AAA-2014J": "Applied Analytics & Algorithms (Fall 2014)",
+    "BBB-2014J": "Biochemistry & Bioinformatics (Fall 2014)",
+    "CCC-2014J": "Creative Computing & Culture (Fall 2014)",
+    "DDD-2014J": "Data-Driven Design (Fall 2014)",
+    "EEE-2014J": "Environmental Economics & Ethics (Fall 2014)",
+    "FFF-2014J": "Foundations of Finance (Fall 2014)",
+    "GGG-2014J": "Global Governance & Geopolitics (Fall 2014)",
+}
+
+EXPECTED_INSTRUCTORS = {
+    "AAA-2014J": ["Dr. Abigail Martin", "Dr. Andrew Walker"],
+    "BBB-2014J": ["Dr. Abigail Jackson", "Dr. Clara Parker"],
+    "CCC-2014J": ["Dr. David Rivera"],
+    "DDD-2014J": ["Dr. Logan Wilson", "Dr. Thomas Cook"],
+    "EEE-2014J": ["Dr. Lucas Jones", "Dr. Victoria Morris"],
+    "FFF-2014J": ["Dr. George Allen", "Dr. Isaac Lee",
+                  "Dr. Mason Taylor", "Dr. Matthew Davis"],
+    "GGG-2014J": ["Dr. Andrew Walker", "Dr. Laura Bailey", "Dr. Ryan Adams"],
 }
 
 
@@ -88,6 +113,22 @@ def int_close(a, b, tol=10):
         return abs(int(float(a)) - int(float(b))) <= tol
     except (TypeError, ValueError):
         return False
+
+
+def norm_text(s):
+    """Normalize a name/string for tolerant comparison: lowercase, '&' -> 'and',
+    collapse whitespace. Used for Course_Name matching."""
+    s = str(s) if s is not None else ""
+    s = s.lower().replace("&", "and")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def strip_title(n):
+    """Strip an academic title prefix (Dr./Prof./Mr./Mrs./Ms.) so an instructor
+    name matches whether or not the agent included the title."""
+    return re.sub(r"^(dr|prof|professor|mr|mrs|ms)\.?\s+", "", str(n).strip(),
+                  flags=re.IGNORECASE)
 
 
 # ============================================================================
@@ -172,6 +213,26 @@ def check_excel(agent_workspace, groundtruth_workspace):
             record(f"{code} Instructor_Names alphabetical",
                    names == sorted(names, key=str.lower),
                    f"Got: {names}")
+
+        # Validate Course_Name content (normalized, tolerant to '&'/'and'
+        # and to whether the '(Fall 2014)' suffix is included).
+        if len(agent_row) > 1:
+            exp_name = norm_text(EXPECTED_COURSE_NAMES[code])
+            agent_name = norm_text(agent_row[1])
+            name_ok = (exp_name == agent_name
+                       or exp_name in agent_name
+                       or agent_name in exp_name)
+            record(f"{code}: Course_Name", name_ok,
+                   f"Expected ~{EXPECTED_COURSE_NAMES[code]}, got {agent_row[1]}")
+
+        # Validate every expected instructor appears in Instructor_Names
+        # (title-agnostic, so 'Dr.' prefix is optional).
+        inst_cell = agent_row[6] if len(agent_row) > 6 else ""
+        inst_norm = norm_text(inst_cell)
+        missing = [n for n in EXPECTED_INSTRUCTORS[code]
+                   if strip_title(n).lower() not in inst_norm]
+        record(f"{code}: Instructor_Names lists all expected instructors",
+               not missing, f"Missing: {missing}")
 
         # Check student count
         record(f"Course {code}: Student_Count",

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
-    "user": "eigent", "password": "camel"
+    "user": os.environ.get("PGUSER", "eigent"), "password": os.environ.get("PGPASSWORD", "camel")
 }
 
 TASK_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -41,7 +41,9 @@ def inject_data(launch_time):
     conn.close()
 
 
-def setup_mock_server(port=30307):
+def setup_mock_server(port=None):
+    if port is None:
+        port = int(os.environ.get("MOCK_SERVER_PORT", "30307"))
     files_dir = os.path.join(TASK_ROOT, "files")
     tmp_dir = os.path.join(TASK_ROOT, "tmp")
     if os.path.exists(tmp_dir):
@@ -50,7 +52,7 @@ def setup_mock_server(port=30307):
 
     # Kill existing process on port
     try:
-        subprocess.run(f"kill -9 $(lsof -ti:30307) 2>/dev/null", shell=True, timeout=5)
+        subprocess.run(f"kill -9 $(lsof -ti:{port}) 2>/dev/null", shell=True, timeout=5)
     except Exception:
         pass
     time.sleep(0.5)
@@ -66,11 +68,11 @@ def setup_mock_server(port=30307):
     if os.path.exists(mock_dir):
         log_path = os.path.join(mock_dir, "server.log")
         subprocess.Popen(
-            f"nohup python3 -m http.server 30307 --directory {mock_dir} > {log_path} 2>&1 &",
+            f"nohup python3 -m http.server {port} --directory {mock_dir} > {log_path} 2>&1 &",
             shell=True
         )
         time.sleep(1)
-        print(f"Mock server started on port 30307")
+        print(f"Mock server started on port {port}")
 
 
 def main():
@@ -81,7 +83,7 @@ def main():
 
     clear_writable_schemas()
     inject_data(args.launch_time)
-    setup_mock_server(30307)
+    setup_mock_server()
 
 if __name__ == "__main__":
     main()

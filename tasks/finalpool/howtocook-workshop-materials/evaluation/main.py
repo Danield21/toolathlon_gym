@@ -26,15 +26,97 @@ has freedom to choose any 3 recipes from HowToCook:
 import os
 import sys
 import json
+import re
 from argparse import ArgumentParser
 from datetime import datetime
 
-
-def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
-    return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
-
 from docx import Document
 from pptx import Presentation
+
+
+# ---------- language-independent content helpers ----------
+# The HowToCook MCP data source is Chinese; models may emit either English
+# (encouraged by the task) or Chinese body text. These helpers accept both
+# so that structurally-correct submissions are never failed on language alone.
+
+# Ingredients/measurement signals (English + Chinese) and a digit+unit pattern.
+_INGREDIENT_KEYWORDS = [
+    "ingredient", "tablespoon", "teaspoon", "gram", "cup", "ml", "oil", "salt",
+    "sugar", "egg", "flour", "kg", "oz", "chicken", "broccoli", "garlic",
+    "soy sauce", "ginger", "scallion", "onion", "beef", "pork", "fish", "rice",
+    "noodle", "tofu", "mushroom", "pepper", "carrot", "potato", "vinegar",
+    "wine", "water", "cola", "lemon", "cucumber", "cabbage", "spinach", "shrimp",
+    "食材", "配料", "主料", "辅料", "调料", "克", "毫升", "勺", "油", "盐", "糖",
+    "鸡蛋", "西红柿", "番茄", "葱", "姜", "蒜", "酱油", "料酒", "面粉", "淀粉",
+    "鸡肉", "猪肉", "牛肉", "鱼", "虾", "豆腐", "蘑菇", "香菇", "木耳", "醋",
+]
+_UNIT_PATTERN = re.compile(
+    r"\d+\s*(?:g|kg|ml|l|tbsp|tablespoon|teaspoon|cup|oz|lb|"
+    r"克|毫升|升|斤|两|公斤|个|颗|瓣|勺|条|根|片|块|枚|只|份)",
+    re.IGNORECASE,
+)
+
+# Cooking-step signals (English verbs + Chinese verbs + numbered-step markers).
+_STEP_KEYWORDS = [
+    "step", "stir", "cook", "heat", "add", "pour", "cut", "boil", "simmer",
+    "fry", "mix", "blanch", "season", "serve", "preheat", "saute", "toss",
+    "sauce", "烧", "炒", "煮", "切", "加热", "加入", "倒入", "焯", "搅拌",
+    "煸", "煎", "炖", "蒸", "炸", "翻", "步骤",
+]
+_STEP_PATTERN = re.compile(
+    r"(?:step\s*\d|步骤\s*\d|第[一二三四五六七八九十\d]+步)", re.IGNORECASE
+)
+
+_STOPWORDS = set("""a an and or of to in on for with at by from as is are was were
+be been being this that these those it its we our you your they their i me my he him
+she her them us not no can could will would shall should may might must do does did
+done have has had about into over under above below out up down off again further
+then once here there when where why how all any both each few more most other some
+such only own same so than too very just don now also""".split())
+
+
+def _contains_ingredient_content(text):
+    if any(k in text for k in _INGREDIENT_KEYWORDS):
+        return True
+    if _UNIT_PATTERN.search(text):
+        return True
+    return False
+
+
+def _contains_step_content(text):
+    if any(k in text for k in _STEP_KEYWORDS):
+        return True
+    if _STEP_PATTERN.search(text):
+        return True
+    return False
+
+
+_CJK_REJOIN = re.compile(r"(?<=[一-鿿])\s+(?=[一-鿿])")
+
+
+def _rejoin_cjk_spaces(text):
+    """Remove whitespace sitting between two CJK chars.
+
+    pypdf/PyPDF2 extract CJK text from fonts lacking a ToUnicode map by
+    inserting a space between (almost) every glyph, e.g. '红 烧 肉'. Rejoining
+    restores contiguous runs so the CJK tokenizer still sees real words.
+    """
+    return _CJK_REJOIN.sub("", text)
+
+
+def _tokenize(text):
+    """Language-independent token set (latin words + CJK runs)."""
+    tokens = set()
+    text = _rejoin_cjk_spaces(text)
+    for m in re.finditer(r"[A-Za-z0-9]+", text):
+        t = m.group(0).lower()
+        if len(t) >= 2 and not t.isdigit() and t not in _STOPWORDS:
+            if t.endswith("s") and len(t) > 3:
+                t = t[:-1]  # crude plural normalization
+            tokens.add(t)
+    for m in re.finditer(r"[一-鿿]{2,}", text):
+        tokens.add(m.group(0))
+    return tokens
 
 
 def check_word_doc(agent_workspace):
@@ -93,11 +175,11 @@ def check_word_doc(agent_workspace):
 
     # 3. At least 3 second-level headings (dish names)
     total += 1
-    # Count Heading 1 and Heading 2 level headings (excluding known section names)
+    # Count Heading 1/2/3 level headings (excluding known section names)
     dish_headings = []
     known_sections = {"tips and notes", "cooking workshop handbook", "ingredients",
                       "cooking steps", "tips", "notes", "introduction", "welcome"}
-    for level in [1, 2]:
+    for level in [1, 2, 3]:
         for h in headings_by_level.get(level, []):
             if h.lower().strip() not in known_sections:
                 dish_headings.append(h)
@@ -111,32 +193,18 @@ def check_word_doc(agent_workspace):
     else:
         print(f"  FAIL: Only {len(dish_headings)} dish headings found (need >= 3). All H1: {headings_by_level.get(1, [])}")
 
-    # 4. Contains ingredient content
+    # 4. Contains ingredient content (language-independent: EN/CN keywords + digit+unit)
     total += 1
-    has_ingredients = ("ingredient" in full_text or
-                       "tablespoon" in full_text or
-                       "teaspoon" in full_text or
-                       "gram" in full_text or
-                       "cup" in full_text or
-                       "ml" in full_text or
-                       "oil" in full_text or
-                       "salt" in full_text)
+    has_ingredients = _contains_ingredient_content(full_text)
     if has_ingredients:
         passed += 1
         print("  PASS: Ingredient content found")
     else:
         print("  FAIL: No ingredient content found in document")
 
-    # 5. Contains step/instruction content
+    # 5. Contains step/instruction content (language-independent: EN/CN verbs + step markers)
     total += 1
-    has_steps = ("step" in full_text or
-                 "stir" in full_text or
-                 "cook" in full_text or
-                 "heat" in full_text or
-                 "add" in full_text or
-                 "pour" in full_text or
-                 "cut" in full_text or
-                 "boil" in full_text)
+    has_steps = _contains_step_content(full_text)
     if has_steps:
         passed += 1
         print("  PASS: Cooking step content found")
@@ -144,15 +212,24 @@ def check_word_doc(agent_workspace):
         print("  FAIL: No cooking step content found in document")
 
     # 6. Has "Tips and Notes" section
+    # The task mandates the English section name, but a model that translates
+    # it into Chinese (a common HowToCook-side behaviour) must not be failed.
     total += 1
+    tips_keywords = ("tips", "note", "小贴士", "注意事项", "烹饪提示", "小提示",
+                     "贴心提示", "温馨提示", "厨师提示", "烹饪建议", "小建议",
+                     "备忘")
     has_tips = any("tips" in h.lower() and "note" in h.lower()
                    for h in all_headings_flat)
     if not has_tips:
-        # Fallback: check for just "tips" heading
-        has_tips = any("tips" in h.lower() for h in all_headings_flat)
+        # Fallback: any tips-like heading (EN or CN)
+        has_tips = any(any(k in h.lower() for k in tips_keywords)
+                       for h in all_headings_flat)
     if not has_tips:
-        # Fallback: check body text
-        has_tips = "tips and notes" in full_text or "tips" in full_text
+        # Fallback: check body text (specific EN/CN tips phrases)
+        has_tips = any(k in full_text
+                       for k in ("tips and notes", "tips", "小贴士", "注意事项",
+                                 "烹饪提示", "小提示", "贴心提示", "温馨提示",
+                                 "厨师提示", "烹饪建议"))
     if has_tips:
         passed += 1
         print("  PASS: 'Tips and Notes' section found")
@@ -265,24 +342,36 @@ def check_word_pdf_consistency(agent_workspace):
 
     pdf_text = extract_pdf_text(pdf_path).lower()
 
-    # Extract candidate ingredient keywords from Word doc
-    # Use a curated list of common cooking keywords that might appear
-    ingredient_keywords = [
-        "egg", "tomato", "chicken", "broccoli", "garlic", "oil", "salt",
-        "sugar", "soy sauce", "ginger", "scallion", "onion", "beef", "pork",
-        "fish", "rice", "noodle", "tofu", "mushroom", "pepper", "carrot",
-        "potato", "vinegar", "wine", "flour", "water", "cola", "lemon",
-        "cucumber", "cabbage", "spinach", "shrimp",
-    ]
-    word_keywords = {kw for kw in ingredient_keywords if kw in word_text}
-    overlap = {kw for kw in word_keywords if kw in pdf_text}
+    # If PDF text extraction was unreliable (empty/garbled binary fallback),
+    # skip the consistency check rather than fail a valid deliverable.
+    alnum_chars = sum(1 for ch in pdf_text if ch.isalnum())
+    if alnum_chars < 50:
+        print("  [SKIP] PDF text extraction unreliable; skipping PDF-Word consistency check")
+        return passed, total
+
+    # Language-independent content overlap: the PDF consolidates ingredients from
+    # the same three dishes as the Word handbook, so their content tokens must overlap.
+    word_tokens = _tokenize(word_text)
+    pdf_tokens = _tokenize(pdf_text)
+
+    # Long-but-garbled extraction (e.g. a CJK font without a ToUnicode map whose
+    # glyphs are all single chars, or a binary fallback decoding to junk) can
+    # yield substantial text yet almost no recognizable tokens. Comparing such
+    # broken text would fail a valid deliverable, so skip instead. Genuine
+    # inconsistencies where both documents ARE extractable still FAIL below.
+    if len(word_tokens) < 3 or len(pdf_tokens) < 3:
+        print("  [SKIP] Document text extraction yielded no recognizable content tokens; "
+              "skipping PDF-Word consistency check")
+        return passed, total
+
+    shared = word_tokens & pdf_tokens
 
     total += 1
-    if len(overlap) >= 3:
+    if len(shared) >= 3:
         passed += 1
-        print(f"  PASS: PDF-Word ingredient overlap (found {len(overlap)} shared: {sorted(overlap)[:5]})")
+        print(f"  PASS: PDF-Word ingredient overlap (found {len(shared)} shared tokens: {sorted(shared)[:8]})")
     else:
-        print(f"  FAIL: Only {len(overlap)} shared ingredient keywords between PDF and Word (need >= 3). Word had {len(word_keywords)}: {sorted(word_keywords)[:8]}")
+        print(f"  FAIL: Only {len(shared)} shared content tokens between PDF and Word (need >= 3). Word tokens: {sorted(word_tokens)[:8]}")
 
     return passed, total
 

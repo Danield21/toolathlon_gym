@@ -14,7 +14,9 @@ The third sheet called "Ticket System Comparison" should have columns Priority, 
 
 The fourth sheet called "Improvement Areas" should identify areas needing attention. It should have columns Area, Current_Score, Target_Score, and Gap. Include rows for each metric (Response Time, Resolution Quality, Agent Professionalism) where the survey average is below 4.0. The target score should be 4.5 for all metrics. The gap is the target minus the current score.
 
-Next, create a Google Form for ongoing feedback collection. The form should be titled "Customer Support Feedback Form" and include the following questions: an overall satisfaction rating (scale 1-5), a response time rating (scale 1-5), a resolution quality rating (scale 1-5), a priority level selection (High, Medium, Low), and an open-ended comments field.
+Note: write all numeric values in the Excel file as literal values (for example, 3.25, 6.23), not as Excel formulas such as =AVERAGE(...) or =C2-B2.
+
+Next, create a Google Form for ongoing feedback collection. The form should be titled "Customer Support Feedback Form" and include the following questions: an overall satisfaction rating (scale 1-5), a response time rating (scale 1-5), a resolution quality rating (scale 1-5), a priority level selection (High, Medium, Low), and an open-ended comments field. Implement each 1-5 rating and the priority selection as single-select (multiple choice) questions — with options "1,2,3,4,5" for the ratings and "High, Medium, Low" for the priority — and the comments field as an open text question.
 
 Schedule four quarterly review meetings in Google Calendar for the year 2026: on March 15, June 15, September 15, and December 15, from 10:00 AM to 11:30 AM in America/New_York timezone. Each event summary should be "Support Satisfaction Review - Q[N] 2026" where N is the quarter number (1 through 4).
 

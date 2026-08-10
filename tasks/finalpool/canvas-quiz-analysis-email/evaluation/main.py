@@ -2,8 +2,12 @@
 Evaluation script for canvas-quiz-analysis-email task.
 
 Checks:
-1. Excel Quiz_Performance.xlsx with Quiz Analysis sheet
-2. Email sent to course instructor
+1. Excel Quiz_Performance.xlsx with "Quiz Analysis" sheet documenting each quiz's
+   title, points possible, and question count.
+2. Email sent to the course instructor.
+
+The quiz metrics (Points_Possible, Question_Count) come straight from
+canvas.quizzes — no per-submission data is required.
 
 Usage:
     python evaluation/main.py \
@@ -69,20 +73,18 @@ def compute_expected():
         print(f"  WARNING: Could not connect to PostgreSQL: {e}")
         return None
 
+    # Quiz metrics come from canvas.quizzes directly (title, points_possible,
+    # question_count). Ordered by question_count desc, title asc to match the
+    # required worksheet sort order.
     cur.execute("""
-        SELECT q.title, q.points_possible,
-               ROUND(AVG(qs.score)::numeric, 2) as avg_score,
-               ROUND(100.0 * COUNT(CASE WHEN qs.score >= q.points_possible * 0.6 THEN 1 END) / COUNT(*)::numeric, 1) as pass_rate,
-               COUNT(*) as student_count
+        SELECT q.title, q.points_possible, q.question_count
         FROM canvas.quizzes q
-        JOIN canvas.quiz_submissions qs ON q.id = qs.quiz_id
         WHERE q.course_id = 3
-        GROUP BY q.id, q.title, q.points_possible
-        ORDER BY pass_rate
+        ORDER BY q.question_count DESC, q.title ASC
     """)
     quiz_rows = cur.fetchall()
 
-    # Get instructor email
+    # Get instructor email (earliest-enrolled teacher for the course).
     cur.execute("""
         SELECT u.email FROM canvas.enrollments e
         JOIN canvas.users u ON e.user_id = u.id
@@ -119,7 +121,7 @@ def check_excel(agent_workspace, expected):
         check("Quiz Analysis row count", len(agent_rows) == len(exp),
               f"Expected {len(exp)}, got {len(agent_rows)}")
 
-        # Build lookup by title
+        # Build lookup by title (Quiz_Title is column 0)
         agent_by_title = {}
         for row in agent_rows:
             if row and row[0]:
@@ -129,27 +131,28 @@ def check_excel(agent_workspace, expected):
             title = exp_row[0]
             agent_row = agent_by_title.get(title.strip().lower())
             if agent_row:
+                # exp_row is (title, points_possible, question_count)
                 check(f"Quiz '{title}' Points_Possible",
                       num_close(agent_row[1], float(exp_row[1]), 0.01),
                       f"Expected {exp_row[1]}, got {agent_row[1]}")
-                check(f"Quiz '{title}' Avg_Score",
-                      num_close(agent_row[2], float(exp_row[2]), 1.0),
+                check(f"Quiz '{title}' Question_Count",
+                      num_close(agent_row[2], float(exp_row[2]), 0.0),
                       f"Expected {exp_row[2]}, got {agent_row[2]}")
-                check(f"Quiz '{title}' Pass_Rate_Pct",
-                      num_close(agent_row[3], float(exp_row[3]), 1.0),
-                      f"Expected {exp_row[3]}, got {agent_row[3]}")
-                check(f"Quiz '{title}' Student_Count",
-                      num_close(agent_row[4], exp_row[4], 5),
-                      f"Expected {exp_row[4]}, got {agent_row[4]}")
             else:
                 check(f"Quiz '{title}' found in output", False, "Not in agent output")
 
-        # Check sort order (by pass rate ascending)
+        # Check sort order (by Question_Count descending).
         if len(agent_rows) >= 2:
-            pass_rates = [float(r[3]) for r in agent_rows if r and r[3] is not None]
-            check("Sorted by Pass_Rate_Pct ascending",
-                  all(pass_rates[i] <= pass_rates[i + 1] for i in range(len(pass_rates) - 1)),
-                  f"Pass rates: {pass_rates}")
+            counts = []
+            for r in agent_rows:
+                if r and r[2] is not None:
+                    try:
+                        counts.append(float(r[2]))
+                    except (TypeError, ValueError):
+                        pass
+            check("Sorted by Question_Count descending",
+                  all(counts[i] >= counts[i + 1] for i in range(len(counts) - 1)),
+                  f"Question counts: {counts}")
 
 
 def check_email(expected):
@@ -166,7 +169,6 @@ def check_email(expected):
 
     conn.close()
 
-    # Per task.md: must send a real email (not draft). Only check email.messages.
     all_items = list(messages)
     check("At least one sent email message exists", len(all_items) > 0,
           f"Found {len(messages)} messages")
@@ -178,14 +180,12 @@ def check_email(expected):
             found_email = True
             check("Email subject contains 'Quiz Performance'", True)
 
-            # Check from_addr = coordinator@university.edu
             from_addr = item[1]
             from_str = json.dumps(from_addr).lower() if isinstance(from_addr, (list, dict)) else str(from_addr or "").lower()
             check("Email sent from coordinator@university.edu",
                   "coordinator@university.edu" in from_str,
                   f"From: {from_str}")
 
-            # Check recipient
             to_addr = item[2]
             if expected and expected.get("instructor_email"):
                 exp_email = expected["instructor_email"].lower()
@@ -194,27 +194,18 @@ def check_email(expected):
                       exp_email in to_str,
                       f"Expected to contain '{exp_email}', got '{to_str}'")
 
-            # Check body has content
             body = str(item[3] or "")
             check("Email body is not empty", len(body) > 20,
                   f"Body length: {len(body)}")
-            # Lowest-pass-rate quiz title in body
+            # The quiz with the most questions should be mentioned in the body.
+            # expected["quizzes"] is already ordered by question_count DESC, so the
+            # first entry is the quiz with the most questions.
             if expected and expected.get("quizzes"):
-                try:
-                    quizzes = expected["quizzes"]
-                    # quiz tuple is (title, points_possible, avg_score, pass_rate, student_count)
-                    quizzes_sorted = sorted(
-                        quizzes,
-                        key=lambda q: float(q[3]) if q[3] is not None else 100.0,
-                    )
-                    if quizzes_sorted:
-                        lowest_title = str(quizzes_sorted[0][0] or "").strip()
-                        if lowest_title:
-                            check("Email body mentions lowest pass-rate quiz title",
-                                  lowest_title.lower() in body.lower(),
-                                  f"Expected '{lowest_title}' in body")
-                except Exception as e:
-                    check("Lowest pass-rate quiz check", True, f"skip: {e}")
+                most_q_title = str(expected["quizzes"][0][0] or "").strip()
+                if most_q_title:
+                    check("Email body mentions the quiz with the most questions",
+                          most_q_title.lower() in body.lower(),
+                          f"Expected '{most_q_title}' in body")
             break
 
     if not found_email:

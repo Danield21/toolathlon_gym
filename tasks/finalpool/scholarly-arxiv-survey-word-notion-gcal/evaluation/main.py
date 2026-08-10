@@ -13,16 +13,18 @@ import json
 import os
 import sys
 from argparse import ArgumentParser
+from datetime import date, timezone
+from zoneinfo import ZoneInfo
 
 import psycopg2
 from docx import Document
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
-    "dbname": "toolathlon_gym",
-    "user": "eigent",
-    "password": "camel",
+    "port": int(os.environ.get("PGPORT", "5432")),
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 PASS_COUNT = 0
@@ -79,8 +81,25 @@ def check_word_doc(agent_workspace):
     combined_text = all_text + " " + table_text
 
     # Check required sections (must have ALL 7)
-    headings = [p.text.strip() for p in doc.paragraphs
-                if p.style.name.startswith("Heading") and p.text.strip()]
+    def _is_heading_para(p):
+        t = p.text.strip()
+        if not t:
+            return False
+        if p.style.name.startswith("Heading"):
+            return True
+        # Fallbacks for heading-like titles typed as Normal paragraphs
+        # (e.g. via python_execute/python-docx): short all-bold paragraph,
+        # or a numbered line such as "1. Introduction" / "3.1 Chain-of-Thought".
+        if len(t) > 120:
+            return False
+        runs = [r for r in p.runs if (r.text or "").strip()]
+        if runs and all(r.bold for r in runs):
+            return True
+        if t[0].isdigit() and ". " in t[:5]:
+            return True
+        return False
+
+    headings = [p.text.strip() for p in doc.paragraphs if _is_heading_para(p)]
     headings_lower = [h.lower() for h in headings]
 
     has_abstract = any("abstract" in h for h in headings_lower) or "abstract" in all_text[:500]
@@ -186,32 +205,80 @@ def check_notion_database():
     cur.execute("SELECT properties FROM notion.pages")
     pages = cur.fetchall()
 
-    # Tighter: require pages with at least one of 5 distinct paper title fragments.
-    # Group fragment variants (apostrophe vs space) under same canonical key
-    # so we don't double-count "let's verify" vs "let s verify" as 2 papers.
+    # Require pages matching the 5 paper title/method fragments. Fragments are
+    # intentionally short so that agents which shorten the paper titles (e.g.
+    # "Chain of Thought", "Self-Consistency Decoding") or use hyphenated /
+    # non-hyphenated variants of the method names still match.
+    #
+    # Matching is a MAXIMUM BIPARTITE MATCHING between pages and the 5 paper
+    # groups, so it is ORDER-INDEPENDENT. That matters because the
+    # Self-Consistency paper's abstract opens with "Chain-of-thought prompting
+    # has shown promise ...", so a Self-Consistency page carrying that abstract
+    # (or a summary of it) matches BOTH the chain_of_thought and
+    # self_consistency groups. With a greedy first-match-wins scan, whichever
+    # page the DB returns first could "steal" the CoT group and the real CoT
+    # entry would then match nothing - a correct agent judged FAIL purely on
+    # the (unordered, insertion-order) read order of notion.pages. Bipartite
+    # matching instead lets the SC page fill the self_consistency slot while the
+    # CoT page fills the chain_of_thought slot.
+    #
+    # Bare "chain of thought" is a fragment because the task does not require
+    # the paper's full name; a title of just "Chain of Thought" is a valid
+    # correct completion. Fragment collisions are harmless here because the
+    # matching maximizes coverage rather than consuming groups greedily.
     PAPER_GROUPS = [
-        ("chain_of_thought_prompting", ["chain-of-thought prompting elicits",
-                                          "chain of thought prompting elicits"]),
         ("tree_of_thought", ["tree of thought", "tree-of-thought"]),
-        ("self_consistency", ["self-consistency improves", "self consistency improves"]),
-        ("lets_verify_step", ["let's verify step by step", "let s verify step by step"]),
-        ("automatic_cot", ["automatic chain of thought", "auto-cot", "auto cot"]),
+        ("automatic_cot", ["automatic chain of thought",
+                           "automatic chain-of-thought",
+                           "automatic cot", "auto-cot", "auto cot"]),
+        ("chain_of_thought", ["chain of thought", "chain-of-thought",
+                              "chain of thought prompting",
+                              "chain-of-thought prompting",
+                              "prompting elicits reasoning"]),
+        ("self_consistency", ["self-consistency", "self consistency"]),
+        ("lets_verify_step", ["let's verify", "let s verify",
+                              "process supervision",
+                              "step by step verification",
+                              "step-by-step verification"]),
     ]
-    paper_pages = 0
-    matched_canon = set()
+    canon_order = [c for c, _ in PAPER_GROUPS]
+    canon_index = {c: i for i, c in enumerate(canon_order)}
+
+    # Page -> set of paper groups its properties text can serve.
+    page_groups = []
     for (props,) in pages:
         props_str = json.dumps(props).lower() if isinstance(props, dict) else str(props).lower()
+        gs = set()
         for canon, frags in PAPER_GROUPS:
-            if canon in matched_canon:
-                continue
             if any(f in props_str for f in frags):
-                matched_canon.add(canon)
-                paper_pages += 1
-                break
+                gs.add(canon)
+        page_groups.append(gs)
 
+    # Kuhn's augmenting-path algorithm for maximum bipartite matching:
+    # pages (left) to paper groups (right). A page matching several groups can
+    # fill only one slot, and every matched group needs its own page, so all 5
+    # distinct paper topics are still required - 5 genuinely distinct entries.
+    group_owner = {}  # group index -> page index
+
+    def _augment(page_idx, seen):
+        for g in page_groups[page_idx]:
+            gi = canon_index[g]
+            if gi in seen:
+                continue
+            seen.add(gi)
+            prev = group_owner.get(gi)
+            if prev is None or _augment(prev, seen):
+                group_owner[gi] = page_idx
+                return True
+        return False
+
+    for p in range(len(page_groups)):
+        _augment(p, set())
+
+    matched_names = [canon_order[i] for i in sorted(group_owner)]
     record("At least 5 paper entries with specific titles in Notion (deduped)",
-           len(matched_canon) >= 5,
-           f"Matched {len(matched_canon)} distinct papers: {sorted(matched_canon)}",
+           len(group_owner) >= len(canon_order),
+           f"Matched {len(group_owner)} distinct papers: {sorted(matched_names)}",
            category="runtime")
 
     # DB schema must have all required properties (Title/Authors/Year/Method/Key_Contribution/Cited_By)
@@ -245,28 +312,51 @@ def check_gcal():
         return
     cur = conn.cursor()
 
+    # Window is widened slightly to tolerate timezone-offset inputs: the DB
+    # stores start_datetime normalized to UTC, so an event created as
+    # "2026-03-16T10:00:00+08:00" lands on 2026-03-16 02:00Z.
     cur.execute("""
-        SELECT summary, start_datetime, end_datetime
+        SELECT summary, start_datetime, end_datetime, start_timezone
         FROM gcal.events
-        WHERE start_datetime >= '2026-03-16' AND start_datetime < '2026-03-21'
+        WHERE start_datetime >= '2026-03-15' AND start_datetime < '2026-03-22'
         ORDER BY start_datetime
     """)
     events = cur.fetchall()
+
+    def local_start(e):
+        """Return tz-aware wall-clock start for an event row
+        (summary, start_datetime, end_datetime, start_timezone)."""
+        sd = e[1]
+        if sd is None:
+            return None
+        if sd.tzinfo is None:
+            sd = sd.replace(tzinfo=timezone.utc)
+        tz_name = e[3] or ""
+        if tz_name:
+            try:
+                return sd.astimezone(ZoneInfo(tz_name))
+            except Exception:
+                pass
+        return sd.astimezone(timezone.utc)
 
     reading_events = [
         e for e in events
         if "reading group" in (e[0] or "").lower()
     ]
 
-    record("Exactly 5 reading group events in March 16-20 week",
-           len(reading_events) == 5,
+    # Lenient count (>=5): in swarm runs the same session can be scheduled
+    # more than once; the weekday-coverage check below still requires all five
+    # distinct Mon-Fri dates to be present.
+    record("At least 5 reading group events in March 15-21 window",
+           len(reading_events) >= 5,
            f"Found {len(reading_events)}: {[e[0] for e in reading_events]}",
            category="runtime")
 
     if reading_events:
         # All durations should be exactly 1 hour
         all_one_hour = True
-        for s, sd, ed in reading_events:
+        for e in reading_events:
+            sd, ed = e[1], e[2]
             if sd and ed:
                 hrs = (ed - sd).total_seconds() / 3600
                 if abs(hrs - 1.0) > 0.05:
@@ -277,20 +367,36 @@ def check_gcal():
                 break
         record("All sessions exactly 1 hour", all_one_hour, category="runtime")
 
-        # All sessions must be at 10:00 start
-        all_at_10 = all(e[1] is not None and e[1].hour == 10 and e[1].minute == 0
-                        for e in reading_events)
-        record("All sessions start at 10:00", all_at_10, category="runtime")
+        # All sessions must start at 10:00 local wall-clock time.
+        # The local timezone is taken from the event's start_timezone when the
+        # agent supplied one; otherwise the stored UTC value is used.
+        local_starts = [local_start(e) for e in reading_events]
+        strict_at_10 = all(ls is not None and ls.hour == 10 and ls.minute == 0
+                           for ls in local_starts)
+        # Fallback: if the strict check fails, accept when every event shares a
+        # single UTC hour-of-day (all scheduled at the same local hour) and that
+        # hour corresponds to 10:00 in UTC itself or in Asia/Shanghai (UTC+8,
+        # the lab's home timezone). This tolerates agents that embed the offset
+        # in the dateTime (e.g. "2026-03-16T10:00:00+08:00") without passing the
+        # separate timeZone field -- such events are stored as 02:00 UTC.
+        utc_hours = {ls.astimezone(timezone.utc).hour
+                     for ls in local_starts if ls is not None}
+        minutes_zero = all(ls is not None and ls.minute == 0 for ls in local_starts)
+        fallback_at_10 = (minutes_zero and len(utc_hours) == 1
+                          and next(iter(utc_hours), None) in (10, 2))
+        all_at_10 = strict_at_10 or fallback_at_10
+        record("All sessions start at 10:00 (local wall-clock)", all_at_10, category="runtime")
 
-        # 5 distinct dates Mon-Fri (2026-03-16..20)
+        # 5 distinct dates Mon-Fri (2026-03-16..20), evaluated in the same
+        # wall-clock timezone as the hour check.
         expected_dates = {
-            __import__("datetime").date(2026, 3, 16),
-            __import__("datetime").date(2026, 3, 17),
-            __import__("datetime").date(2026, 3, 18),
-            __import__("datetime").date(2026, 3, 19),
-            __import__("datetime").date(2026, 3, 20),
+            date(2026, 3, 16),
+            date(2026, 3, 17),
+            date(2026, 3, 18),
+            date(2026, 3, 19),
+            date(2026, 3, 20),
         }
-        actual_dates = {e[1].date() for e in reading_events if e[1]}
+        actual_dates = {ls.date() for ls in local_starts if ls is not None}
         record("Sessions cover all 5 weekdays Mar 16-20",
                actual_dates == expected_dates,
                f"got {sorted(actual_dates)}",

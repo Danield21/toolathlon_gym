@@ -76,6 +76,27 @@ def load_sheet_rows(wb, sheet_name):
     return None
 
 
+def _norm_header(h):
+    return " ".join(str(h or "").strip().lower().replace("-", " ").replace("_", " ").split())
+
+
+def _header_map(rows):
+    """Map normalized header text -> 0-based column index from row 1 of a sheet."""
+    if not rows or not rows[0]:
+        return {}
+    return {_norm_header(h): i for i, h in enumerate(rows[0]) if _norm_header(h)}
+
+
+def _cell(row, idx):
+    """Safe cell access (None when idx out of range)."""
+    if row is None or idx is None:
+        return None
+    try:
+        return row[idx] if idx < len(row) else None
+    except (TypeError, IndexError):
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -115,7 +136,9 @@ def main():
         errors = []
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
-        
+        a_col = _header_map(a_rows)
+        g_col = _header_map(g_rows)
+
         a_lookup = {}
         for row in a_data:
             if row and row[0] is not None:
@@ -128,22 +151,34 @@ def main():
             if a_row is None:
                 errors.append(f"Missing row: {g_row[0]}")
                 continue
-            
-            if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 0):  # exact employee count
-                    errors.append(f"{key}.Employee_Count: {a_row[1]} vs {g_row[1]} (exact)")
 
-            if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 1.0):  # ±$1 due to rounding
-                    errors.append(f"{key}.Avg_Salary: {a_row[2]} vs {g_row[2]} (tol=1.0)")
+            # Employee_Count (exact)
+            a_v = _cell(a_row, a_col.get("employee count"))
+            g_v = _cell(g_row, g_col.get("employee count"))
+            if a_v is not None and g_v is not None:
+                if not num_close(a_v, g_v, 0):
+                    errors.append(f"{key}.Employee_Count: {a_v} vs {g_v} (exact)")
 
-            if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 0.1):
-                    errors.append(f"{key}.Avg_Rating: {a_row[3]} vs {g_row[3]} (tol=0.1)")
+            # Avg_Salary (±$1 due to rounding)
+            a_v = _cell(a_row, a_col.get("avg salary"))
+            g_v = _cell(g_row, g_col.get("avg salary"))
+            if a_v is not None and g_v is not None:
+                if not num_close(a_v, g_v, 1.0):
+                    errors.append(f"{key}.Avg_Salary: {a_v} vs {g_v} (tol=1.0)")
 
-            if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 0.1):
-                    errors.append(f"{key}.Avg_Satisfaction: {a_row[4]} vs {g_row[4]} (tol=0.1)")
+            # Avg_Rating
+            a_v = _cell(a_row, a_col.get("avg rating"))
+            g_v = _cell(g_row, g_col.get("avg rating"))
+            if a_v is not None and g_v is not None:
+                if not num_close(a_v, g_v, 0.1):
+                    errors.append(f"{key}.Avg_Rating: {a_v} vs {g_v} (tol=0.1)")
+
+            # Avg_Satisfaction
+            a_v = _cell(a_row, a_col.get("avg satisfaction"))
+            g_v = _cell(g_row, g_col.get("avg satisfaction"))
+            if a_v is not None and g_v is not None:
+                if not num_close(a_v, g_v, 0.1):
+                    errors.append(f"{key}.Avg_Satisfaction: {a_v} vs {g_v} (tol=0.1)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -166,7 +201,9 @@ def main():
         errors = []
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
-        
+        a_col = _header_map(a_rows)
+        g_col = _header_map(g_rows)
+
         a_lookup = {}
         for row in a_data:
             if row and row[0] is not None:
@@ -179,15 +216,17 @@ def main():
             if a_row is None:
                 errors.append(f"Missing row: {g_row[0]}")
                 continue
-            
-            if len(a_row) > 1 and len(g_row) > 1:
-                # Use numeric compare when GT value is numeric, else string match
-                if is_numeric(g_row[1]):
-                    if not num_close(a_row[1], g_row[1], 0):  # exact integer count
-                        errors.append(f"{key}.Value: '{a_row[1]}' vs '{g_row[1]}' (numeric)")
+
+            # Value: numeric compare when GT value is numeric, else string match
+            a_v = _cell(a_row, a_col.get("value"))
+            g_v = _cell(g_row, g_col.get("value"))
+            if a_v is not None and g_v is not None:
+                if is_numeric(g_v):
+                    if not num_close(a_v, g_v, 0):  # exact integer count
+                        errors.append(f"{key}.Value: '{a_v}' vs '{g_v}' (numeric)")
                 else:
-                    if not str_match(a_row[1], g_row[1]):
-                        errors.append(f"{key}.Value: '{a_row[1]}' vs '{g_row[1]}' (string)")
+                    if not str_match(a_v, g_v):
+                        errors.append(f"{key}.Value: '{a_v}' vs '{g_v}' (string)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")

@@ -154,6 +154,19 @@ def main():
         conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
+        # Derive expected distribution numbers from the live DB rather than
+        # hardcoding them, so the check survives any data reseed.
+        cur.execute('''
+            SELECT "PERFORMANCE_RATING", COUNT(*) FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES"
+            GROUP BY "PERFORMANCE_RATING"
+        ''')
+        rating_counts = {int(r): int(c) for r, c in cur.fetchall()}
+        total_emp = sum(rating_counts.values())
+        high_perf = sum(c for r, c in rating_counts.items() if r >= 4)
+        high_perf_pct = round(100.0 * high_perf / total_emp, 1) if total_emp else 0.0
+        # Collect the candidate counts the body may cite: total, high-performers,
+        # and the count at each rating level.
+        count_values = [total_emp, high_perf] + list(rating_counts.values())
         cur.execute("""
             SELECT subject, to_addr, body_text FROM email.messages
             WHERE to_addr::text ILIKE '%%hr-analytics@company.com%%'
@@ -166,15 +179,19 @@ def main():
             body_concat = " ".join((r[2] or "").lower() for r in rows)
             # Body must contain BOTH at least one specific count AND at least one specific percentage/identifier
             # to verify the agent actually computed/inserted the distribution numbers (not just generic words).
-            specific_counts = ["50000", "50,000", "5008", "5,008", "12464", "12,464", "2553", "2,553"]
-            specific_pcts = ["34.9", "34.90", "34.9%", "high_performers_pct", "high performers"]
+            specific_counts = []
+            for v in count_values:
+                specific_counts.extend([str(v), f"{v:,}"])
+            pct_str = f"{high_perf_pct:g}"
+            specific_pcts = [pct_str, f"{pct_str}%", "high_performers_pct", "high performers"]
             has_count = any(kw in body_concat for kw in specific_counts)
             has_pct_or_label = any(kw in body_concat for kw in specific_pcts)
             if not (has_count and has_pct_or_label):
                 all_errors.append(
                     f"Email body must include at least one specific count "
-                    f"(50000/5008/12464/2553) AND at least one specific pct or label "
-                    f"(34.9 or 'high performers'); got body excerpt: {body_concat[:200]}"
+                    f"(e.g. total={total_emp}, high_performers={high_perf}, or a per-rating count "
+                    f"{rating_counts}) AND at least one specific pct or label "
+                    f"(~{high_perf_pct}% or 'high performers'); got body excerpt: {body_concat[:200]}"
                 )
             print(f"    PASS (found {len(rows)} matching emails)")
         cur.close()

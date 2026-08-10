@@ -9,6 +9,7 @@ Checks:
 import argparse
 import json
 import os
+import re
 import sys
 
 import openpyxl
@@ -16,15 +17,17 @@ import psycopg2
 from docx import Document
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
-    "user": "eigent", "password": "camel",
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 DEPARTMENTS = ["Engineering", "Finance", "HR", "Operations", "R&D", "Sales", "Support"]
 
 # Hardcoded fallback flight risk data (sat<=4 AND perf>=4)
-# Priority rules from task.md: pct>=8.3 High, 7.9<=pct<8.3 Medium, pct<7.9 Low
+# Priority rules from task.md: pct>8.3 High, 7.9<=pct<=8.3 Medium, pct<7.9 Low
 _FALLBACK_EXPECTED_DATA = {
     "Engineering": {"headcount": 7096, "flight_risk": 566, "pct": 7.98, "priority": "Medium"},
     "Finance":     {"headcount": 7148, "flight_risk": 598, "pct": 8.37, "priority": "High"},
@@ -81,6 +84,30 @@ def _get_expected_data_from_db():
 
 
 EXPECTED_DATA = _get_expected_data_from_db()
+EXPECTED_DATA_LOWER = {k.lower(): v for k, v in EXPECTED_DATA.items()}
+
+
+def _canon_dept(name):
+    """Canonical department key that maps common spellings to the expected key.
+
+    Tolerates "R & D" / "R/D" / "RD" / "RND" / "Research & Development" -> "r&d"
+    (task.md lists the department as "R&D"); other departments match on their
+    lowercased, non-alphanumeric-stripped form.
+    """
+    if name is None:
+        return None
+    s = str(name).lower().strip()
+    # '&' -> 'and' so "R & D" / "Research & Development" canonicalize like the spelled-out forms
+    s = s.replace("&", " and ")
+    t = re.sub(r"[^a-z0-9]", "", s)
+    if t in ("rd", "rnd", "randd", "researchanddevelopment"):
+        return "r&d"
+    if t in ("humanresources",):
+        return "hr"
+    return t
+
+
+CANON_DEPT = {_canon_dept(k): k for k in EXPECTED_DATA_LOWER}
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -96,13 +123,75 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}: {str(detail)[:200]}")
 
 
+def _to_float(v):
+    """Coerce str/int/float/None to float, tolerating %, currency symbols, thousands-sep, spaces."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    if s == "":
+        return None
+    s = s.replace(",", "").replace("$", "").replace("€", "").replace("¥", "").replace("£", "")
+    s = s.replace("%", "").strip()
+    if s == "":
+        return None
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cell_value(raw, cached=None):
+    """Robust numeric value of a cell; formula cells fall back to their cached value."""
+    if raw is not None and isinstance(raw, str) and raw.strip().startswith("="):
+        raw = cached  # formula -> use cached (data_only) value; None if never recalculated
+    return _to_float(raw)
+
+
 def num_close(a, b, tol=2.0):
+    fa, fb = _to_float(a), _to_float(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= tol
+    # One side unparseable: fall back to case-insensitive string equality.
     if a is None or b is None:
         return False
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+def _find_header_idx(rows, keywords):
+    """Index of the row that best matches the expected column keywords (default 0).
+
+    Tolerates a title row above the real header row (R10).
+    """
+    best_idx = 0
+    best_score = -1
+    for i, row in enumerate(rows):
+        cells = [str(c).lower() if c is not None else "" for c in row]
+        score = sum(1 for kw in keywords if any(kw in c for c in cells))
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    return best_idx
+
+
+def _norm_col_name(c):
+    return str(c).lower().strip() if c is not None else ""
+
+
+def _load_workbook_pair(path):
+    """Return (raw_workbook, cached_workbook) or (None, None) on failure."""
     try:
-        return abs(float(a) - float(b)) <= tol
-    except (TypeError, ValueError):
-        return False
+        wb_raw = openpyxl.load_workbook(path, data_only=False)
+    except Exception:
+        return None, None
+    try:
+        wb_cached = openpyxl.load_workbook(path, data_only=True)
+    except Exception:
+        wb_cached = None
+    return wb_raw, wb_cached
 
 
 def check_excel(workspace):
@@ -113,90 +202,118 @@ def check_excel(workspace):
         return
     check("Excel file exists", True)
 
-    wb = openpyxl.load_workbook(path, data_only=True)
-    sheets = wb.sheetnames
+    wb_raw, wb_cached = _load_workbook_pair(path)
+    if wb_raw is None:
+        check("Excel file readable", False, f"Failed to open {path}")
+        return
+    sheets = wb_raw.sheetnames
     check("Has at least 3 sheets", len(sheets) >= 3, f"Found {len(sheets)}: {sheets}")
 
     sheets_lower = [s.lower().replace(" ", "_") for s in sheets]
 
     # Sheet 1: Department_Analysis
     da_idx = next((i for i, s in enumerate(sheets_lower) if "department" in s and "analysis" in s), 0)
-    ws1 = wb[sheets[da_idx]]
+    ws1 = wb_raw[sheets[da_idx]]
+    ws1c = wb_cached[sheets[da_idx]] if wb_cached else None
     rows1 = list(ws1.iter_rows(values_only=True))
-    data1 = [r for r in rows1[1:] if any(c for c in r)]
+    rows1c = list(ws1c.iter_rows(values_only=True)) if ws1c else None
+    hdr1 = _find_header_idx(rows1, ["department", "headcount", "flight", "pct", "satisfaction"])
+    data1 = [r for r in rows1[hdr1 + 1:] if any(c for c in r)]
     check("Department_Analysis has 7 rows", len(data1) >= 7, f"Found {len(data1)}")
 
-    if rows1:
-        headers = [str(c).lower() if c else "" for c in rows1[0]]
-        check("Has flight_risk_pct column",
-              any("flight" in h and "pct" in h for h in headers) or any("risk" in h and "%" in h for h in headers) or any("flight_risk_pct" in h for h in headers),
-              f"Headers: {rows1[0]}")
-        check("Has avg_satisfaction column",
-              any("satisfaction" in h for h in headers),
-              f"Headers: {rows1[0]}")
+    headers = [_norm_col_name(c) for c in rows1[hdr1]]
 
-    # Check actual values
-    dept_col = next((i for i, h in enumerate(headers) if "department" in h or "dept" in h), 0) if rows1 else 0
-    hc_col = next((i for i, h in enumerate(headers) if "headcount" in h or "head_count" in h), 1) if rows1 else 1
-    fr_col = next((i for i, h in enumerate(headers) if "flight_risk_count" in h or ("flight" in h and "count" in h)), 2) if rows1 else 2
-    pct_col = next((i for i, h in enumerate(headers) if "pct" in h or "percent" in h), 3) if rows1 else 3
+    # Tolerate common spellings of the flight-risk percentage column: the task.md
+    # column name is flight_risk_pct, but "Flight Risk Percentage"/"Flight Risk
+    # Ratio"/"Risk %" etc. are all semantically identical (R2 review).
+    def _is_pct_col(h):
+        pct_kw = ("pct", "%", "percent", "percentage", "rate", "ratio")
+        return ("flight" in h and any(k in h for k in pct_kw)) or \
+               ("risk" in h and any(k in h for k in pct_kw))
+
+    check("Has flight_risk_pct column",
+          any(_is_pct_col(h) for h in headers),
+          f"Headers: {rows1[hdr1]}")
+    # "avg_satisfaction", "avg_sat", "Avg Job Sat", "satisfaction score" all match
+    check("Has avg_satisfaction column",
+          any("sat" in h for h in headers),
+          f"Headers: {rows1[hdr1]}")
+
+    dept_col = next((i for i, h in enumerate(headers) if "department" in h or "dept" in h), 0)
+    hc_col = next((i for i, h in enumerate(headers) if "headcount" in h or "head_count" in h), 1)
+    fr_col = next((i for i, h in enumerate(headers) if "flight_risk_count" in h or ("flight" in h and "count" in h)), 2)
 
     found_depts = 0
-    for row in data1:
-        dept_name = str(row[dept_col]).strip() if row[dept_col] else ""
-        if dept_name in EXPECTED_DATA:
-            found_depts += 1
-            exp = EXPECTED_DATA[dept_name]
-            if len(row) > hc_col and row[hc_col]:
-                check(f"{dept_name} headcount correct",
-                      num_close(row[hc_col], exp["headcount"], 50),
-                      f"Got {row[hc_col]}, expected ~{exp['headcount']}")
-            if len(row) > fr_col and row[fr_col]:
-                check(f"{dept_name} flight_risk_count correct",
-                      num_close(row[fr_col], exp["flight_risk"], 20),
-                      f"Got {row[fr_col]}, expected ~{exp['flight_risk']}")
+    for offset, raw_row in enumerate(data1):
+        cached_row = rows1c[hdr1 + 1 + offset] if rows1c else None
+        dept_key = _canon_dept(raw_row[dept_col] if len(raw_row) > dept_col else None)
+        if dept_key is None or dept_key not in CANON_DEPT:
+            continue
+        dept_name = CANON_DEPT[dept_key]
+        found_depts += 1
+        exp = EXPECTED_DATA_LOWER[dept_name]
+        hc_raw = raw_row[hc_col] if len(raw_row) > hc_col else None
+        hc_cached = cached_row[hc_col] if cached_row is not None and len(cached_row) > hc_col else None
+        hc_val = _cell_value(hc_raw, hc_cached)
+        if hc_val is not None:
+            check(f"{dept_name} headcount correct",
+                  num_close(hc_val, exp["headcount"], 50),
+                  f"Got {hc_raw}, expected ~{exp['headcount']}")
+        fr_raw = raw_row[fr_col] if len(raw_row) > fr_col else None
+        fr_cached = cached_row[fr_col] if cached_row is not None and len(cached_row) > fr_col else None
+        fr_val = _cell_value(fr_raw, fr_cached)
+        if fr_val is not None:
+            check(f"{dept_name} flight_risk_count correct",
+                  num_close(fr_val, exp["flight_risk"], 20),
+                  f"Got {fr_raw}, expected ~{exp['flight_risk']}")
     check("All 7 departments found in Department_Analysis", found_depts >= 7, f"Found {found_depts}")
 
     # Sheet 2: Research_Summary
     rs_idx = next((i for i, s in enumerate(sheets_lower) if "research" in s), 1)
     if rs_idx < len(sheets):
-        ws2 = wb[sheets[rs_idx]]
+        ws2 = wb_raw[sheets[rs_idx]]
         rows2 = list(ws2.iter_rows(values_only=True))
-        data2 = [r for r in rows2[1:] if any(c for c in r)]
+        hdr2 = _find_header_idx(rows2, ["paper", "key", "applicability", "score"])
+        data2 = [r for r in rows2[hdr2 + 1:] if any(c for c in r)]
         check("Research_Summary has 3 rows", len(data2) >= 3, f"Found {len(data2)}")
-        if rows2:
-            headers2 = [str(c).lower() if c else "" for c in rows2[0]]
-            check("Has applicability_score column",
-                  any("applicability" in h or "score" in h for h in headers2),
-                  f"Headers: {rows2[0]}")
+        headers2 = [_norm_col_name(c) for c in rows2[hdr2]]
+        check("Has applicability_score column",
+              any("applicability" in h or "score" in h for h in headers2),
+              f"Headers: {rows2[hdr2]}")
         # Check that relevant papers are included (not the noise ones)
-        all_text2 = " ".join(str(c) for r in rows2 for c in r if c).lower()
-        check("Contains retention-related paper", "retention" in all_text2 or "turnover" in all_text2 or "employee" in all_text2)
-        check("Does NOT contain autonomous vehicle paper", "autonomous vehicle" not in all_text2 and "urban" not in all_text2,
+        all_text2 = " ".join(str(c) for r in data2 for c in r if c).lower()
+        check("Contains retention-related paper",
+              "retention" in all_text2 or "turnover" in all_text2 or "employee" in all_text2)
+        check("Does NOT contain autonomous vehicle paper",
+              not any(p in all_text2 for p in ["autonomous vehicle", "urban navigation", "carla"]),
+              "Noise paper included in research summary")
+        check("Does NOT contain quantum computing paper",
+              not any(p in all_text2 for p in ["quantum computing", "protein folding"]),
               "Noise paper included in research summary")
 
     # Sheet 3: Action_Plan
     ap_idx = next((i for i, s in enumerate(sheets_lower) if "action" in s or "plan" in s), 2)
     if ap_idx < len(sheets):
-        ws3 = wb[sheets[ap_idx]]
+        ws3 = wb_raw[sheets[ap_idx]]
         rows3 = list(ws3.iter_rows(values_only=True))
-        data3 = [r for r in rows3[1:] if any(c for c in r)]
+        hdr3 = _find_header_idx(rows3, ["department", "strategy", "priority", "cost"])
+        data3 = [r for r in rows3[hdr3 + 1:] if any(c for c in r)]
         check("Action_Plan has 7 rows", len(data3) >= 7, f"Found {len(data3)}")
 
-        if rows3:
-            headers3 = [str(c).lower() if c else "" for c in rows3[0]]
-            pri_col = next((i for i, h in enumerate(headers3) if "priority" in h), None)
-            dept_col3 = next((i for i, h in enumerate(headers3) if "department" in h or "dept" in h), 0)
+        headers3 = [_norm_col_name(c) for c in rows3[hdr3]]
+        pri_col = next((i for i, h in enumerate(headers3) if "priority" in h), None)
+        dept_col3 = next((i for i, h in enumerate(headers3) if "department" in h or "dept" in h), 0)
 
-            if pri_col is not None:
-                for row in data3:
-                    dept_name = str(row[dept_col3]).strip() if row[dept_col3] else ""
-                    if dept_name in EXPECTED_DATA:
-                        exp_pri = EXPECTED_DATA[dept_name]["priority"]
-                        got_pri = str(row[pri_col]).strip() if row[pri_col] else ""
-                        check(f"{dept_name} priority is {exp_pri}",
-                              got_pri.lower() == exp_pri.lower(),
-                              f"Got '{got_pri}', expected '{exp_pri}'")
+        if pri_col is not None:
+            for row in data3:
+                dept_key = _canon_dept(row[dept_col3] if len(row) > dept_col3 else None)
+                if dept_key is not None and dept_key in CANON_DEPT:
+                    dept_name = CANON_DEPT[dept_key]
+                    exp_pri = EXPECTED_DATA_LOWER[dept_name]["priority"]
+                    got_pri = _norm_col_name(row[pri_col] if len(row) > pri_col else None)
+                    check(f"{dept_name} priority is {exp_pri}",
+                          got_pri == exp_pri.lower(),
+                          f"Got '{got_pri}', expected '{exp_pri}'")
 
 
 def check_word(workspace):
@@ -214,15 +331,68 @@ def check_word(workspace):
     check("Mentions executive summary", "executive summary" in full_text or "summary" in full_text)
     check("Mentions research findings", "research" in full_text and ("finding" in full_text or "paper" in full_text))
     check("Mentions recommendations", "recommend" in full_text)
-    check("Mentions specific departments", sum(1 for d in DEPARTMENTS if d.lower() in full_text) >= 5,
-          f"Found {sum(1 for d in DEPARTMENTS if d.lower() in full_text)} departments")
+    dept_found = sum(1 for d in DEPARTMENTS if re.search(rf"\b{re.escape(d.lower())}\b", full_text))
+    check("Mentions specific departments", dept_found >= 5,
+          f"Found {dept_found} departments")
     check("Has substantial content", len(full_text) > 500, f"Length: {len(full_text)}")
     check("Mentions priority levels", "high" in full_text and ("medium" in full_text or "low" in full_text))
 
 
+def _prop_value(props, key_like):
+    """Return the value object of the property whose key contains key_like (case-insensitive)."""
+    if not isinstance(props, dict):
+        return None
+    for k, v in props.items():
+        if key_like in k.lower():
+            return v
+    return None
+
+
+def _select_name(value):
+    """Extract an option name from a Notion select-style property value (robust to shapes)."""
+    if isinstance(value, dict):
+        sel = value.get("select")
+        if isinstance(sel, dict) and "name" in sel:
+            return sel["name"]
+        if isinstance(sel, str):
+            return sel
+        if "name" in value:
+            return value["name"]
+    elif isinstance(value, str):
+        return value
+    return None
+
+
+def _page_priority(props):
+    """Structured priority extraction: properties->Priority->select->name, with substring fallback."""
+    name = _select_name(_prop_value(props, "priority"))
+    if name:
+        return str(name).lower()
+    text = json.dumps(props).lower()
+    for kw in ("high", "medium", "low"):
+        if f'"{kw}"' in text:
+            return kw
+    return None
+
+
+def _page_status(props):
+    """Structured status extraction: properties->Status->select->name, with substring fallback."""
+    name = _select_name(_prop_value(props, "status"))
+    if name:
+        return str(name).lower()
+    text = json.dumps(props).lower()
+    if "not started" in text or "not_started" in text:
+        return "not started"
+    return None
+
+
 def check_notion():
     print("\n=== Check 3: Notion Retention Action Items ===")
-    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+    except Exception as e:
+        check("Notion database connection", False, str(e))
+        return
     cur = conn.cursor()
     try:
         # Check database exists - strict title match: must contain 'retention' + 'action' + 'items'
@@ -241,8 +411,21 @@ def check_notion():
             return
         check("Notion database 'Retention Action Items' exists", True)
 
-        db_id = dbs[0][0]
-        props = dbs[0][2] if dbs[0][2] else {}
+        # Multi-agent runs may create duplicate same-name databases (some empty or
+        # partial). Pick the matching database with the most pages so an incomplete
+        # duplicate never sinks a correct model (R2 review).
+        best_pages = []
+        best_props = {}
+        for db_row in dbs:
+            cur.execute("""
+                SELECT id, properties FROM notion.pages
+                WHERE parent::text LIKE %s
+            """, (f'%{db_row[0]}%',))
+            pg = cur.fetchall()
+            if len(pg) >= len(best_pages):
+                best_pages = pg
+                best_props = db_row[2] if db_row[2] else {}
+        props = best_props
 
         # Check properties
         prop_names = [k.lower() for k in props.keys()] if isinstance(props, dict) else []
@@ -251,38 +434,29 @@ def check_notion():
         check("Has Strategy property", any("strategy" in p for p in prop_names), f"Props: {prop_names}")
 
         # Check pages
-        cur.execute("""
-            SELECT id, properties FROM notion.pages
-            WHERE parent::text LIKE %s
-        """, (f'%{db_id}%',))
-        pages = cur.fetchall()
+        pages = best_pages
         check("Has 7 department pages", len(pages) >= 7, f"Found {len(pages)} pages")
 
         if pages:
-            # Check that pages have correct priorities
-            high_count = 0
-            medium_count = 0
-            low_count = 0
-            for page in pages:
-                props_page = page[1] if page[1] else {}
-                props_text = json.dumps(props_page).lower()
-                if '"high"' in props_text:
-                    high_count += 1
-                elif '"medium"' in props_text:
-                    medium_count += 1
-                elif '"low"' in props_text:
-                    low_count += 1
+            # Check that pages have correct priorities (structured parse, not bare substring).
+            # Expected counts are derived from EXPECTED_DATA so they stay consistent with the
+            # Action_Plan priority checks and with whatever the DB actually yields.
+            exp_counts = {}
+            for v in EXPECTED_DATA.values():
+                exp_counts[v["priority"]] = exp_counts.get(v["priority"], 0) + 1
+            high_count = sum(1 for p in pages if _page_priority(p[1] if p[1] else {}) == "high")
+            medium_count = sum(1 for p in pages if _page_priority(p[1] if p[1] else {}) == "medium")
+            low_count = sum(1 for p in pages if _page_priority(p[1] if p[1] else {}) == "low")
 
-            check("Has 2 High priority pages (Finance, HR)", high_count == 2,
-                  f"Found {high_count} High priority pages")
-            check("Has 4 Medium priority pages", medium_count == 4,
-                  f"Found {medium_count} Medium priority pages")
-            check("Has 1 Low priority page (Support)", low_count == 1,
-                  f"Found {low_count} Low priority pages")
+            check("Has High priority pages count matching data", high_count == exp_counts.get("High", 0),
+                  f"Found {high_count} High priority pages, expected {exp_counts.get('High', 0)}")
+            check("Has Medium priority pages count matching data", medium_count == exp_counts.get("Medium", 0),
+                  f"Found {medium_count} Medium priority pages, expected {exp_counts.get('Medium', 0)}")
+            check("Has Low priority pages count matching data", low_count == exp_counts.get("Low", 0),
+                  f"Found {low_count} Low priority pages, expected {exp_counts.get('Low', 0)}")
 
             # Check Status is Not Started
-            not_started_count = sum(1 for p in pages
-                                     if "not started" in json.dumps(p[1]).lower())
+            not_started_count = sum(1 for p in pages if _page_status(p[1] if p[1] else {}) == "not started")
             check("All pages have Status 'Not Started'", not_started_count >= 7,
                   f"Found {not_started_count} with 'Not Started'")
 

@@ -2,7 +2,7 @@ The Office of Academic Affairs is conducting its annual review of course offerin
 
 Our university offers 22 courses through our learning management system across seven distinct course types. We need to understand how our courses compare to national standards in terms of enrollment numbers, number of assignments, and number of quizzes.
 
-Start by fetching the national benchmark data from the API endpoint. Then retrieve the full list of courses from the university learning management system. For each course, note the course name, total student enrollment, and count the number of assignments and quizzes associated with it. Group the courses by their course type (the part of the course name before the semester and year in parentheses, for example "Foundations of Finance" from "Foundations of Finance (Fall 2013)") and compute the average enrollment, average assignment count, and average quiz count per course type.
+Start by fetching the national benchmark data from the API endpoint. Then retrieve the full list of courses from the university learning management system. For each course, note the course name, total student enrollment, and count the number of assignments and quizzes associated with it. Use each course's reported total student count (`total_students`, i.e. student enrollments only — do not count teacher or TA enrollments) as the enrollment figure. Group the courses by their course type (the part of the course name before the semester and year in parentheses, for example "Foundations of Finance" from "Foundations of Finance (Fall 2013)") and compute the average enrollment, average assignment count, and average quiz count per course type.
 
 Create an Excel file called "Course_Benchmark_Analysis.xlsx" in the workspace with three sheets.
 
@@ -14,6 +14,6 @@ The third sheet called "Comparison" should have columns Course_Type, Our_Avg_Enr
 
 Next, create a PowerPoint presentation called "Academic_Benchmark_Presentation.pptx" in the workspace. The presentation should have a title slide with the title "Course Benchmark Analysis" and a subtitle referencing the academic year. Include one slide per course type (7 slides) showing the course type name as the title and a brief comparison of enrollment and assignment metrics versus national benchmarks. Add a final summary slide identifying which course types exceed national benchmarks in enrollment and which fall below.
 
-Finally, send an email from academic-affairs@university.edu to dean@university.edu with the subject "Annual Course Benchmark Report". The body should summarize which course types are above and below national enrollment benchmarks.
+Finally, send an email to dean@university.edu with the subject "Annual Course Benchmark Report". The sender address is fixed by the email environment; only the recipient and subject matter. The body should summarize which course types are above and below national enrollment benchmarks.
 
 Save all output files to the workspace directory.

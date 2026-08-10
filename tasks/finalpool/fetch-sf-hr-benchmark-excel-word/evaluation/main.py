@@ -297,11 +297,7 @@ def check_email():
             found_email = True
             record("Benchmark analysis email exists", True)
 
-            # Check from address
-            from_ok = str_contains(from_addr, "hr")
-            record("Email from HR address", from_ok, f"From: {from_addr}")
-            if not from_ok:
-                all_ok = False
+            # Sender address is fixed by the email environment and not checked
 
             # Check to address
             to_str = str(to_addr).lower()

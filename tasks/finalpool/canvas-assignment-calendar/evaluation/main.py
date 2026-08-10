@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import timezone
 
 import psycopg2
 
@@ -126,9 +127,13 @@ def _fetch_expected_assignments():
     """, ('%2014J',))
     out = []
     for code, cname, aname, due in cur.fetchall():
-        # due is a timestamp; convert to date string
+        # task.md: use the UTC calendar date of due_at (no local-tz conversion).
+        # Render in UTC explicitly so the expected date is deterministic and
+        # independent of the PG session TimeZone.
         try:
-            d = due.strftime("%Y-%m-%d")
+            if getattr(due, "tzinfo", None) is None:
+                due = due.replace(tzinfo=timezone.utc)
+            d = due.astimezone(timezone.utc).strftime("%Y-%m-%d")
         except Exception:
             d = str(due)[:10]
         out.append((code, cname, aname, d))
@@ -236,11 +241,8 @@ def check_emails():
         if "assignment schedule" in subject_lower or "fall 2014" in subject_lower:
             found_schedule = True
 
-            from_str = str(from_addr or "").lower()
-            record("email: from coordinator",
-                   "coordinator@openuniversity.ac.uk" in from_str,
-                   f"From: {from_addr}")
-
+            # Sender address is fixed by the email environment; match on
+            # recipient + subject only.
             to_str = str(to_addr or "").lower()
             record("email: to students",
                    "students@openuniversity.ac.uk" in to_str,

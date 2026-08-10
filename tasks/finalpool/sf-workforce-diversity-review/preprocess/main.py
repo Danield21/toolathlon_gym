@@ -9,6 +9,21 @@ import asyncio
 import os
 import shutil
 import tarfile
+import urllib.request
+
+
+async def wait_until_ready(url, tries=20, interval=0.5):
+    """Poll the mock portal until it answers, so the agent never races a
+    half-started server."""
+    for _ in range(tries):
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:
+                if resp.status == 200:
+                    return True
+        except Exception:
+            pass
+        await asyncio.sleep(interval)
+    return False
 
 
 async def setup_mock_server():
@@ -31,6 +46,9 @@ async def setup_mock_server():
     mock_dir = os.path.join(tmp_dir, "mock_pages")
     port = 30211
 
+    # Clear any leftover listener so the http.server below binds cleanly.
+    # (Concurrent instances serve identical content, so killing a stale one is
+    # harmless; the health check below ensures the new server is up.)
     kill_proc = await asyncio.create_subprocess_shell(
         f"kill -9 $(lsof -ti:{port}) 2>/dev/null",
         stdout=asyncio.subprocess.PIPE,
@@ -43,8 +61,13 @@ async def setup_mock_server():
         f"nohup python3 -m http.server {port} --directory {mock_dir} "
         f"> {mock_dir}/server.log 2>&1 &"
     )
-    await asyncio.sleep(1)
-    print(f"[preprocess] Mock portal running at http://localhost:{port}")
+
+    url = f"http://localhost:{port}/"
+    if await wait_until_ready(url):
+        print(f"[preprocess] Mock portal running at {url}")
+    else:
+        print(f"[preprocess] WARNING: mock portal at {url} did not answer within "
+              f"the retry window; the agent may need to retry its first request.")
 
 
 async def main():

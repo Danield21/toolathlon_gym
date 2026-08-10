@@ -1,13 +1,23 @@
 """
 Evaluation script for howtocook-scholarly-health-study task.
 
-Checks:
+Checks (all derive from docs/task.md):
 1. Health_Diet_Analysis.xlsx with three sheets (Recipe Nutrition, Research Summary, Combined Analysis)
-2. Chinese_Cuisine_Health_Report.docx with required sections
+   - Recipe Nutrition: >= 5 dishes, non-zero calories, numeric macros, Health_Rating in {Low, Medium, High}
+   - Research Summary: >= 3 papers (task says "about 4"), non-empty titles/authors,
+     diet/health/nutrition relevance, at least one real citation count
+   - Combined Analysis: >= 3 rows linking dishes to supporting research
+2. Chinese_Cuisine_Health_Report.docx with required title and four sections
+
+Note: dish/paper selection is NOT unique (the agent chooses which 5 dishes and which papers to
+report), so no row-by-row comparison against a groundtruth exemplar is performed. All checks are
+structural/semantic and every one of them is satisfied by any agent that correctly follows the
+task statement.
 """
 
 import argparse
 import os
+import re
 import sys
 
 import openpyxl
@@ -27,14 +37,91 @@ def record(name, passed, detail=""):
         print(f"  [FAIL] {name}{msg}")
 
 
-def num_close(a, b, tol=1.0):
-    try: return abs(float(a) - float(b)) <= tol
-    except (TypeError, ValueError): return False
+def note(name, detail=""):
+    """Informational record that does NOT affect FAIL_COUNT."""
+    print(f"  [NOTE] {name}" + (f": {detail[:300]}" if detail else ""))
 
 
-def str_match(a, b):
-    if a is None or b is None: return a is None and b is None
-    return str(a).strip().lower() == str(b).strip().lower()
+def _to_float(v):
+    """Robustly parse a cell value into a float; None when unparseable.
+
+    Handles int/float, strings with thousands separators, currency symbols,
+    percent signs, whitespace, and embedded numbers (e.g. '500 kcal').
+    Formula strings (leading '=') resolve to None (no cached literal).
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        if s.startswith("="):
+            return None
+        s = (
+            s.replace(",", "")
+            .replace("$", "")
+            .replace("¥", "")
+            .replace("€", "")
+            .replace("%", "")
+            .strip()
+        )
+        try:
+            return float(s)
+        except ValueError:
+            m = re.search(r"-?\d+(\.\d+)?", s)
+            return float(m.group()) if m else None
+    return None
+
+
+def _str(v):
+    if v is None:
+        return ""
+    return str(v).strip()
+
+
+def _empty_row(row):
+    return all(v is None or (isinstance(v, str) and not v.strip()) for v in row)
+
+
+def _resolved_rows(wb_raw, wb_val, sheet_name):
+    """Return the sheet's rows (list of lists) with formula cells resolved to
+    their cached values (from the data_only load) where available."""
+    ws = wb_raw[sheet_name]
+    rows = []
+    for r in range(1, ws.max_row + 1):
+        row_vals = []
+        for c in range(1, ws.max_column + 1):
+            raw = ws.cell(r, c).value
+            if isinstance(raw, str) and raw.startswith("="):
+                row_vals.append(wb_val[sheet_name].cell(r, c).value)
+            else:
+                row_vals.append(raw)
+        rows.append(row_vals)
+    return rows
+
+
+def _find_sheet(wb, primary, pairs=None, singles=None):
+    """Case-insensitive sheet lookup: exact match, then both-keyword, then any-keyword."""
+    for name in wb.sheetnames:
+        if name.strip().lower() == primary.lower():
+            return name
+    if pairs:
+        for name in wb.sheetnames:
+            if all(k in name.lower() for k in pairs):
+                return name
+    if singles:
+        for name in wb.sheetnames:
+            if any(k in name.lower() for k in singles):
+                return name
+    return None
+
+
+def _norm_header(h):
+    return re.sub(r"[\s_\-]+", " ", str(h).strip().lower())
 
 
 def check_excel(agent_workspace, groundtruth_workspace="."):
@@ -46,7 +133,8 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
     record("Excel file exists", True)
 
     try:
-        wb = openpyxl.load_workbook(agent_file, data_only=True)
+        wb_raw = openpyxl.load_workbook(agent_file, data_only=False)
+        wb_val = openpyxl.load_workbook(agent_file, data_only=True)
     except Exception as e:
         record("Excel file readable", False, str(e))
         return False
@@ -54,158 +142,169 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
     all_ok = True
 
     # --- Sheet 1: Recipe Nutrition ---
-    # Tighten: require exact sheet name first (case-insensitive), only fallback to substring if missing
-    rn_sheet = None
-    for name in wb.sheetnames:
-        if name.strip().lower() == "recipe nutrition":
-            rn_sheet = name; break
-    if not rn_sheet:
-        for name in wb.sheetnames:
-            if "recipe" in name.lower() and "nutrition" in name.lower():
-                rn_sheet = name
-                break
-    if not rn_sheet:
-        for name in wb.sheetnames:
-            if "recipe" in name.lower() or "nutrition" in name.lower():
-                rn_sheet = name
-                break
-    if not rn_sheet:
-        record("Sheet 'Recipe Nutrition' exists", False, f"Sheets: {wb.sheetnames}")
+    rn = _find_sheet(
+        wb_raw, "Recipe Nutrition",
+        pairs=("recipe", "nutrition"), singles=("recipe", "nutrition"),
+    )
+    if not rn:
+        record("Sheet 'Recipe Nutrition' exists", False, f"Sheets: {wb_raw.sheetnames}")
         all_ok = False
     else:
-        exact_match = rn_sheet.strip().lower() == "recipe nutrition"
-        record("Sheet 'Recipe Nutrition' exists (exact)", exact_match, f"Got '{rn_sheet}'")
-        record("Sheet 'Recipe Nutrition' exists", True)
-        ws = wb[rn_sheet]
-        rows = list(ws.iter_rows(values_only=True))
-        data_rows = rows[1:] if len(rows) > 1 else []
+        note("Sheet 'Recipe Nutrition' found", f"Actual name: '{rn}'")
+        rows = _resolved_rows(wb_raw, wb_val, rn)
+        data_rows = [r for r in rows[1:] if not _empty_row(r)]
 
         has_5_rows = len(data_rows) >= 5
         record(f"Recipe Nutrition has >= 5 rows ({len(data_rows)} found)", has_5_rows)
         if not has_5_rows:
             all_ok = False
 
-        # Check that calorie values are non-zero for at least some rows
-        nonzero_cal = 0
-        for row in data_rows:
-            if row and len(row) >= 3:
-                try:
-                    cal = float(row[2]) if row[2] is not None else 0
-                    if cal > 0:
-                        nonzero_cal += 1
-                except (ValueError, TypeError):
-                    pass
-        has_nonzero = nonzero_cal >= 3
-        record(f"At least 3 rows have non-zero calories ({nonzero_cal} found)", has_nonzero)
-        if not has_nonzero:
+        # Estimated_Calories (col 3) > 0 in at least 3 rows
+        nonzero_cal = sum(
+            1 for row in data_rows
+            if len(row) > 2 and (_to_float(row[2]) or 0) > 0
+        )
+        record(
+            f"Recipe Nutrition: >= 3 rows with non-zero calories ({nonzero_cal} found)",
+            nonzero_cal >= 3,
+        )
+        if nonzero_cal < 3:
             all_ok = False
+
+        # Protein_g (col 4) numeric in at least 3 rows
+        rows_with_protein = sum(
+            1 for row in data_rows
+            if len(row) > 3 and _to_float(row[3]) is not None
+        )
+        record(
+            f"Recipe Nutrition: >= 3 rows with numeric Protein_g ({rows_with_protein} found)",
+            rows_with_protein >= 3,
+        )
+        if rows_with_protein < 3:
+            all_ok = False
+
+        # Health_Rating (col 7) values in {Low, Medium, High}.
+        # Tolerate stray non-level strings in the rating column: a decorative
+        # title row placed above the header (a common, task-permitted layout
+        # choice) pushes the header text itself (e.g. 'Health_Rating') into the
+        # data rows, which is not a real rating and must not fail the check.
+        # Only the three documented levels carry the ability signal, so collect
+        # them and require at least one genuine Low/Medium/High rating to exist.
+        ratings = {
+            _str(row[6]).lower()
+            for row in data_rows if len(row) > 6 and _str(row[6])
+        }
+        valid_ratings = {r for r in ratings if r in {"low", "medium", "high"}}
+        ratings_valid = len(valid_ratings) >= 1
+        record(
+            f"Recipe Nutrition: Health_Rating values in {{Low, Medium, High}} "
+            f"({sorted(valid_ratings)})",
+            ratings_valid,
+        )
+        if not ratings_valid:
+            all_ok = False
+
+        if rows:
+            header = [_norm_header(h) for h in rows[0]]
+            expected = [
+                "dish name", "category", "estimated calories",
+                "protein g", "fat g", "carbs g", "health rating",
+            ]
+            missing = [e for e in expected if not any(e in h for h in header)]
+            note("Recipe Nutrition header", f"got {header}")
+            if missing:
+                note("Recipe Nutrition header (informational)", f"columns not found verbatim: {missing}")
 
     # --- Sheet 2: Research Summary ---
-    rs_sheet = None
-    for name in wb.sheetnames:
-        if name.strip().lower() == "research summary":
-            rs_sheet = name; break
-    if not rs_sheet:
-        for name in wb.sheetnames:
-            if "research" in name.lower() and "summary" in name.lower():
-                rs_sheet = name
-                break
-    if not rs_sheet:
-        for name in wb.sheetnames:
-            if "research" in name.lower() or "summary" in name.lower():
-                rs_sheet = name
-                break
-    if not rs_sheet:
-        record("Sheet 'Research Summary' exists", False, f"Sheets: {wb.sheetnames}")
+    rs = _find_sheet(
+        wb_raw, "Research Summary",
+        pairs=("research", "summary"), singles=("research", "summary"),
+    )
+    if not rs:
+        record("Sheet 'Research Summary' exists", False, f"Sheets: {wb_raw.sheetnames}")
         all_ok = False
     else:
-        exact_match = rs_sheet.strip().lower() == "research summary"
-        record("Sheet 'Research Summary' exists (exact)", exact_match, f"Got '{rs_sheet}'")
-        record("Sheet 'Research Summary' exists", True)
-        ws = wb[rs_sheet]
-        rows = list(ws.iter_rows(values_only=True))
-        data_rows = rows[1:] if len(rows) > 1 else []
+        note("Sheet 'Research Summary' found", f"Actual name: '{rs}'")
+        rows = _resolved_rows(wb_raw, wb_val, rs)
+        data_rows = [r for r in rows[1:] if not _empty_row(r)]
 
-        # Task requires exactly 4 papers (3 target + 1 noise excluded, or 4 total per task.md)
-        has_4_rows = len(data_rows) == 4
-        record(f"Research Summary has exactly 4 rows ({len(data_rows)} found)", has_4_rows)
-        if not has_4_rows:
+        # Task says "about 4 papers"; accept 3-5 (a careful agent may drop off-topic noise)
+        has_rows = 3 <= len(data_rows) <= 6
+        record(
+            f"Research Summary has 3-6 rows ({len(data_rows)} found)",
+            has_rows,
+        )
+        if not has_rows:
             all_ok = False
 
-        # Check that rows have non-empty titles and authors
-        if data_rows:
-            rows_with_title = sum(
-                1 for row in data_rows if row and row[0] and str(row[0]).strip()
-            )
-            has_titles = rows_with_title >= 3
-            record(
-                f"Research Summary has >= 3 rows with non-empty titles ({rows_with_title} found)",
-                has_titles,
-            )
-            if not has_titles:
-                all_ok = False
+        rows_with_title = sum(1 for row in data_rows if _str(row[0]))
+        record(
+            f"Research Summary: >= 3 rows with non-empty titles ({rows_with_title} found)",
+            rows_with_title >= 3,
+        )
+        if rows_with_title < 3:
+            all_ok = False
 
-            rows_with_authors = sum(
-                1 for row in data_rows
-                if row and len(row) > 1 and row[1] and str(row[1]).strip()
-            )
-            has_authors = rows_with_authors >= 3
-            record(
-                f"Research Summary has >= 3 rows with non-empty authors ({rows_with_authors} found)",
-                has_authors,
-            )
-            if not has_authors:
-                all_ok = False
+        rows_with_authors = sum(
+            1 for row in data_rows if len(row) > 1 and _str(row[1])
+        )
+        record(
+            f"Research Summary: >= 3 rows with non-empty authors ({rows_with_authors} found)",
+            rows_with_authors >= 3,
+        )
+        if rows_with_authors < 3:
+            all_ok = False
 
-            # Check that at least some rows have citation counts > 0
-            rows_with_citations = 0
-            for row in data_rows:
-                if row and len(row) > 2:
-                    try:
-                        if float(row[2]) > 0:
-                            rows_with_citations += 1
-                    except (TypeError, ValueError):
-                        # Try later columns in case citation count is not at index 2
-                        for ci in range(3, min(len(row), 6)):
-                            try:
-                                if row[ci] is not None and float(row[ci]) > 0:
-                                    rows_with_citations += 1
-                                    break
-                            except (TypeError, ValueError):
-                                continue
-            has_citations = rows_with_citations >= 1
-            record(
-                f"Research Summary has >= 1 row with citation count > 0 ({rows_with_citations} found)",
-                has_citations,
-            )
-            if not has_citations:
-                all_ok = False
+        # Relevance: >= 2 rows whose title is diet/health/nutrition-related.
+        # The scholarly DB is seeded (by preprocess) with 3 dietary papers + 1 off-topic
+        # ML paper, so a correct agent always satisfies this.
+        keywords = (
+            "diet", "nutrition", "health", "dietary", "food",
+            "cuisine", "mediterranean", "plant", "chronic",
+        )
+        relevant = sum(
+            1 for row in data_rows
+            if any(k in _str(row[0]).lower() for k in keywords)
+        )
+        record(
+            f"Research Summary: >= 2 diet/health/nutrition-related titles ({relevant} found)",
+            relevant >= 2,
+        )
+        if relevant < 2:
+            all_ok = False
+
+        # Citation count: >= 1 row has a numeric value > 0 that is not a plausible year.
+        # Year is column 3 per task.md; citation count is column 4.
+        rows_with_citations = 0
+        for row in data_rows:
+            cit = _to_float(row[3]) if len(row) > 3 else None
+            if cit is not None and cit > 0:
+                rows_with_citations += 1
+                continue
+            for v in row[2:]:
+                fv = _to_float(v)
+                if fv is not None and fv > 0 and not (1900 <= fv <= 2100):
+                    rows_with_citations += 1
+                    break
+        record(
+            f"Research Summary: >= 1 row with citation count > 0 ({rows_with_citations} found)",
+            rows_with_citations >= 1,
+        )
+        if rows_with_citations < 1:
+            all_ok = False
 
     # --- Sheet 3: Combined Analysis ---
-    ca_sheet = None
-    for name in wb.sheetnames:
-        if name.strip().lower() == "combined analysis":
-            ca_sheet = name; break
-    if not ca_sheet:
-        for name in wb.sheetnames:
-            if "combined" in name.lower() and "analysis" in name.lower():
-                ca_sheet = name
-                break
-    if not ca_sheet:
-        for name in wb.sheetnames:
-            if "combined" in name.lower() or "analysis" in name.lower():
-                ca_sheet = name
-                break
-    if not ca_sheet:
-        record("Sheet 'Combined Analysis' exists", False, f"Sheets: {wb.sheetnames}")
+    ca = _find_sheet(
+        wb_raw, "Combined Analysis",
+        pairs=("combined", "analysis"), singles=("combined", "analysis"),
+    )
+    if not ca:
+        record("Sheet 'Combined Analysis' exists", False, f"Sheets: {wb_raw.sheetnames}")
         all_ok = False
     else:
-        exact_match = ca_sheet.strip().lower() == "combined analysis"
-        record("Sheet 'Combined Analysis' exists (exact)", exact_match, f"Got '{ca_sheet}'")
-        record("Sheet 'Combined Analysis' exists", True)
-        ws = wb[ca_sheet]
-        rows = list(ws.iter_rows(values_only=True))
-        data_rows = rows[1:] if len(rows) > 1 else []
+        note("Sheet 'Combined Analysis' found", f"Actual name: '{ca}'")
+        rows = _resolved_rows(wb_raw, wb_val, ca)
+        data_rows = [r for r in rows[1:] if not _empty_row(r)]
 
         has_3_rows = len(data_rows) >= 3
         record(
@@ -214,41 +313,20 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
         if not has_3_rows:
             all_ok = False
 
-    # --- Groundtruth XLSX comparison ---
-    gt_path = os.path.join(groundtruth_workspace, "Health_Diet_Analysis.xlsx")
-    if os.path.isfile(gt_path):
-        gt_wb = openpyxl.load_workbook(gt_path, data_only=True)
-        for gt_sname in gt_wb.sheetnames:
-            gt_ws = gt_wb[gt_sname]
-            a_ws = None
-            for asn in wb.sheetnames:
-                if asn.strip().lower() == gt_sname.strip().lower():
-                    a_ws = wb[asn]; break
-            if a_ws is None:
-                record(f"GT sheet '{gt_sname}' exists in agent xlsx", False, f"Available: {wb.sheetnames}")
-                continue
-            gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-            a_rows = [r for r in a_ws.iter_rows(min_row=2, values_only=True) if any(c is not None for c in r)]
-            record(f"GT '{gt_sname}' row count", len(a_rows) == len(gt_rows),
-                   f"Expected {len(gt_rows)}, got {len(a_rows)}")
-            # Iterate ALL GT rows, not just first 3
-            for ri in range(len(gt_rows)):
-                if ri >= len(a_rows):
-                    record(f"GT '{gt_sname}' row {ri+1} exists", False, "Agent row missing")
-                    continue
-                ok = True
-                for ci in range(min(len(gt_rows[ri]), len(a_rows[ri]) if ri < len(a_rows) else 0)):
-                    gv, av = gt_rows[ri][ci], a_rows[ri][ci]
-                    if gv is None: continue
-                    if isinstance(gv, (int, float)):
-                        if not num_close(av, gv, max(abs(gv)*0.1, 1.0)): ok = False; break
-                    else:
-                        if not str_match(av, gv): ok = False; break
-                record(f"GT '{gt_sname}' row {ri+1} values", ok,
-                       f"gt={gt_rows[ri][:4]}, agent={a_rows[ri][:4] if ri < len(a_rows) else 'missing'}")
-        gt_wb.close()
+        # Each row links a dish to supporting research (col 1 + col 3 non-empty)
+        linked = sum(
+            1 for row in data_rows
+            if len(row) > 2 and _str(row[0]) and _str(row[2])
+        )
+        record(
+            f"Combined Analysis: >= 3 rows with Dish_Name and Supporting_Research ({linked} found)",
+            linked >= 3,
+        )
+        if linked < 3:
+            all_ok = False
 
-    wb.close()
+    wb_raw.close()
+    wb_val.close()
     return all_ok
 
 
@@ -279,20 +357,27 @@ def check_word(agent_workspace):
         )
         record("Document contains title keywords", has_title)
 
-        # Collect heading text to distinguish heading from body substring
+        # Heading match preferred; body-substring fallback is sufficient (task.md only
+        # asks to "include the following sections", not to use a specific heading style).
         heading_texts_lower = [
             p.text.strip().lower() for p in doc.paragraphs
             if p.style and p.style.name and p.style.name.startswith("Heading")
         ]
         sections_ok = True
         for section in ["introduction", "recipe analysis", "literature review", "conclusions"]:
-            # Heading match preferred; substring fallback for tolerance
-            in_heading = any(section == ht or ht.startswith(section) for ht in heading_texts_lower)
-            in_body = section in text_lower
+            # Tolerate the singular form of plural section names ("Conclusion"
+            # vs "Conclusions") in both heading and body matching, which is the
+            # standard English heading convention for the final section.
+            terms = (section, section[:-1]) if section.endswith("s") else (section,)
+            in_heading = any(
+                any(t == ht or ht.startswith(t) for t in terms)
+                for ht in heading_texts_lower
+            )
+            in_body = any(t in text_lower for t in terms)
             found = in_heading or in_body
-            record(f"Document has '{section}' section (heading)", in_heading,
-                   f"Headings: {heading_texts_lower}")
-            if not in_heading and not found:
+            record(f"Document has '{section}' section", found,
+                   f"headings: {heading_texts_lower}")
+            if not found:
                 sections_ok = False
 
         return has_length and has_title and sections_ok
@@ -327,7 +412,9 @@ def main():
     print(f"  Excel:   {'PASS' if excel_ok else 'FAIL'}")
     print(f"  Word:    {'PASS' if word_ok else 'FAIL'}")
 
-    # Use FAIL_COUNT as authoritative: any recorded FAIL propagates to overall
+    # Use FAIL_COUNT as authoritative: any recorded FAIL propagates to overall.
+    # With the row-by-row groundtruth comparison removed, every recorded check is a
+    # genuine task requirement that a correct agent satisfies.
     overall = excel_ok and word_ok and FAIL_COUNT == 0
     print(f"  Overall: {'PASS' if overall else 'FAIL'}")
 

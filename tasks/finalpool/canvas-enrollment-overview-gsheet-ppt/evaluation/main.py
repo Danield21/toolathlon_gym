@@ -145,6 +145,54 @@ def check_gsheet():
            matched_counts >= max(1, len(expected_counts) - 1) or has_total,
            f"Matched {matched_counts}/{len(expected_counts)} counts; total found: {has_total}")
 
+    # Locate header columns by keyword so we can validate the Student_Count
+    # sort order (M2) and the Teacher_Count column (M3). grid maps
+    # row_index -> {col_index: value}. The header row is taken as the row with
+    # the smallest index.
+    header_row = min(grid.keys()) if grid else None
+    col_of = {}
+    if header_row is not None:
+        for c, v in grid.get(header_row, {}).items():
+            s = str(v).lower()
+            if "student" in s and "count" in s:
+                col_of["student"] = c
+            elif "teacher" in s and "count" in s:
+                col_of["teacher"] = c
+
+    # M2: Student_Count must be sorted descending.
+    if "student" in col_of:
+        sc = col_of["student"]
+        series = []
+        for r in sorted(grid.keys()):
+            if r == header_row:
+                continue
+            try:
+                series.append(float(grid[r].get(sc)))
+            except (TypeError, ValueError):
+                pass
+        if len(series) >= 2:
+            record("Sheet Student_Count sorted descending",
+                   series == sorted(series, reverse=True),
+                   f"Student_Count series: {series}")
+
+    # M3: Teacher_Count column must exist and hold non-negative numeric values.
+    if "teacher" in col_of:
+        tc = col_of["teacher"]
+        tvals = []
+        for r in sorted(grid.keys()):
+            if r == header_row:
+                continue
+            try:
+                tvals.append(float(grid[r].get(tc)))
+            except (TypeError, ValueError):
+                pass
+        record("Sheet Teacher_Count column populated with numeric values",
+               len(tvals) >= n_courses and all(t >= 0 for t in tvals),
+               f"Teacher_Count values: {tvals}")
+    else:
+        record("Sheet has Teacher_Count column", False,
+               "Teacher_Count header not found in sheet")
+
     cur.close()
     conn.close()
     return True

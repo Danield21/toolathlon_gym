@@ -238,24 +238,33 @@ def check_pdf(agent_workspace):
     size = os.path.getsize(pdf_path)
     check("PDF file size reasonable", size > 1024, f"Size: {size} bytes")
 
-    # Try to read PDF text
+    # Try to read PDF text. A PDF reader is required: we must not pass a task on
+    # file-existence alone, otherwise a placeholder/blank PDF would slip through.
+    text = ""
+    pdf_reader_ok = False
     try:
         import PyPDF2
         with open(pdf_path, "rb") as f:
             reader = PyPDF2.PdfReader(f)
-            text = ""
             for page in reader.pages:
                 text += page.extract_text() or ""
+        pdf_reader_ok = True
     except ImportError:
         try:
             import pdfplumber
             with pdfplumber.open(pdf_path) as p:
-                text = ""
                 for page in p.pages:
                     text += page.extract_text() or ""
+            pdf_reader_ok = True
         except ImportError:
-            print("  [WARN] No PDF reader available. Checking file existence only.")
-            return True
+            pass
+    if not pdf_reader_ok:
+        check("PDF text could be extracted (PyPDF2 or pdfplumber required)",
+              False, "No PDF reader library available in the eval environment")
+        return False
+    if not text.strip():
+        check("PDF contains extractable text", False, "Extracted text is empty")
+        return False
 
     text_lower = text.lower()
     check("PDF contains Sales Trend title", "sales trend" in text_lower or "sales" in text_lower)

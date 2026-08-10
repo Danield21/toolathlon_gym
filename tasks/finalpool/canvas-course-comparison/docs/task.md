@@ -1,4 +1,4 @@
-I need a side-by-side comparison of all our Canvas courses. Pull data for each course including enrollment numbers, assignment counts, quiz counts, and discussion topic counts.
+I need a side-by-side comparison of all our Canvas courses. Pull data for each course including enrollment numbers, assignment counts, quiz counts, and discussion topic counts. Count every quiz that the learning management system returns for the course, including quizzes that are not yet published, so that the quiz count matches exactly what the system reports.
 
 Create an Excel file called Canvas_Course_Comparison.xlsx with two sheets. The "Course Comparison" sheet should have Course_Code, Course_Name, Students, Assignments, Quizzes, and Discussions. Sort by Course_Code.
 

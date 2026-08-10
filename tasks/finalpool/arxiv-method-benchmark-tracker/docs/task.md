@@ -8,6 +8,13 @@ Once you have gathered all the information, create two outputs in the workspace.
 
 First, create an Excel workbook called Method_Benchmark.xlsx with three sheets. The first sheet should be named "Leaderboard" with columns Task, Method, Score, and Paper_ID. Include all methods from the leaderboard, listing the paper identifier if one is associated with the method or leaving it blank if the method has no linked paper. The second sheet should be named "Method Details" with columns Paper_ID, Title, Key_Contribution, and Dataset_Used. For each paper you found, summarize the key contribution in one sentence based on the LaTeX source and note the primary dataset mentioned. The third sheet should be named "Summary" with columns Metric and Value, including Total_Methods (count of all methods on the leaderboard), Methods_With_Papers (count of methods that have an associated paper), Total_Tasks (number of distinct benchmark tasks), and Top_Score (the highest score across all tasks).
 
+Important: all numeric values (scores in the Leaderboard sheet and all Value cells in the Summary sheet) must be written as literal numbers (for example 95, 95.0, 91.2), not as Excel formulas.
+
 Second, create a page in the team knowledge base with the title "ML Benchmark Method Tracker". The page should provide a structured overview including a heading for each benchmark task, the top methods for each task with their scores, descriptions of the key contributions from the associated papers, and any observations about trends across the benchmark results such as which architectures dominate or which approaches are most competitive.
 
 Please complete all steps and ensure the knowledge base page has substantive content useful for ongoing research tracking. Refer to the method comparison guidelines and template in the workspace for formatting guidance.
+
+Concurrency note: the workspace for this task is shared and another agent instance may be working on the same task at the same time. Both of you produce the same deliverables, so write them so that concurrent access cannot corrupt or partially overwrite them:
+- Build the entire Excel workbook (all three sheets, fully populated) and save it in one single write. Do not create the file and then add sheets or rows across separate save operations.
+- Before writing Method_Benchmark.xlsx, check whether it already exists and already contains all three sheets with their data filled in. If it exists and is complete, do not overwrite it — verify its contents and only fill in genuinely missing data.
+- Never delete or truncate a file that already contains completed work from the other instance; prefer reading and verifying over re-writing.

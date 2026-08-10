@@ -4,4 +4,4 @@ Then pull the actual employee data from our HR analytics data warehouse. I need 
 
 Create an Excel file called Department_Budget_Report.xlsx with two sheets. The first sheet "Budget Analysis" should have columns Department, Budget, Planned_Headcount, Actual_Headcount, Avg_Salary rounded to 2 decimals, Total_Salary_Cost rounded to 2 decimals, and Budget_Utilization_Pct rounded to 1 decimal. Sort by Department alphabetically.
 
-The "Summary" sheet should have Metric and Value columns with Total_Budget, Total_Salary_Cost, Avg_Budget_Utilization across all departments rounded to 1 decimal, and Over_Budget_Depts counting departments where utilization exceeds 100 percent.
+The "Summary" sheet should have Metric and Value columns with Total_Budget, Total_Salary_Cost, Avg_Budget_Utilization rounded to 1 decimal (computed as the average of the per-department Budget_Utilization_Pct values), and Over_Budget_Depts counting departments where utilization exceeds 100 percent.

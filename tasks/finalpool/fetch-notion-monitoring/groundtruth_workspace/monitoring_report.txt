@@ -2,9 +2,9 @@ Service Monitoring Report
 ========================
 
 Service Status Summary:
-- Database Cluster: degraded (Uptime: 98.50%, Last Incident: 2026-03-05) - ALERT TRIGGERED
-- API Gateway: healthy (Uptime: 99.95%, Last Incident: 2026-03-01)
-- Storage Service: healthy (Uptime: 99.99%, Last Incident: 2026-02-15)
+- API Gateway: degraded (Uptime: 97.6%, Last Incident: 2026-03-04) - ALERT TRIGGERED
+- Auth Service: degraded (Uptime: 98.8%, Last Incident: 2026-03-02) - ALERT TRIGGERED
+- Database: healthy (Uptime: 100.0%, no incidents)
 
 Alerts:
-- Database Cluster is in a degraded state. An alert email was sent and a calendar event was created for the outage window.
+- API Gateway and Auth Service fell below the 99% availability target during the monitoring week (Feb 27 - Mar 5, 2026). An alert email was sent to devops-team@company.com, and incident review calendar events were created for both services on 2026-03-07.

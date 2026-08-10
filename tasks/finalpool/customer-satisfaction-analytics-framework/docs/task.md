@@ -9,3 +9,19 @@ In the fourth phase, you will perform trend analysis to understand satisfaction 
 The fifth phase involves generating comprehensive customer experience reports with actionable insights. Summarize satisfaction findings with clear visualizations showing performance by category and segment. Identify top issues driving dissatisfaction and estimate their business impact. Highlight positive experiences and areas of competitive strength. Document improvement priorities with specific recommendations for addressing the highest-impact issues.
 
 The sixth phase requires distributing findings to business stakeholders through multiple formats. Create detailed reports for executive review with strategic implications. Prepare product-specific reports for relevant team leaders with operational recommendations. Share insights through spreadsheet dashboards enabling ongoing monitoring. Send findings to all stakeholders via email and schedule review meetings to discuss improvement initiatives and assign ownership for addressing key issues.
+
+## Deliverables
+
+Save the following artifacts in the workspace directory. The file names below are the expected ones; the grader accepts equivalent names as long as the content matches, but using these exact names is safest.
+
+1. `satisfaction_analysis.xlsx` — a satisfaction analysis workbook containing: summary satisfaction metrics (overall satisfaction score, Net Promoter Score, First Contact Resolution rate, average resolution time, product/support quality ratings); satisfaction by product dimension or category (e.g. Product Quality, Customer Service, Value for Money, Ease of Use); and satisfaction by customer segment (segment, count, average satisfaction, NPS).
+2. `action_plans.xlsx` — an improvement action plan table with columns: Initiative, Owner, Target Metric, Baseline, Goal, Timeline, Status.
+3. `satisfaction_report.docx` — a detailed report with key findings, segment/dimension analysis, and recommended improvements (at least 60 words).
+4. `executive_summary.docx` — a concise executive summary with key metrics, critical insights, and recommended actions (at least 60 words).
+5. A spreadsheet dashboard (e.g. `dashboard.gsheet` or another xlsx) for ongoing monitoring of satisfaction metrics.
+
+In all xlsx files, write statistical values as literal numbers (e.g. `4.2`, `42`, `75%`) — do not use spreadsheet formulas, since the grader reads literal cell values.
+
+Phase 6 keywords: to ensure your email and calendar events are recognized by the distribution check, the email subject or body must mention at least one of: `satisfaction`, `customer experience`, `findings`, `nps`, `csat`, `survey`, `feedback`; and each review meeting's calendar title must mention at least one of: `satisfaction`, `review`, `customer`, `feedback`, `findings`.
+
+Deliverables may be written in English or Chinese; both languages are accepted by the grader. If you write in Chinese, use the Chinese equivalents of the keywords above (e.g. for emails `满意度`, `客户体验`, `调查`, `反馈`, `净推荐`, `洞察`; for meeting titles `满意度`, `评审`, `回顾`, `复盘`, `客户`, `反馈`, `发现`), and make sure the spreadsheet and document keyword checks below also have matching Chinese terms present.

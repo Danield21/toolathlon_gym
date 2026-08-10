@@ -4,7 +4,7 @@ Once you have the guidelines, pull historical stock price data for each of the s
 
 Use the terminal to run calculations on the historical data. Compute monthly returns by taking the last closing price of each calendar month and calculating the percentage change month over month. From those monthly returns, calculate each stock's volatility (standard deviation of monthly returns), worst single-month return, and Sharpe ratio using a 5% annual risk-free rate. For the Sharpe ratio, annualize the mean monthly return by multiplying by 12 and the monthly standard deviation by multiplying by the square root of 12.
 
-Create an Excel workbook called Stress_Test_Report.xlsx in your workspace with three sheets.
+Create an Excel workbook called Stress_Test_Report.xlsx in your workspace with three sheets. All numeric values in this workbook must be written as literal numbers (plain values, e.g. 25 or -75000) — do not use Excel formulas such as =A1*B1 or =SUM(...) for any cell.
 
 The first sheet should be called "Portfolio Overview" with columns Stock, Allocation_Pct, Amount_Invested, Current_Price (latest closing price), Shares (amount divided by price rounded to 2 decimal places), Monthly_Volatility_Pct (standard deviation of monthly returns times 100, rounded to 2), Worst_Monthly_Return_Pct (rounded to 2), and Sharpe_Ratio (rounded to 3 decimal places). Sort the rows alphabetically by stock symbol.
 

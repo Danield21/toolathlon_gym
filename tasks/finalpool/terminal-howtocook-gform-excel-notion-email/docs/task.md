@@ -2,7 +2,7 @@ You are a corporate wellness coordinator responsible for launching an employee l
 
 Start by reading the Cafeteria_Budget.pdf in your workspace, which describes the budget per meal and expected headcount. Also review the dietary_requirements.json file that lists common dietary restrictions and allergen considerations for the employee population.
 
-Create a dietary preference survey using the forms platform. The survey should be titled "Employee Lunch Program Preferences" and include the following five questions: a multiple choice question asking about preferred cuisine type with options Chinese Meat Dishes, Chinese Vegetable Dishes, Chinese Staple Foods, Soups, and Seafood; a multiple choice question about spice tolerance with options Mild, Medium, and Spicy; a checkbox question about dietary restrictions with options Vegetarian, No Pork, No Seafood, Gluten Free, and No Restrictions; a scale question from 1 to 5 asking how important variety is in their lunch options; and a short text question for any additional food preferences or allergies.
+Create a dietary preference survey using the forms platform. The survey should be titled "Employee Lunch Program Preferences" and include the following five questions: a multiple choice question asking about preferred cuisine type with options Chinese Meat Dishes, Chinese Vegetable Dishes, Chinese Staple Foods, Soups, and Seafood; a multiple choice question about spice tolerance with options Mild, Medium, and Spicy; a multiple choice question about dietary restrictions with options Vegetarian, No Pork, No Seafood, Gluten Free, and No Restrictions; a short text question asking how important variety is in their lunch options (rate on a scale of 1 to 5); and a short text question for any additional food preferences or allergies.
 
 Query the recipe database to find recipes across different categories. Search for at least two meat dishes, two vegetable dishes, one staple food, one soup, and one seafood dish. For each recipe retrieved, note the recipe name, category, difficulty level, and ingredients list.
 
@@ -12,9 +12,9 @@ Create an Excel workbook called Meal_Program_Plan.xlsx in your workspace with fo
 
 The first sheet should be named Survey_Questions and contain columns for question_num, text, and type. Include one row for each of the five survey questions.
 
-The second sheet should be named Recipe_Selection and contain columns for recipe_name, category, and difficulty. Include one row for each recipe you retrieved from the recipe database, with at least seven recipes total.
+The second sheet should be named Recipe_Selection and contain columns for recipe_name, category, and difficulty. Include one row for each recipe you retrieved from the recipe database, with at least seven recipes total. Record the recipe name and category exactly as returned by the recipe database.
 
-The third sheet should be named Weekly_Menu and contain columns for day, lunch_recipe, and estimated_cost. Include five rows, one for each weekday Monday through Friday, with the assigned recipe and estimated cost per serving.
+The third sheet should be named Weekly_Menu and contain columns for day, lunch_recipe, and estimated_cost. Include five rows, one for each weekday Monday through Friday, with the assigned recipe and estimated cost per serving. Enter all cost figures as literal numbers (for example, 8), not as spreadsheet formulas.
 
 The fourth sheet should be named Program_Summary and contain columns for metric and value. Include rows for total_weekly_cost (sum of daily cost times 50 servings), avg_daily_cost_per_person, survey_question_count (5), recipes_evaluated (total recipes retrieved), and menu_days (5).
 

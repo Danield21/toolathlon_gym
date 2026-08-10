@@ -4,4 +4,4 @@ Create an Excel file called SLA_Breach_Audit.xlsx in the workspace with two shee
 
 The second sheet should be called "Summary" with columns Metric and Value. Include the following entries: Total_Tickets (grand total), Total_Breached (total breached across all priorities), Overall_Breach_Rate (percentage rounded to two decimal places), Worst_Priority (the priority with the highest breach rate), and Best_Priority (the priority with the lowest breach rate).
 
-Once the report is ready, send an email from sla-audit@company.com to ops-director@company.com with subject "SLA Breach Audit Results" and include the overall breach rate and the worst performing priority level in the email body.
+Once the report is ready, send an email to ops-director@company.com with subject "SLA Breach Audit Results" and include the overall breach rate and the worst performing priority level in the email body. The sender address is fixed by the email environment; only the recipient and subject matter.

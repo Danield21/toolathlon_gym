@@ -12,12 +12,15 @@ import tarfile
 
 import psycopg2
 
+# Credentials read from the same PG* env vars as evaluation/main.py so that a
+# per-task PGUSER/PGPASSWORD override is honoured symmetrically by both the
+# seeding (preprocess) and the checking (evaluation) sides.
 DB_CONN = {
     "host": os.environ.get("PGHOST", "localhost"),
     "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
-    "user": "eigent",
-    "password": "camel",
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 MOCK_PORT = 30229

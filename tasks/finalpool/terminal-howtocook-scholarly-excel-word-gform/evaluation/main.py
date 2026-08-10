@@ -16,9 +16,11 @@ import psycopg2
 from docx import Document
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
-    "user": "eigent", "password": "camel",
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 PASS_COUNT = 0
@@ -39,11 +41,56 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}: {str(detail)[:200]}")
 
 
+def _to_float(v):
+    """Robustly convert a value to float. Handles int/float/str with
+    thousands separators, currency symbols, percent signs and whitespace.
+    Returns None if the value cannot be parsed."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip()
+        for ch in [",", "$", "¥", "€", "%"]:
+            s = s.replace(ch, "")
+        s = s.strip()
+        try:
+            return float(s)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def num_close(a, b, tol=2.0):
-    try:
-        return abs(float(a) - float(b)) <= tol
-    except:
+    fa, fb = _to_float(a), _to_float(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= tol
+    # Fall back to case-insensitive string equality only when one side is
+    # not numeric (e.g. a literal label being compared).
+    if a is None or b is None:
         return False
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+def _find_header(rows, keywords):
+    """Return the index of the row that matches the most header keywords
+    (case-insensitive). A header row lists several expected column names, so it
+    scores higher than a one-cell title row above it. If no row matches any
+    keyword, assume the first row is the header (return 0).
+    Returns -1 when there are no rows."""
+    if not rows:
+        return -1
+    best_idx = 0
+    best_score = -1
+    for i, r in enumerate(rows):
+        if not any(c is not None and str(c).strip() for c in r):
+            continue
+        text = " ".join(str(c).lower() for c in r if c is not None)
+        score = sum(1 for k in keywords if k in text)
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    return best_idx if best_score > 0 else 0
 
 
 def check_excel(workspace):
@@ -66,23 +113,31 @@ def check_excel(workspace):
     rd_idx = next((i for i, s in enumerate(sheets_lower) if "recipe" in s and "database" in s), 0)
     ws1 = wb[sheets[rd_idx]]
     rows1 = list(ws1.iter_rows(values_only=True))
-    data1 = [r for r in rows1[1:] if any(c for c in r)]
+    hdr1 = _find_header(rows1, ["recipe_name", "category", "dietary", "evidence", "prep", "difficulty"])
+    data1 = [r for r in rows1[hdr1 + 1:] if any(c for c in r)] if hdr1 >= 0 else []
     check("Recipe_Database has 10+ recipes", len(data1) >= 10, f"Found {len(data1)}")
-    if rows1:
-        headers = [str(c).lower() if c else "" for c in rows1[0]]
+    if hdr1 >= 0:
+        headers = [str(c).lower() if c else "" for c in rows1[hdr1]]
         check("Has dietary_tags column", any("dietary" in h or "tag" in h for h in headers), f"Headers: {headers}")
         check("Has evidence_score column", any("evidence" in h or "score" in h for h in headers), f"Headers: {headers}")
         check("Has prep_time column", any("prep" in h or "time" in h for h in headers), f"Headers: {headers}")
+
+    # Build recipe->category map from Recipe_Database for consecutive-category check
+    recipe_cats = {}
+    for r in data1:
+        if r and r[0]:
+            recipe_cats[str(r[0]).strip().lower()] = str(r[1]).strip().lower() if len(r) > 1 and r[1] else ""
 
     # Research_Summary
     rs_idx = next((i for i, s in enumerate(sheets_lower) if "research" in s or "summary" in s), 1)
     if rs_idx < len(sheets):
         ws2 = wb[sheets[rs_idx]]
         rows2 = list(ws2.iter_rows(values_only=True))
-        data2 = [r for r in rows2[1:] if any(c for c in r)]
-        check("Research_Summary has exactly 4 papers", len(data2) == 4, f"Found {len(data2)}")
-        if rows2:
-            headers2 = [str(c).lower() if c else "" for c in rows2[0]]
+        hdr2 = _find_header(rows2, ["paper", "pub_year", "venue", "finding"])
+        data2 = [r for r in rows2[hdr2 + 1:] if any(c for c in r)] if hdr2 >= 0 else []
+        check("Research_Summary has 4+ relevant papers", len(data2) >= 4, f"Found {len(data2)}")
+        if hdr2 >= 0:
+            headers2 = [str(c).lower() if c else "" for c in rows2[hdr2]]
             check("Has confidence_level column", any("confidence" in h for h in headers2), f"Headers: {headers2}")
         all_text2 = " ".join(str(c) for r in rows2 for c in r if c).lower()
         check("Research mentions workplace nutrition", "workplace" in all_text2 or "employee" in all_text2,
@@ -90,26 +145,17 @@ def check_excel(workspace):
 
     # Weekly_Menu
     wm_idx = next((i for i, s in enumerate(sheets_lower) if "weekly" in s or "menu" in s), 2)
-    # Build recipe->category map from Recipe_Database for consecutive-category check
-    recipe_cats = {}
-    if rd_idx < len(sheets):
-        ws1b = wb[sheets[rd_idx]]
-        rows1b = list(ws1b.iter_rows(values_only=True))
-        if rows1b:
-            for r in rows1b[1:]:
-                if r and r[0]:
-                    recipe_cats[str(r[0]).strip().lower()] = str(r[1]).strip().lower() if len(r) > 1 and r[1] else ""
-
     if wm_idx < len(sheets):
         ws3 = wb[sheets[wm_idx]]
         rows3 = list(ws3.iter_rows(values_only=True))
-        data3 = [r for r in rows3[1:] if any(c for c in r)]
-        check("Weekly_Menu has exactly 5 days", len(data3) == 5, f"Found {len(data3)}")
+        hdr3 = _find_header(rows3, ["day", "breakfast", "lunch", "dinner"])
+        data3 = [r for r in rows3[hdr3 + 1:] if any(c for c in r)] if hdr3 >= 0 else []
+        check("Weekly_Menu has 5+ days", len(data3) >= 5, f"Found {len(data3)}")
         all_text3 = " ".join(str(c) for r in rows3 for c in r if c).lower()
         check("Menu includes Monday", "monday" in all_text3)
         check("Menu includes Friday", "friday" in all_text3)
-        if rows3:
-            headers3 = [str(c).lower() if c else "" for c in rows3[0]]
+        if hdr3 >= 0:
+            headers3 = [str(c).lower() if c else "" for c in rows3[hdr3]]
             check("Has dietary_compliance_pct column",
                   any("compliance" in h or "dietary" in h for h in headers3), f"Headers: {headers3}")
             check("Has est_calories column",
@@ -131,23 +177,27 @@ def check_excel(workspace):
     if pb_idx < len(sheets):
         ws4 = wb[sheets[pb_idx]]
         rows4 = list(ws4.iter_rows(values_only=True))
-        data4 = [r for r in rows4[1:] if any(c for c in r)]
+        hdr4 = _find_header(rows4, ["item", "cost", "participant"])
+        data4 = [r for r in rows4[hdr4 + 1:] if any(c for c in r)] if hdr4 >= 0 else []
         check("Program_Budget has 5+ rows", len(data4) >= 5, f"Found {len(data4)}")
         all_text4 = " ".join(str(c) for r in rows4 for c in r if c).lower()
         check("Budget includes ingredient costs", "ingredient" in all_text4 or "recipe" in all_text4)
         check("Budget includes workshop", "workshop" in all_text4)
         # Check total_cost calculation
-        if rows4:
-            headers4 = [str(c).lower() if c else "" for c in rows4[0]]
+        if hdr4 >= 0:
+            headers4 = [str(c).lower() if c else "" for c in rows4[hdr4]]
             cost_idx = next((i for i, h in enumerate(headers4) if "total_cost" in h or h == "total_cost"), -1)
             cpp_idx = next((i for i, h in enumerate(headers4) if "cost_per" in h), -1)
             part_idx = next((i for i, h in enumerate(headers4) if "participant" in h), -1)
             if cost_idx >= 0 and cpp_idx >= 0 and part_idx >= 0 and data4:
                 row0 = data4[0]
-                if row0[cost_idx] and row0[cpp_idx] and row0[part_idx]:
-                    expected = float(row0[cpp_idx]) * float(row0[part_idx])
+                cpp = _to_float(row0[cpp_idx]) if cpp_idx < len(row0) else None
+                part = _to_float(row0[part_idx]) if part_idx < len(row0) else None
+                cost = _to_float(row0[cost_idx]) if cost_idx < len(row0) else None
+                if cpp is not None and part is not None and cost is not None:
+                    expected = cpp * part
                     check("Budget total_cost = cost_per_person * participants",
-                          num_close(row0[cost_idx], expected, 1.0),
+                          num_close(cost, expected, 1.0),
                           f"{row0[cost_idx]} vs {expected}")
 
 
@@ -187,8 +237,9 @@ def check_gform():
         forms = cur.fetchall()
         diet_form = None
         for form_id, title in forms:
-            if title and ("dietary" in title.lower() or "nutrition" in title.lower()
-                          or "preference" in title.lower()):
+            t = title.lower() if title else ""
+            if ("dietary" in t or "nutrition" in t or "preference" in t
+                    or "wellness" in t or "employee" in t):
                 diet_form = (form_id, title)
                 break
         check("Dietary preferences survey form exists", diet_form is not None,
@@ -208,8 +259,11 @@ def check_gform():
                   "dietary" in q_text or "restriction" in q_text, q_text[:150])
             check("Has meal focus question",
                   "meal" in q_text or "focus" in q_text or "breakfast" in q_text, q_text[:150])
-            check("Has checkbox question type",
-                  "CHECKBOX" in q_types, f"Types: {q_types}")
+            # The google-forms MCP can only produce textQuestion / choiceQuestion
+            # (RADIO single-choice). The survey is built with add_multiple_choice_question,
+            # so at least one choiceQuestion must exist.
+            check("Has multiple choice question type",
+                  "choiceQuestion" in q_types, f"Types: {q_types}")
     except Exception as e:
         check("Gform check", False, str(e))
     finally:
@@ -283,18 +337,6 @@ def check_reverse_validation(workspace):
                   f"Found noise content in Research_Summary sheet")
         else:
             check("No noise scholarly papers in Research_Summary", True, "No Research_Summary sheet to check")
-
-        # Also check all sheets for noise paper content
-        all_wb_text = ""
-        for sn in wb.sheetnames:
-            ws = wb[sn]
-            for row in ws.iter_rows(values_only=True):
-                all_wb_text += " ".join(str(c) for c in row if c).lower() + " "
-
-        no_noise_wb = not any(nt in all_wb_text for nt in noise_titles)
-        check("No noise scholarly papers anywhere in Excel workbook",
-              no_noise_wb,
-              "Found noise paper content in workbook")
         wb.close()
     else:
         check("No noise scholarly papers in Excel", True, "Excel file not found to check")

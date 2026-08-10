@@ -6,7 +6,8 @@ Injects 7 Google Calendar dinner prep events for April 7-13, 2026.
 Clears email tables.
 
 Prerequisites:
-  - PostgreSQL toolathlon_gym database running on localhost:5432
+  - PostgreSQL database reachable via PGHOST/PGPORT/PGDATABASE (defaults
+    localhost:5432/toolathlon_gym), user/password from PGUSER/PGPASSWORD.
 """
 import os
 import argparse
@@ -16,9 +17,9 @@ import psycopg2
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
     "port": int(os.environ.get("PGPORT", "5432")),
-    "dbname": "toolathlon_gym",
-    "user": "eigent",
-    "password": "camel",
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 # 21 meals: 7 days x 3 meals, based on actual HowToCook recipes

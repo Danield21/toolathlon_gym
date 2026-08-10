@@ -162,6 +162,13 @@ def main():
         conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
+        # Derive the expected total eligible count from the live DB rather than
+        # hardcoding it, so the check survives any data reseed.
+        cur.execute('''
+            SELECT COUNT(*) FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES"
+            WHERE "PERFORMANCE_RATING" >= 4 AND "YEARS_EXPERIENCE" >= 5
+        ''')
+        expected_total_eligible = int(cur.fetchone()[0])
         cur.execute("""
             SELECT subject, to_addr, body_text FROM email.messages
             WHERE to_addr::text ILIKE '%%hr-director@company.com%%'
@@ -173,9 +180,10 @@ def main():
         else:
             # Validate body mentions total count and a department name
             body_concat = " ".join((r[2] or "").lower() for r in rows)
-            has_total = "9814" in body_concat or "9,814" in body_concat
+            total_candidates = [str(expected_total_eligible), f"{expected_total_eligible:,}"]
+            has_total = any(c in body_concat for c in total_candidates)
             if not has_total:
-                all_errors.append("Email body missing total eligible count (9814)")
+                all_errors.append(f"Email body missing total eligible count ({expected_total_eligible})")
             # Check at least one department mentioned
             dept_count = sum(1 for d in ["engineering", "finance", "hr", "operations", "r&d", "sales", "support"]
                              if d in body_concat)

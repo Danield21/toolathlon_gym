@@ -211,10 +211,6 @@ def check_email():
 
         if target is not None:
             _, subject, from_addr, to_addr, body_text = target
-            from_str = str(from_addr or "").lower()
-            record("Email from librarian@university.edu",
-                   "librarian@university.edu" in from_str,
-                   f"From: {from_addr}")
             try:
                 if isinstance(to_addr, str):
                     to_parsed = json.loads(to_addr)

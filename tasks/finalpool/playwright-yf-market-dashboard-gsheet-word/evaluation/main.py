@@ -332,13 +332,13 @@ def check_email():
         return
 
     target_subj = "weekly market analysis report"
-    target_from = "analyst@investmentfirm.com"
     target_to = "committee@investmentfirm.com"
+    # Sender address is fixed by the email environment; match on
+    # recipient + subject only.
 
     match = None
     for subject, from_addr, to_addr, body in emails:
         subj_lower = (subject or "").strip().lower()
-        from_lower = (from_addr or "").strip().lower()
         to_list = []
         if isinstance(to_addr, list):
             to_list = [str(x).lower() for x in to_addr]
@@ -349,17 +349,16 @@ def check_email():
             except Exception:
                 to_list = [to_addr.lower()]
         if (target_subj in subj_lower
-                and target_from == from_lower
                 and any(target_to in t for t in to_list)):
             match = (subject, from_addr, to_addr, body)
             break
 
     if not match:
-        record(f"Email subject '{target_subj}' from {target_from} to {target_to}",
+        record(f"Email subject '{target_subj}' to {target_to}",
                False,
-               f"Found {len(emails)} emails; none match all 3 criteria")
+               f"Found {len(emails)} emails; none match subject + recipient")
         return
-    record(f"Email subject '{target_subj}' from {target_from} to {target_to}", True)
+    record(f"Email subject '{target_subj}' to {target_to}", True)
 
     body_lower = (match[3] or "").lower()
     record("Email body mentions Energy (top sector)",

@@ -11,9 +11,9 @@ import psycopg2
 DB_CONN = {
     "host": os.environ.get("PGHOST", "localhost"),
     "port": int(os.environ.get("PGPORT", "5432")),
-    "dbname": "toolathlon_gym",
-    "user": "eigent",
-    "password": "camel",
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 # 3 relevant LLM fine-tuning/alignment papers
@@ -90,6 +90,11 @@ def clear_schemas(conn):
         cur.execute("DELETE FROM gsheet.cells")
         cur.execute("DELETE FROM gsheet.sheets")
         cur.execute("DELETE FROM gsheet.spreadsheets")
+        # Clear all notion side-effect tables so leftover blocks/comments/databases
+        # from a previous run cannot pollute this run's evaluation.
+        cur.execute("DELETE FROM notion.blocks")
+        cur.execute("DELETE FROM notion.comments")
+        cur.execute("DELETE FROM notion.databases")
         cur.execute("DELETE FROM notion.pages")
         cur.execute("DELETE FROM arxiv_latex.papers")
         cur.execute("DELETE FROM arxiv.papers")

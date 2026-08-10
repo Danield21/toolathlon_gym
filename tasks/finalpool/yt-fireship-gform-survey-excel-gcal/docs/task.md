@@ -2,7 +2,7 @@ You are a developer community manager. You want to survey your community about t
 
 Your workflow should proceed as follows.
 
-First, search the video platform for Fireship videos. Across all programming topics on the channel (which span JavaScript, TypeScript, React, AI and machine learning, systems programming, DevOps and others), select the eight videos with the highest view counts. For each video, collect the video identifier, title, view count, like count, duration in seconds, publication date, and a primary topic tag derived from the video's content theme.
+First, search the video platform for Fireship videos. Across all programming topics on the channel (which span JavaScript, TypeScript, React, AI and machine learning, systems programming, DevOps and others), select the eight videos with the highest view counts. For each video, collect the video identifier, title, view count, like count, duration in seconds, and a primary topic tag derived from the video's content theme.
 
 Second, create a spreadsheet file named Community_Report.xlsx. In the first sheet named Top_Videos, include the following columns in order: Rank, Video_ID, Title, Views, Likes, Duration_Sec, Topic_Tags. Populate this sheet with one row per video, ranked from highest to lowest by view count, with Rank starting at 1. Also compute the engagement rate for each video as likes divided by views multiplied by 100, and include this as an additional column named Engagement_Rate. In a second sheet named Engagement_Analysis, include the following columns: Topic, Avg_Engagement_Rate, Total_Views, Video_Count. Populate it with one row per distinct topic, aggregating the videos by their Topic_Tags. There should be at least 4 topic rows.
 

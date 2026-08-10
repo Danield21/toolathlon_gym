@@ -1,4 +1,6 @@
-Our company is organizing a team-building cooking workshop next month and I need you to prepare the materials. We want to feature three Chinese dishes that are relatively easy to make, take no more than 30 minutes of active cooking time, and cover different categories so we get some variety. Please search through the available recipe database to find three suitable dishes that meet these criteria.
+Our company is organizing a team-building cooking workshop next month and I need you to prepare the materials. We want to feature three Chinese dishes that are relatively easy to make (rated as easy, i.e. a low difficulty score, in the recipe database), and cover different categories so we get some variety. Please search through the available recipe database to find three suitable dishes that meet these criteria.
+
+Note: write all document content in English (dish names, ingredients, cooking steps, tips, and the shopping list).
 
 Once you have selected the three recipes, I need you to create three deliverables in the workspace.
 

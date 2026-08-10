@@ -17,3 +17,5 @@ First, a summary slide that synthesizes the key themes across all papers.
 After creating the presentation, create a calendar event for the RLHF Summit 2026 conference. The event should be on April 10, 2026 from 9:00 AM to 5:00 PM, with the location set to "San Francisco Convention Center" and a description that mentions this is a conference about reinforcement learning from human feedback.
 
 Finally, send an email to your collaborators at collaborators@rlhf-lab.org with the subject "RLHF Summit 2026 Preparation Materials". The email body should briefly describe that you have prepared a conference report covering key RLHF papers and created a calendar event for the conference. Mention the date (April 10, 2026) and location in the email.
+
+If you are working in a multi-agent setup, designate exactly one agent to create and write RLHF_Conference_Report.pptx, and have the other agents coordinate with it — do not have multiple agents write to the same file, as concurrent writers can overwrite each other.

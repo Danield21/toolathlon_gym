@@ -1,10 +1,41 @@
 """Evaluation for canvas-scholarly-curriculum-review."""
 import argparse
 import os
+import re
 import sys
 
 def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
     return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
+
+
+def _norm_loose(s):
+    """Lowercase, replace punctuation with spaces, collapse whitespace."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(s or "").lower())).strip()
+
+
+def _levenshtein(a, b):
+    """Plain Levenshtein edit distance (titles are short)."""
+    if a == b:
+        return 0
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[-1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _titles_match(expected, actual):
+    """task.md requires the page title to *contain* the exact phrase
+    "Accreditation Review Report". After normalization the expected phrase
+    must appear intact in the actual title — no edit-distance / keyword
+    fuzzy tolerance."""
+    e = _norm_loose(expected)
+    a = _norm_loose(actual)
+    if not e or not a:
+        return False
+    return e in a
 
 
 
@@ -123,6 +154,18 @@ def check_excel(agent_workspace, groundtruth_workspace=None):
                             return int(float(str(v).strip()))
                         except (TypeError, ValueError):
                             return None
+
+                    def _presence_match(agent_val, gt_int):
+                        """Task wording ('whether the course has quizzes') invites
+                        Yes/No answers; accept them when their presence semantics
+                        agree with the GT count."""
+                        s = str(agent_val).strip().lower()
+                        if s in ("yes", "true", "y", "present"):
+                            return gt_int > 0
+                        if s in ("no", "false", "n", "none", "n/a", "na", "absent", ""):
+                            return gt_int == 0
+                        return False
+
                     for col, name, int_col in [
                         (1, "Assignment_Count", True),
                         (2, "Quiz_Count", True),
@@ -134,6 +177,9 @@ def check_excel(agent_workspace, groundtruth_workspace=None):
                             agent_int = _to_int(a_row[col])
                             gt_int = _to_int(g_row[col])
                             if agent_int is None:
+                                if name == "Quiz_Count" and gt_int is not None \
+                                        and _presence_match(a_row[col], gt_int):
+                                    continue
                                 errors.append(f"{g_row[0]} {name} unparseable: {a_row[col]}")
                             elif gt_int is not None and agent_int != gt_int:
                                 errors.append(f"{g_row[0]} {name}: {a_row[col]} vs {g_row[col]}")
@@ -224,8 +270,16 @@ def check_excel(agent_workspace, groundtruth_workspace=None):
                     errors.append(f"Total courses unparseable: {tr[1]}")
             else:
                 errors.append("Summary Total courses row missing")
-            # Compliant courses == 18 (per GT) or runtime-pulled
-            cr = find_metric(["compliant"])
+            # Compliant courses == 18 (per GT) or runtime-pulled.
+            # Match the "Compliant" row specifically, since a "Non_Compliant_..."
+            # row also contains the substring "compliant" and would otherwise be
+            # picked up first if the agent lists non-compliant before compliant.
+            cr = None
+            for r in data_rows3:
+                k = str(r[0] or "").lower()
+                if "compliant" in k and "non" not in k:
+                    cr = r
+                    break
             if cr and len(cr) > 1:
                 try:
                     if int(cr[1]) != 18:
@@ -275,14 +329,20 @@ def check_notion():
             try:
                 p = props if isinstance(props, dict) else json.loads(props)
                 title_val = p.get("title")
+                if title_val is None:
+                    # Title property may be named differently (e.g. page in a database)
+                    for v in p.values():
+                        if isinstance(v, dict) and isinstance(v.get("title"), list):
+                            title_val = v
+                            break
                 if isinstance(title_val, dict):
                     items = title_val.get("title", [])
                     title_text = " ".join(
                         (it.get("plain_text") or it.get("text", {}).get("content", ""))
                         for it in items if isinstance(it, dict)
                     ).strip()
-                    tl = title_text.lower()
-                    if "accreditation review report" in tl:
+                    # Title must contain the exact phrase (per task.md)
+                    if _titles_match("accreditation review report", title_text):
                         target_page = (pid, title_text)
                         break
             except Exception:

@@ -4,9 +4,11 @@ import argparse, json, os, uuid
 from datetime import datetime, timedelta
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
-    "user": "eigent", "password": "camel"
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 TASK_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -33,10 +35,29 @@ def clear_writable_schemas():
     print("[preprocess] Cleared notion and gcal schemas")
 
 
+def _parse_launch_time(launch_time):
+    """Parse launch_time robustly: tolerate an optional trailing weekday name
+    (the runtime passes 'YYYY-MM-DD HH:MM:SS %A') and an ISO 'T' separator."""
+    if not launch_time:
+        return datetime.now()
+    s = str(launch_time).strip()
+    for _ in range(2):
+        parts = s.rsplit(" ", 1)
+        if len(parts) == 2 and parts[1].isalpha():
+            s = parts[0]
+        else:
+            break
+    s = s.replace("T", " ", 1)
+    try:
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return datetime.now()
+
+
 def inject_noise_data(launch_time):
     conn = get_conn()
     cur = conn.cursor()
-    launch_dt = datetime.strptime(launch_time, "%Y-%m-%d %H:%M:%S")
+    launch_dt = _parse_launch_time(launch_time)
 
     # Noise Notion database - unrelated project tracker
     noise_db_id = str(uuid.uuid4())

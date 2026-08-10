@@ -25,6 +25,55 @@ def num_close(a, b, tol=1.0):
         return str(a).strip().lower() == str(b).strip().lower()
 
 
+def get_expected_breakdown_counts():
+    """Derive expected row counts from the live DB instead of hardcoding 35/7,
+    so the check survives any data reseed.
+
+    Returns (expected_breakdown_rows, expected_dept_rows) where breakdown rows =
+    number of distinct (DEPARTMENT, EDUCATION_LEVEL) combinations present, and
+    dept rows = number of distinct DEPARTMENT values.
+    """
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT COUNT(DISTINCT ("DEPARTMENT" || '|' || "EDUCATION_LEVEL")),
+                   COUNT(DISTINCT "DEPARTMENT")
+            FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES"
+        ''')
+        br, dr = cur.fetchone()
+        cur.close()
+        conn.close()
+        return int(br), int(dr)
+    except Exception:
+        # Fallback to the static expectation if the DB is unreachable during a
+        # self-test run; both GT and agent were generated from the same seed.
+        return 35, 7
+
+
+def norm_token(s):
+    # Normalise option/type text: lowercase, strip, collapse whitespace,
+    # treat hyphens and underscores as equivalent to spaces.
+    return " ".join(str(s or "").strip().lower().replace("-", " ").replace("_", " ").split())
+
+
+def _option_texts(opts_raw):
+    """Extract plain option strings from a config's options/choices value.
+
+    The Google Forms MCP stores multiple-choice options as a list of objects
+    (e.g. {"value": "Leadership"}), but some forms may use plain strings.
+    Handle both by pulling value/label/text out of any dict entries."""
+    out = []
+    for o in opts_raw or []:
+        if isinstance(o, dict):
+            v = o.get("value") if o.get("value") is not None else (o.get("label") if o.get("label") is not None else o.get("text"))
+            if v is not None:
+                out.append(v)
+        else:
+            out.append(o)
+    return out
+
+
 def load_sheet_rows(wb, sheet_name):
     for name in wb.sheetnames:
         if name.strip().lower() == sheet_name.strip().lower():
@@ -45,6 +94,9 @@ def main():
     agent_ws = args.agent_workspace or task_root
 
     all_errors = []
+
+    # Expected row counts derived from the live DB (reseed-safe).
+    expected_breakdown_rows, expected_dept_rows = get_expected_breakdown_counts()
 
     # --- Check 1: Excel file ---
     import openpyxl
@@ -68,8 +120,8 @@ def main():
         else:
             a_data = a_rows[1:] if len(a_rows) > 1 else []
             g_data = g_rows[1:] if len(g_rows) > 1 else []
-            if len(a_data) != 35:
-                all_errors.append(f"Education Breakdown row count: {len(a_data)}, expected 35")
+            if len(a_data) != expected_breakdown_rows:
+                all_errors.append(f"Education Breakdown row count: {len(a_data)}, expected {expected_breakdown_rows}")
 
             # Build lookup: (dept, edu_level) -> row
             a_lookup = {}
@@ -103,8 +155,8 @@ def main():
         else:
             a_data2 = a_rows2[1:] if len(a_rows2) > 1 else []
             g_data2 = g_rows2[1:] if len(g_rows2) > 1 else []
-            if len(a_data2) != 7:
-                all_errors.append(f"Department Summary row count: {len(a_data2)}, expected 7")
+            if len(a_data2) != expected_dept_rows:
+                all_errors.append(f"Department Summary row count: {len(a_data2)}, expected {expected_dept_rows}")
 
             a_lookup2 = {}
             for row in a_data2:
@@ -162,14 +214,16 @@ def main():
             if not has_interest: all_errors.append("GForm missing training interest question")
             if not has_format: all_errors.append("GForm missing training format question")
 
-            # Verify option sets for MC questions
-            interest_opts_expected = {"Technical Skills", "Leadership", "Communication", "Data Analysis"}
-            format_opts_expected = {"In-Person Workshop", "Online Self-Paced", "Live Virtual", "On-the-Job Coaching"}
+            # Verify option sets for MC questions (compare after normalisation)
+            interest_opts_expected = {norm_token(o) for o in
+                                      ("Technical Skills", "Leadership", "Communication", "Data Analysis")}
+            format_opts_expected = {norm_token(o) for o in
+                                    ("In-Person Workshop", "Online Self-Paced", "Live Virtual", "On-the-Job Coaching")}
             for title, qtype, config in qs:
                 t_low = (title or "").lower()
                 try:
                     cfg = config if isinstance(config, dict) else _json.loads(config) if config else {}
-                    opts = set(str(o).strip() for o in (cfg.get("options") or []))
+                    opts = set(norm_token(o) for o in _option_texts(cfg.get("options") or cfg.get("choices")))
                 except Exception:
                     opts = set()
                 if "interest" in t_low or "area" in t_low:
