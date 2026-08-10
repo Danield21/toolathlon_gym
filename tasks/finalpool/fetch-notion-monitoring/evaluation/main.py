@@ -21,10 +21,10 @@ EXPECTED_PAGE_TITLE = "Service Monitoring Dashboard - March 2026"
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
-    "dbname": "toolathlon_gym",
-    "user": "eigent",
-    "password": "camel",
+    "port": int(os.environ.get("PGPORT", "5432")),
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 PASS_COUNT = 0
@@ -86,6 +86,56 @@ def titles_match(expected, actual):
     if not e or not a:
         return False
     return e == a
+
+
+def _rich_text_to_str(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(_rich_text_to_str(item) for item in value)
+    if isinstance(value, dict):
+        plain = value.get("plain_text")
+        if isinstance(plain, str):
+            return plain
+        text = value.get("text")
+        if isinstance(text, dict) and isinstance(text.get("content"), str):
+            return text["content"]
+        if isinstance(text, str):
+            return text
+        content = value.get("content")
+        if isinstance(content, str):
+            return content
+        for key in ("title", "rich_text"):
+            if key in value:
+                rendered = _rich_text_to_str(value[key])
+                if rendered:
+                    return rendered
+    return ""
+
+
+def _page_title_from_properties(props):
+    if isinstance(props, str):
+        try:
+            props = json.loads(props)
+        except Exception:
+            return ""
+    if isinstance(props, dict) and isinstance(props.get("properties"), dict):
+        props = props["properties"]
+    if not isinstance(props, dict):
+        return ""
+    for key in ("title", "Name", "name", "Title"):
+        if key in props:
+            rendered = _rich_text_to_str(props[key])
+            if rendered:
+                return rendered
+    for value in props.values():
+        if isinstance(value, dict) and value.get("type") == "title":
+            rendered = _rich_text_to_str(value)
+            if rendered:
+                return rendered
+    return ""
 
 
 def check_excel(agent_workspace):
@@ -276,21 +326,7 @@ def check_notion():
     noise_present_count = 0
 
     for page_id, props_raw in pages:
-        if isinstance(props_raw, str):
-            props = json.loads(props_raw)
-        else:
-            props = props_raw
-
-        # Extract title from properties
-        title_parts = []
-        for key in ["title", "Name"]:
-            prop = props.get(key, {})
-            if isinstance(prop, dict):
-                title_parts = prop.get("title", [])
-                if title_parts:
-                    break
-
-        page_title = "".join(p.get("plain_text", "") for p in title_parts)
+        page_title = _page_title_from_properties(props_raw)
         page_title_lower = page_title.lower()
 
         if page_title_lower in noise_titles:

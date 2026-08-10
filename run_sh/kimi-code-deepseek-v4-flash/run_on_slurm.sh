@@ -20,6 +20,7 @@
 #   SLURM_CPUS    cpus per node                   (default 64)
 #   SLURM_TIME    wall time                       (default 04:00:00)
 #   SLURM_PARTITION  partition                    (default linlab)
+#   SLURM_NODELIST   optional fixed node, e.g. gnho019
 #   RELAY_API_KEY  API key used only for relay health checks (required)
 
 set -euo pipefail
@@ -33,18 +34,38 @@ RELAY_PORT=19317
 PYTHON_BIN="${PYTHON_BIN:-/storage/lintaoLab/bowending/miniconda3/envs/dbw_dev/bin/python3}"
 RELAY_API_KEY="${RELAY_API_KEY:?Set RELAY_API_KEY before launching the eval}"
 
-# Start relay on the login node (where this script runs). api_relay.py is
-# idempotent: it exits 0 immediately if the port is already taken, otherwise
-# it blocks forever serving — so we background it.
-nohup "$PYTHON_BIN" "$SCRIPT_DIR/api_relay.py" >/dev/shm/api_relay.log 2>&1 &
-disown || true
-# Give it a moment to bind, then confirm.
+RELAY_OWNED=0
+RELAY_PID=""
+cleanup_launcher() {
+  local rc=$?
+  trap - EXIT
+  if [[ "$RELAY_OWNED" == "1" && -n "$RELAY_PID" ]]; then
+    kill "$RELAY_PID" >/dev/null 2>&1 || true
+    wait "$RELAY_PID" 2>/dev/null || true
+  fi
+  exit "$rc"
+}
+trap cleanup_launcher EXIT
+
 if curl -sS -m 5 -o /dev/null \
      -H "Authorization: Bearer ${RELAY_API_KEY}" \
      "http://127.0.0.1:${RELAY_PORT}/v1/models"; then
   echo "[slurm-launch] API relay healthy on 127.0.0.1:${RELAY_PORT}"
 else
-  echo "[slurm-launch] WARNING: relay health check failed, check /dev/shm/api_relay.log"
+  # Start relay on the login node (where this script runs). If the port was
+  # already healthy above, it is shared and we leave it alone on exit. If this
+  # launcher starts it, cleanup_launcher stops it when the Slurm run finishes.
+  nohup "$PYTHON_BIN" "$SCRIPT_DIR/api_relay.py" >/dev/shm/api_relay.log 2>&1 &
+  RELAY_PID=$!
+  RELAY_OWNED=1
+  sleep 1
+  if curl -sS -m 5 -o /dev/null \
+       -H "Authorization: Bearer ${RELAY_API_KEY}" \
+       "http://127.0.0.1:${RELAY_PORT}/v1/models"; then
+    echo "[slurm-launch] API relay started on 127.0.0.1:${RELAY_PORT} pid=${RELAY_PID}"
+  else
+    echo "[slurm-launch] WARNING: relay health check failed, check /dev/shm/api_relay.log"
+  fi
 fi
 
 # ── slurm resource request ───────────────────────────────────────────────────
@@ -52,6 +73,11 @@ SLURM_MEM="${SLURM_MEM:-128G}"
 SLURM_CPUS="${SLURM_CPUS:-64}"
 SLURM_TIME="${SLURM_TIME:-04:00:00}"
 SLURM_PARTITION="${SLURM_PARTITION:-linlab}"
+SLURM_NODELIST="${SLURM_NODELIST:-}"
+SRUN_NODE_ARGS=()
+if [[ -n "$SLURM_NODELIST" ]]; then
+  SRUN_NODE_ARGS=(--nodelist="$SLURM_NODELIST")
+fi
 
 # ── enroot on compute nodes lives under the user's .local ───────────────────
 ENROOT_ROOT="/storage/lintaoLab/bowending/.local/enroot"
@@ -70,7 +96,7 @@ if [[ ${#TASKS[@]} -eq 0 ]]; then
   exit 1
 fi
 
-echo "[slurm-launch] partition=$SLURM_PARTITION mem=$SLURM_MEM cpus=$SLURM_CPUS time=$SLURM_TIME"
+echo "[slurm-launch] partition=$SLURM_PARTITION node=${SLURM_NODELIST:-auto} mem=$SLURM_MEM cpus=$SLURM_CPUS time=$SLURM_TIME"
 echo "[slurm-launch] tasks: ${TASKS[*]}"
 
 # ── the command to run inside the slurm job ──────────────────────────────────
@@ -89,11 +115,6 @@ unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
 export no_proxy="127.0.0.1,localhost,::1,192.168.180.240,104.168.43.47,172.16.0.0/12,10.0.0.0/8"
 
 # enroot runtime on this cluster.
-# The user-installed enroot lives under ~/.local; its wrapper script
-# (.local/bin/enroot) sets ENROOT_LIBRARY_PATH/SYSCONF_PATH itself, so we just
-# need it first on PATH. Do NOT set ENROOT_LIBRARY_PATH manually here — the
-# correct path is ~/.local/enroot/lib (not usr/lib/enroot).
-#
 # IMPORTANT: /storage/lintaoLab is an NFS mount. Compute nodes reading the
 # enroot bash script + libraries directly from NFS intermittently hang on
 # read() (NFS dithering), which deadlocks even `enroot version`. To avoid
@@ -105,7 +126,9 @@ if [[ ! -x "$ENROOT_LOCAL/bin/enroot" ]]; then
   mkdir -p "$ENROOT_LOCAL"
   rsync -a "$ENROOT_SRC/" "$ENROOT_LOCAL/" 2>/dev/null || cp -a "$ENROOT_SRC/." "$ENROOT_LOCAL/"
 fi
-export PATH="${ENROOT_LOCAL}/bin:/storage/lintaoLab/bowending/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/storage/lintaoLab/bowending/miniconda3/envs/toolathlon_gym/bin"
+export ENROOT_LIBRARY_PATH="${ENROOT_LOCAL}/lib"
+export ENROOT_SYSCONF_PATH="${ENROOT_LOCAL}/etc"
+export PATH="${ENROOT_LOCAL}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/storage/lintaoLab/bowending/miniconda3/envs/toolathlon_gym/bin"
 
 # Use /dev/shm (1TB tmpfs on compute nodes) for all enroot working dirs.
 export ENROOT_DATA_PATH="/dev/shm/enroot_data"
@@ -113,6 +136,32 @@ export ENROOT_TEMP_PATH="/dev/shm/enroot_tmp"
 export ENROOT_RUNTIME_PATH="/dev/shm/enroot_runtime"
 export ENROOT_CACHE_PATH="/dev/shm/enroot_cache"
 mkdir -p "$ENROOT_DATA_PATH" "$ENROOT_TEMP_PATH" "$ENROOT_RUNTIME_PATH" "$ENROOT_CACHE_PATH"
+export RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
+
+cleanup_inner() {
+  local rc=$?
+  trap - EXIT
+  set +e
+  echo "[inner-cleanup] run_id=${RUN_ID} rc=${rc}"
+  if [[ -d "$ENROOT_DATA_PATH" ]]; then
+    find "$ENROOT_DATA_PATH" -mindepth 1 -maxdepth 1 -type d \
+      -name "agent-${RUN_ID}-*" -exec rm -rf -- {} + 2>/dev/null || true
+    rmdir "$ENROOT_DATA_PATH" 2>/dev/null || true
+  fi
+  if [[ -d "/dev/shm/toolathlon_pg_${UID}" ]]; then
+    find "/dev/shm/toolathlon_pg_${UID}" -mindepth 1 -maxdepth 1 -type d \
+      -name "${RUN_ID}_*" -exec rm -rf -- {} + 2>/dev/null || true
+    rmdir "/dev/shm/toolathlon_pg_${UID}" 2>/dev/null || true
+  fi
+  rmdir "/dev/shm/toolathlon_pg_port_leases_deepseek_${UID}" 2>/dev/null || true
+  rmdir "$ENROOT_TEMP_PATH" "$ENROOT_RUNTIME_PATH" "$ENROOT_CACHE_PATH" 2>/dev/null || true
+  if [[ "${SLURM_SELF_CANCEL_ON_EXIT:-1}" == "1" && -n "${SLURM_JOB_ID:-}" ]]; then
+    echo "[inner-cleanup] self-scancel Slurm job ${SLURM_JOB_ID}"
+    scancel "$SLURM_JOB_ID" >/dev/null 2>&1 || true
+  fi
+  exit "$rc"
+}
+trap cleanup_inner EXIT
 
 # The base rootfs (toolathlon-pack) lives on NFS so every compute node can see
 # it. Each worker copies it into its own /dev/shm/enroot_data/agent-<task> (fast
@@ -132,15 +181,18 @@ curl -sS -m 5 -o /dev/null -w "  HTTP %{http_code}\n" \
 echo "[inner] enroot: $(enroot version 2>&1)"
 echo "[inner] /dev/shm: $(df -h /dev/shm | tail -1 | awk '{print $2" total, "$4" free"}')"
 
-# Hand off to the existing parallel launcher.
-exec bash run_sh/kimi-code-deepseek-v4-flash/run_eval_parallel.sh "$@"
+# Hand off to the existing parallel launcher. Keep this shell alive so its
+# EXIT trap can release the Slurm allocation and sweep this run's tmpfs roots.
+bash run_sh/kimi-code-deepseek-v4-flash/run_eval_parallel.sh "$@"
 INNER_EOF
 
 # Pass tasks as args to the inner script.
-export SLURM_MEM SLURM_CPUS SLURM_TIME SLURM_PARTITION RELAY_API_KEY
+export SLURM_MEM SLURM_CPUS SLURM_TIME SLURM_PARTITION SLURM_NODELIST RELAY_API_KEY
+export RUN_ID DUMP_ROOT MAX_CONCURRENT AUTO_AUDIT_HTML
 
 echo "[slurm-launch] dispatching to slurm..."
-exec srun -p "$SLURM_PARTITION" \
+srun -p "$SLURM_PARTITION" \
+     "${SRUN_NODE_ARGS[@]}" \
      -N1 -n1 -c"$SLURM_CPUS" \
      --mem="$SLURM_MEM" --time="$SLURM_TIME" \
      --job-name="ds-v4-flash-eval" \

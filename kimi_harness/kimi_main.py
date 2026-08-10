@@ -17,13 +17,21 @@ import argparse
 import asyncio
 import ctypes
 import glob
+import html
+import http.server
 import json
+import mimetypes
 import os
+import posixpath
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -554,6 +562,319 @@ _BLACKBOX_FILES = ("main.py", "run_parallel.sh", "test_mcp_servers.py",
 _BLACKBOX_ABS_FILES = ("/opt/provision_agent.sh",)
 
 
+_MOCK_HTTP_MAX_BYTES = int(os.environ.get("KIMI_MOCK_HTTP_MAX_BYTES",
+                                          str(50 * 1024 * 1024)))
+_MOCK_HTTP_SKIP_FILES = {"server.log", "http.log"}
+
+
+def _is_relative_to(path: str, base: str) -> bool:
+    try:
+        return os.path.commonpath([path, base]) == base
+    except ValueError:
+        return False
+
+
+def _parse_http_server_cmdline(argv: list[str], cwd: str) -> tuple[int, str] | None:
+    """Return (port, directory) for `python -m http.server ...` cmdlines."""
+    if "http.server" not in argv:
+        return None
+    idx = argv.index("http.server") + 1
+    port = None
+    directory = None
+    i = idx
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("--directory", "-d") and i + 1 < len(argv):
+            directory = argv[i + 1]
+            i += 2
+            continue
+        if arg in ("--bind", "-b", "--protocol") and i + 1 < len(argv):
+            i += 2
+            continue
+        if arg.startswith("-"):
+            i += 1
+            continue
+        if port is None:
+            try:
+                port = int(arg)
+            except ValueError:
+                pass
+        i += 1
+    if port is None:
+        port = 8000
+    if not (1024 < port < 65536):
+        return None
+    directory = directory or cwd
+    if not os.path.isabs(directory):
+        directory = os.path.abspath(os.path.join(cwd, directory))
+    return port, directory
+
+
+def _iter_http_server_processes() -> list[dict]:
+    """Scan /proc for live `python -m http.server` processes."""
+    out = []
+    for proc_dir in glob.glob("/proc/[0-9]*"):
+        pid_s = os.path.basename(proc_dir)
+        try:
+            pid = int(pid_s)
+            with open(os.path.join(proc_dir, "cmdline"), "rb") as f:
+                raw = f.read()
+            if not raw:
+                continue
+            argv = [a.decode(errors="replace") for a in raw.split(b"\0") if a]
+            cwd = os.readlink(os.path.join(proc_dir, "cwd"))
+        except (OSError, ValueError):
+            continue
+        parsed = _parse_http_server_cmdline(argv, cwd)
+        if parsed is None:
+            continue
+        port, directory = parsed
+        out.append({"pid": pid, "port": port, "directory": directory, "argv": argv})
+    return out
+
+
+def _snapshot_static_tree(root: str) -> tuple[dict[str, bytes], set[str], int]:
+    """Read a static tree into memory, excluding symlinks and server logs."""
+    root_real = os.path.realpath(root)
+    files: dict[str, bytes] = {}
+    directories: set[str] = {""}
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(root_real, followlinks=False):
+        dirnames[:] = [
+            d for d in dirnames
+            if not os.path.islink(os.path.join(dirpath, d))
+        ]
+        rel_dir = os.path.relpath(dirpath, root_real)
+        rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
+        directories.add(rel_dir)
+        for d in dirnames:
+            directories.add(posixpath.join(rel_dir, d) if rel_dir else d)
+        for name in filenames:
+            src = os.path.join(dirpath, name)
+            if name in _MOCK_HTTP_SKIP_FILES or os.path.islink(src):
+                continue
+            with open(src, "rb") as f:
+                data = f.read()
+            total += len(data)
+            if total > _MOCK_HTTP_MAX_BYTES:
+                raise ValueError(
+                    f"mock HTTP tree exceeds {_MOCK_HTTP_MAX_BYTES} bytes"
+                )
+            rel = os.path.relpath(src, root_real).replace(os.sep, "/")
+            files[rel] = data
+    return files, directories, total
+
+
+def _make_snapshot_handler(files: dict[str, bytes], directories: set[str]):
+    class SnapshotHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
+        server_version = "ToolathlonMockHTTP/1.0"
+
+        def log_message(self, fmt, *args):
+            return
+
+        def do_HEAD(self):
+            self._handle(send_body=False)
+
+        def do_GET(self):
+            self._handle(send_body=True)
+
+        def _handle(self, send_body: bool):
+            parsed = urllib.parse.urlsplit(self.path)
+            raw_path = urllib.parse.unquote(parsed.path)
+            had_trailing = raw_path.endswith("/")
+            rel = posixpath.normpath(raw_path.lstrip("/"))
+            rel = "" if rel in ("", ".") else rel
+            if rel.startswith("../") or rel == "..":
+                self.send_error(404, "File not found")
+                return
+
+            if rel in directories:
+                if not had_trailing:
+                    self.send_response(301)
+                    self.send_header("Location", raw_path + "/")
+                    self.end_headers()
+                    return
+                for index_name in ("index.html", "index.htm"):
+                    index_rel = posixpath.join(rel, index_name) if rel else index_name
+                    if index_rel in files:
+                        self._send_file(index_rel, files[index_rel], send_body)
+                        return
+                self._send_listing(rel, send_body)
+                return
+
+            if rel in files:
+                self._send_file(rel, files[rel], send_body)
+                return
+            self.send_error(404, "File not found")
+
+        def _send_file(self, rel: str, data: bytes, send_body: bool):
+            ctype = mimetypes.guess_type(rel)[0] or "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            if send_body:
+                self.wfile.write(data)
+
+        def _send_listing(self, rel: str, send_body: bool):
+            prefix = rel + "/" if rel else ""
+            entries = set()
+            for d in directories:
+                if d and d.startswith(prefix):
+                    rest = d[len(prefix):]
+                    if rest and "/" not in rest:
+                        entries.add(rest + "/")
+            for f in files:
+                if f.startswith(prefix):
+                    rest = f[len(prefix):]
+                    if rest and "/" not in rest:
+                        entries.add(rest)
+            title = f"Directory listing for /{html.escape(rel)}"
+            lines = [
+                "<!DOCTYPE HTML>",
+                "<html><head>",
+                f"<title>{title}</title>",
+                "</head><body>",
+                f"<h1>{title}</h1>",
+                "<hr><ul>",
+            ]
+            for name in sorted(entries):
+                q = urllib.parse.quote(name)
+                lines.append(
+                    f'<li><a href="{q}">{html.escape(name)}</a></li>'
+                )
+            lines += ["</ul><hr>", "</body></html>"]
+            data = "\n".join(lines).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            if send_body:
+                self.wfile.write(data)
+
+    return SnapshotHTTPRequestHandler
+
+
+def _terminate_pid(pid: int):
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            return
+        deadline = time.time() + (1.5 if sig == signal.SIGTERM else 0.5)
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.05)
+
+
+def _start_snapshot_http_server(port: int, files: dict[str, bytes],
+                                directories: set[str]):
+    class ReusableThreadingHTTPServer(http.server.ThreadingHTTPServer):
+        allow_reuse_address = True
+
+    handler = _make_snapshot_handler(files, directories)
+    server = ReusableThreadingHTTPServer(("127.0.0.1", port), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def _wait_http_ready(port: int, timeout_s: float = 3.0) -> bool:
+    deadline = time.time() + timeout_s
+    url = f"http://127.0.0.1:{port}/"
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=0.5) as resp:
+                return 200 <= resp.status < 400
+        except Exception:
+            time.sleep(0.1)
+    return False
+
+
+def _relocate_mock_servers(task_config) -> list:
+    """Keep task mock HTTP data reachable after `tasks/` is masked.
+
+    Some preprocess scripts start `python -m http.server --directory` inside the
+    task tree. A later bind-mount hides `tasks/`, turning those servers into
+    404 machines. We snapshot only the active server directory for this task and
+    serve it back from memory on the same localhost port. No task source,
+    evaluator, or ground truth path is exposed, and no new /tmp copy is created.
+    """
+    if os.environ.get("KIMI_DISABLE_BOUNDARY") == "1":
+        return []
+    task_root = os.path.realpath(os.path.join(
+        os.getcwd(), "tasks", "finalpool", task_config.task_dir
+    ))
+    task_name = task_config.task_dir
+    relocated = []
+    seen_ports = set()
+    for proc in _iter_http_server_processes():
+        port = proc["port"]
+        serve_dir = os.path.realpath(proc["directory"])
+        if port in seen_ports or not os.path.isdir(serve_dir):
+            continue
+        if not _is_relative_to(serve_dir, task_root):
+            continue
+        rel = os.path.relpath(serve_dir, task_root).replace(os.sep, "/")
+        allowed = (
+            rel == "tmp" or rel.startswith("tmp/") or
+            rel == "files/mock_pages" or rel.startswith("files/mock_pages/")
+        )
+        if not allowed:
+            print_color(
+                f"[mock-http] skip unsafe serve dir for {task_name}: {rel}",
+                "yellow",
+            )
+            continue
+        try:
+            files, directories, total = _snapshot_static_tree(serve_dir)
+        except Exception as exc:
+            print_color(
+                f"[mock-http] skip localhost:{port}: snapshot failed: {exc}",
+                "yellow",
+            )
+            continue
+        _terminate_pid(proc["pid"])
+        try:
+            server, thread = _start_snapshot_http_server(port, files, directories)
+        except OSError as exc:
+            print_color(
+                f"[mock-http] failed to restart localhost:{port}: {exc}",
+                "yellow",
+            )
+            continue
+        if not _wait_http_ready(port):
+            print_color(f"[mock-http] localhost:{port} did not become ready",
+                        "yellow")
+            server.shutdown()
+            server.server_close()
+            continue
+        relocated.append((server, thread, port))
+        seen_ports.add(port)
+        print_color(
+            f"[mock-http] snapshotted {len(files)} files ({total} bytes) "
+            f"for {task_name}; serving localhost:{port} from memory",
+            "cyan",
+        )
+    return relocated
+
+
+def _shutdown_mock_servers(servers: list):
+    for server, thread, port in servers:
+        try:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1)
+        except Exception as exc:
+            print_color(f"[mock-http] warn: shutdown localhost:{port}: {exc}",
+                        "yellow")
+
+
 def _mount(src: str, tgt: str, fstype=None, flags=0) -> bool:
     r = _LIBC.mount(src.encode(), tgt.encode(),
                     fstype.encode() if fstype else None, flags, None)
@@ -769,6 +1090,7 @@ async def amain():
 
     workspace = setup_workspace(task_config)
     run_preprocess(task_config, args.debug)
+    mock_servers = _relocate_mock_servers(task_config)
 
     # Stage agent-runtime deps (MCP servers, harness tools, venv) into an
     # agent-visible dir so the originals can be masked without breaking tools.
@@ -801,6 +1123,7 @@ async def amain():
         )
     finally:
         _unmask_blackbox(masked)
+        _shutdown_mock_servers(mock_servers)
 
     status = "success" if done else "failed"
     print_color(f"[kimi] exited rc={rc} claim_done={done} -> status={status}",

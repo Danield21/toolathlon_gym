@@ -59,7 +59,9 @@ if [[ ! -x "$ENROOT_LOCAL/bin/enroot" ]]; then
   rsync -a "$ENROOT_SRC/" "$ENROOT_LOCAL/" 2>/dev/null || cp -a "$ENROOT_SRC/." "$ENROOT_LOCAL/"
 fi
 CONDA_BIN=/storage/lintaoLab/bowending/miniconda3/envs/toolathlon_gym/bin
-export PATH="${ENROOT_LOCAL}/bin:/storage/lintaoLab/bowending/.local/bin:$CONDA_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export ENROOT_LIBRARY_PATH="${ENROOT_LOCAL}/lib"
+export ENROOT_SYSCONF_PATH="${ENROOT_LOCAL}/etc"
+export PATH="${ENROOT_LOCAL}/bin:$CONDA_BIN:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export ENROOT_DATA_PATH="/dev/shm/enroot_data"
 export ENROOT_TEMP_PATH="/dev/shm/enroot_tmp"
 export ENROOT_RUNTIME_PATH="/dev/shm/enroot_runtime"

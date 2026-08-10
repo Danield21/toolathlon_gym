@@ -107,6 +107,9 @@ _uv_pkgs=(
   "openpyxl" \
   "python-docx" \
   "python-pptx" \
+  "pypdf" \
+  "PyPDF2" \
+  "pdfplumber" \
   "termcolor" \
   "aiofiles" \
   "psutil" \

@@ -83,11 +83,18 @@ def parse_eval_res(inner: Path | None) -> dict:
 
 
 def count_checkpoints(failure_text: str):
+    """Return (pass_count, fail_count) parsed from [PASS]/[FAIL] markers."""
     if not failure_text:
         return None
     p = len(re.findall(r"^\s*\[PASS\]", failure_text, re.M))
     f = len(re.findall(r"^\s*\[FAIL\]", failure_text, re.M))
     return (p, f) if p + f > 0 else None
+
+
+def tier_from_mcp_count(n_mcp: int) -> str:
+    """Map MCP-server count to the dataset tier label used in the README
+    (4=T1, 5=T2, 6=T3, 7-8=T4)."""
+    return {4: "T1", 5: "T2", 6: "T3", 7: "T4", 8: "T4"}.get(n_mcp, "T?")
 
 
 # ---------------------------------------------------------------------------
@@ -455,11 +462,15 @@ def build_case_html(case_dir: Path) -> dict | None:
     crit = compute_critical_steps(main_wire, sub_wires)
 
     ck_pass, ck_total = runlog.get("ckpt_pass"), runlog.get("ckpt_total")
+    ck_fail = None
     if ck_pass is None:
+        # count_checkpoints returns (pass_count, fail_count), NOT (pass, total).
         cnt = count_checkpoints(evres.get("failure_text", ""))
         if cnt:
-            ck_pass, ck_total = cnt
-    ck_fail = (ck_total - ck_pass) if (ck_pass is not None and ck_total is not None) else None
+            ck_pass, ck_fail = cnt
+            ck_total = ck_pass + ck_fail
+    else:
+        ck_fail = (ck_total - ck_pass) if (ck_pass is not None and ck_total is not None) else None
 
     passed = evres.get("pass")
     pass_pill = ('<span class="pill ok">PASS</span>' if passed is True
@@ -470,10 +481,18 @@ def build_case_html(case_dir: Path) -> dict | None:
     ck_txt = f"{ck_pass} / {ck_total} pass · {ck_fail} fail" if ck_pass is not None else "—"
     ck_pct = (100 * ck_pass / ck_total) if (ck_pass and ck_total) else 0
 
+    n_mcp = len(cfg.get("needed_mcp_servers") or [])
+    if n_mcp == 0:
+        # traj_log.json may have been overwritten by the evaluator, wiping the
+        # config. Fall back to the MCP servers actually registered for the run.
+        n_mcp = len(inv.get("mcp_servers") or [])
+    tier = tier_from_mcp_count(n_mcp)
+
     body = []
     body.append(f"""<section id="summary"><h2>Run Summary</h2>
 <div class="kv">
 <div><b>Eval</b>{pass_pill}</div>
+<div><b>Split / Tier</b><span class="tag">{tier}</span> <span class="muted">{n_mcp} MCP server(s)</span></div>
 <div><b>Checkpoints</b>{html.escape(ck_txt)}<div class="bar"><div style="width:{ck_pct:.0f}%"></div></div></div>
 <div><b>Duration</b>{html.escape(dur_txt)}</div>
 <div><b>claim_done</b>{runlog.get('claim_done')}</div>
@@ -593,6 +612,11 @@ def main(argv: list[str]) -> int:
     for root in roots:
         if not root.is_dir():
             print(f"[skip] {root} not a directory")
+            continue
+        if re.match(r"\d{8}-\d{6}_slot\d+", root.name):
+            rec = build_case_html(root)
+            if rec:
+                print(f"[ok] {rec['task']}/{rec['run']}  pass={rec['pass']}  crit={rec['critical_steps']}  subs={rec['n_subs']}({rec['n_parallel']}p/{rec['n_sequential']}s)")
             continue
         records = []
         for case_dir in find_case_dirs(root):

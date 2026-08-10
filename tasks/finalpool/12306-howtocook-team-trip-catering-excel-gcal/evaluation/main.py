@@ -611,20 +611,29 @@ def check_notion():
         return
 
     def _rich_text_to_str(title_block):
-        if not isinstance(title_block, dict):
+        if title_block is None:
             return ""
-        title_list = title_block.get("title")
-        if isinstance(title_list, list):
-            out = ""
-            for t in title_list:
-                if not isinstance(t, dict):
-                    continue
-                tc = t.get("text")
-                if isinstance(tc, dict):
-                    out += tc.get("content") or tc.get("plain_text") or ""
-                else:
-                    out += t.get("plain_text") or ""
-            return out
+        if isinstance(title_block, str):
+            return title_block
+        if isinstance(title_block, list):
+            return "".join(_rich_text_to_str(item) for item in title_block)
+        if isinstance(title_block, dict):
+            plain = title_block.get("plain_text")
+            if isinstance(plain, str):
+                return plain
+            tc = title_block.get("text")
+            if isinstance(tc, dict) and isinstance(tc.get("content"), str):
+                return tc["content"]
+            if isinstance(tc, str):
+                return tc
+            content = title_block.get("content")
+            if isinstance(content, str):
+                return content
+            for key in ("title", "rich_text"):
+                if key in title_block:
+                    rendered = _rich_text_to_str(title_block[key])
+                    if rendered:
+                        return rendered
         return ""
 
     def _page_title(props):

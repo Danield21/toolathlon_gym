@@ -379,8 +379,7 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
 
 
 def _richtext_tokens(v, out):
-    """Recursively collect every text token (plain_text / content / bare string)
-    from a Notion rich-text value, whatever shape it takes."""
+    """Collect text from Notion rich-text shapes without duplicating metadata."""
     if isinstance(v, str):
         out.append(v)
     elif isinstance(v, list):
@@ -389,10 +388,17 @@ def _richtext_tokens(v, out):
     elif isinstance(v, dict):
         if isinstance(v.get("plain_text"), str):
             out.append(v["plain_text"])
-        if isinstance(v.get("content"), str):
+        elif isinstance(v.get("content"), str):
             out.append(v["content"])
-        for val in v.values():
-            _richtext_tokens(val, out)
+        else:
+            text = v.get("text")
+            if isinstance(text, dict):
+                _richtext_tokens(text, out)
+            elif isinstance(text, str):
+                out.append(text)
+            for key in ("title", "rich_text"):
+                if key in v:
+                    _richtext_tokens(v[key], out)
 
 
 def _page_title_text(props):
@@ -449,7 +455,7 @@ def check_notion():
             out = []
             _richtext_tokens(title, out)
             title_text = "".join(out).strip().lower()
-            if title_text == "research items":
+            if "research items" in title_text:
                 target_db = (did, dprops)
                 break
         record("Notion database 'Research Items' exists",

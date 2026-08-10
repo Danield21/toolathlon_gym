@@ -21,7 +21,42 @@
       }
     },
     "parameters": {},
-    "schemas": {}
+    "schemas": {
+      "NotionParent": {
+        "description": "Parent for a new page. Use page_id for a child page or database_id for a database entry.",
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "page_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "page_id"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "database_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "database_id"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "NotionPropertiesMap": {
+        "description": "Page property values keyed by property name or ID. Values are stored as Notion-style property value JSON, for example title, rich_text, select, multi_select, number, date, checkbox, url, email, phone_number, status, people, files, or relation objects. Legacy simplified title arrays are also accepted.",
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
   },
   "security": [
     {
@@ -1238,65 +1273,7 @@
                 "type": "object",
                 "properties": {
                   "properties": {
-                    "description": "The property values to update for the page. The keys are the names or IDs of the property and the values are property values. If a page property ID is not included, then it is not changed.",
-                    "type": "object",
-                    "properties": {
-                      "title": {
-                        "type": "array",
-                        "items": {
-                          "type": "object",
-                          "properties": {
-                            "text": {
-                              "type": "object",
-                              "properties": {
-                                "content": {
-                                  "type": "string"
-                                },
-                                "link": {
-                                  "type": [
-                                    "object",
-                                    "null"
-                                  ],
-                                  "properties": {
-                                    "url": {
-                                      "type": "string"
-                                    }
-                                  },
-                                  "required": [
-                                    "url"
-                                  ]
-                                }
-                              },
-                              "additionalProperties": false,
-                              "required": [
-                                "content"
-                              ]
-                            },
-                            "type": {
-                              "enum": [
-                                "text"
-                              ],
-                              "type": "string"
-                            }
-                          },
-                          "additionalProperties": false,
-                          "required": [
-                            "text"
-                          ]
-                        },
-                        "maxItems": 100
-                      },
-                      "type": {
-                        "enum": [
-                          "title"
-                        ],
-                        "type": "string"
-                      }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                      "title"
-                    ]
+                    "$ref": "#/components/schemas/NotionPropertiesMap"
                   },
                   "in_trash": {
                     "type": "boolean",
@@ -1374,54 +1351,10 @@
                 ],
                 "properties": {
                   "parent": {
-                    "type": "object",
-                    "properties": {
-                      "page_id": {
-                        "type": "string",
-                        "format": "uuid"
-                      }
-                    },
-                    "required": [
-                      "page_id"
-                    ]
+                    "$ref": "#/components/schemas/NotionParent"
                   },
                   "properties": {
-                    "type": "object",
-                    "properties": {
-                      "title": {
-                        "type": "array",
-                        "items": {
-                          "type": "object",
-                          "required": [
-                            "text"
-                          ],
-                          "properties": {
-                            "text": {
-                              "type": "object",
-                              "required": [
-                                "content"
-                              ],
-                              "properties": {
-                                "content": {
-                                  "type": "string"
-                                }
-                              }
-                            }
-                          }
-                        },
-                        "maxItems": 100
-                      },
-                      "type": {
-                        "enum": [
-                          "title"
-                        ],
-                        "type": "string"
-                      }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                      "title"
-                    ]
+                    "$ref": "#/components/schemas/NotionPropertiesMap"
                   },
                   "children": {
                     "type": "array",

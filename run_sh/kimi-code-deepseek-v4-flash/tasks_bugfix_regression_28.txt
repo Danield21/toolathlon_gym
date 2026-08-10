@@ -1,0 +1,38 @@
+# 20260809-230841 cases directly affected by the fixed harness bugs.
+sf-customer-health-dashboard
+canvas-scholarly-curriculum-review
+canvas-course-feedback
+terminal-wc-yf-ppt-notion-email
+
+# Related 20260809 case discussed during triage; not an infra failure, but
+# useful as a normal Notion page regression.
+fetch-notion-monitoring
+
+# New T1-T4 mock HTTP regressions for the in-memory server handoff.
+canvas-at-risk-intervention
+canvas-curriculum-audit
+canvas-assessment-quality-audit
+playwright-yf-market-dashboard-gsheet-word
+arxiv-method-benchmark-tracker
+arxiv-survey-presentation
+yf-options-expiry-monitor
+yf-sector-outlook-report
+fetch-canvas-syllabus-benchmark-excel-ppt
+fetch-sf-hr-benchmark-excel-word
+support-sla-audit-form
+playwright-sf-hr-benefits-survey-gform-excel
+pw-wc-review-analysis-excel-notion
+
+# New T1-T4 Notion database / typed-properties regressions.
+canvas-assignment-effectiveness-ppt-notion-email
+scholarly-arxiv-survey-word-notion-gcal
+terminal-canvas-pdf-excel-notion-gcal
+howtocook-diet-gform-notion-excel
+howtocook-catering-gform-notion-excel
+terminal-sf-arxiv-excel-word-notion
+terminal-yf-wc-excel-word-notion
+12306-wc-amazon-product-roadshow-excel-notion
+yt-ml-repos-github-notion-excel-email
+
+# Extra complex multi-tool case from the same T1-T4 pool.
+canvas-quiz-performance-gcal-gform

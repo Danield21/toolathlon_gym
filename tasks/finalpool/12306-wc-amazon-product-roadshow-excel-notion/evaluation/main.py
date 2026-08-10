@@ -588,13 +588,16 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
             keys = _city_substrings(city_key)
             for r in data_rows:
                 region = _col_val(r, headers, "region")
-                prio = _to_float(_col_val(r, headers, "priority"))
-                if (
-                    region
-                    and any(k in str(region).lower() for k in keys)
-                    and prio is not None
-                    and abs(prio - 1.0) < 0.01
-                ):
+                if not (region and any(k in str(region).lower() for k in keys)):
+                    continue
+                raw = _col_val(r, headers, "priority")
+                prio = _to_float(raw)
+                if prio is not None and abs(prio - 1.0) < 0.01:
+                    return True
+                raw_norm = str(raw or "").strip().lower()
+                if re.search(r"\bpriority\s*[-:]?\s*1\b", raw_norm):
+                    return True
+                if raw_norm in {"p1", "priority one", "first", "1st", "high"}:
                     return True
             return False
 

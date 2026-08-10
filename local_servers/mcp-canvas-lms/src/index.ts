@@ -295,12 +295,14 @@ const TOOLS: Tool[] = [
   },
   {
     name: "canvas_list_assignment_submissions",
-    description: "List all submissions for an assignment (teacher/admin perspective)",
+    description: "List submissions for an assignment (teacher/admin perspective). Results are paginated and include summary totals.",
     inputSchema: {
       type: "object",
       properties: {
         course_id: { type: "number", description: "ID of the course" },
-        assignment_id: { type: "number", description: "ID of the assignment" }
+        assignment_id: { type: "number", description: "ID of the assignment" },
+        page: { type: "number", description: "1-based page number (default: 1)", default: 1 },
+        per_page: { type: "number", description: "Submissions per page (default: 100, max: 100)", default: 100 }
       },
       required: ["course_id", "assignment_id"]
     }
@@ -1594,14 +1596,16 @@ class CanvasMCPServer {
           }
 
           case "canvas_list_assignment_submissions": {
-            const { course_id, assignment_id } = args as {
+            const { course_id, assignment_id, page = 1, per_page = 100 } = args as {
               course_id: number;
               assignment_id: number;
+              page?: number;
+              per_page?: number;
             };
             if (!course_id || !assignment_id) {
               throw new Error("Missing required fields: course_id and assignment_id");
             }
-            const submissions = await this.client.getSubmissions(course_id, assignment_id);
+            const submissions = await this.client.getSubmissions(course_id, assignment_id, page, per_page);
             return {
               content: [{ type: "text", text: JSON.stringify(submissions, null, 2) }]
             };

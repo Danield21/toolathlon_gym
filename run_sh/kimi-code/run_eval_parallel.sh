@@ -26,6 +26,8 @@ ENV_MAX_CONCURRENT="${MAX_CONCURRENT:-}"
 ENV_DUMP_ROOT="${DUMP_ROOT:-}"
 ENV_PG_PORT_BASE="${PG_PORT_BASE:-}"
 ENV_PG_RUNTIME_ROOT="${PG_RUNTIME_ROOT:-}"
+ENV_RUN_ID="${RUN_ID:-}"
+AUTO_AUDIT_HTML="${AUTO_AUDIT_HTML:-1}"
 
 # shellcheck disable=SC1091
 source "$RUNTIME_ROOT/env.sh"
@@ -34,7 +36,7 @@ source "$CONFIG_ENV"
 
 export MODEL_NAME MODEL_API_KEY MODEL_API_URL
 export KIMI_MAX_CONTEXT KIMI_TASK_TIMEOUT_S KIMI_PROVIDER_NAME KIMI_MODEL_ALIAS
-export no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,104.168.43.47"
+export no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1,192.168.180.240,104.168.43.47"
 export NO_PROXY="$no_proxy"
 
 MAX_STEPS="${ENV_MAX_STEPS:-${MAX_STEPS:-100}}"
@@ -83,7 +85,7 @@ done
 mkdir -p "$DUMP_ROOT" "$PARALLEL_ROOT" "${RUNTIME_ROOT}/logs"
 cd "$PROJECT_ROOT"
 
-RUN_ID="$(date +%Y%m%d-%H%M%S)"
+RUN_ID="${ENV_RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 SUMMARY="$DUMP_ROOT/summary_parallel_${RUN_ID}.csv"
 echo "task,status,exit_code,output_dir,pg_port,duration_s" > "$SUMMARY"
 SUMMARY_LOCK="/dev/shm/toolathlon_summary_${UID}_${RUN_ID}_$$.lock"
@@ -119,12 +121,39 @@ need_bins() {
     echo "[error] PG_TEST_ONLY must be 0 or 1" >&2
     exit 1
   }
+  grep -q "Results are paginated and include summary totals" \
+    "${PROJECT_ROOT}/local_servers/mcp-canvas-lms/build/index.js" || {
+      echo "[error] Canvas MCP build is stale; rebuild local_servers/mcp-canvas-lms before running." >&2
+      exit 1
+    }
+  local shm_path shm_free_kb template_kb reserve_kb need_kb
+  shm_path="$ENROOT_DATA_PATH"
+  [[ -d "$shm_path" ]] || shm_path="/dev/shm"
+  shm_free_kb="$(df -Pk "$shm_path" | awk 'NR==2 {print $4}')"
+  if [[ -d "$AGENT_TEMPLATE" ]]; then
+    template_kb="$(du -sk "$AGENT_TEMPLATE" | awk '{print $1}')"
+  else
+    template_kb="$(du -sk "$AGENT_SQSH" | awk '{print $1}')"
+  fi
+  # /dev/shm is RAM-backed. Budget copied rootfs plus PG/MCP/browser scratch
+  # before starting the fan-out, so a run fails cleanly instead of half-filling
+  # tmpfs and leaving partial artifacts behind.
+  reserve_kb=$(( MAX_CONCURRENT * ${SHM_PER_WORKER_RESERVE_GB:-8} * 1024 * 1024 ))
+  need_kb=$(( template_kb * MAX_CONCURRENT + reserve_kb ))
+  if (( shm_free_kb < need_kb )); then
+    echo "[error] insufficient /dev/shm for MAX_CONCURRENT=$MAX_CONCURRENT" >&2
+    echo "[error] free=${shm_free_kb}KB need~=${need_kb}KB template=${template_kb}KB reserve=${reserve_kb}KB" >&2
+    exit 1
+  fi
 }
 
 append_summary() {
   while ! mkdir "$SUMMARY_LOCK" 2>/dev/null; do sleep 0.05; done
   echo "$1" >> "$SUMMARY"
   rmdir "$SUMMARY_LOCK"
+  if [[ -n "${WORKER_TASK:-}" ]]; then
+    WORKER_SUMMARY_WRITTEN=1
+  fi
 }
 
 port_is_listening() {
@@ -337,6 +366,11 @@ WORKER_PGDATA=""
 WORKER_PG_RUNTIME=""
 WORKER_INST=""
 WORKER_PGID=""
+WORKER_TASK=""
+WORKER_OUTDIR=""
+WORKER_PGPORT=""
+WORKER_START_TS=""
+WORKER_SUMMARY_WRITTEN=0
 
 stop_worker_process_group() {
   local pgid="${1:-}"
@@ -393,6 +427,51 @@ cleanup_worker() {
   fi
 }
 
+cleanup_run_artifacts() {
+  set +e
+  local pid pgid path
+
+  while read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    stop_worker_process_group "$pgid" || true
+  done < <(pgrep -u "$USER" -f "agent-${RUN_ID}-" 2>/dev/null || true)
+
+  if [[ -d "${ENROOT_DATA_PATH:-}" ]]; then
+    while read -r path; do
+      [[ "$path" == "$ENROOT_DATA_PATH"/agent-"$RUN_ID"-* ]] || continue
+      enroot remove -f "$(basename "$path")" >/dev/null 2>&1 || true
+      rm -rf -- "$path" 2>/dev/null || true
+    done < <(find "$ENROOT_DATA_PATH" -mindepth 1 -maxdepth 1 -type d \
+      -name "agent-${RUN_ID}-*" -print 2>/dev/null)
+    rmdir "$ENROOT_DATA_PATH" 2>/dev/null || true
+  fi
+
+  if [[ -d "${PG_RUNTIME_ROOT:-}" ]]; then
+    while read -r path; do
+      [[ "$path" == "$PG_RUNTIME_ROOT"/"$RUN_ID"_* ]] || continue
+      rm -rf -- "$path" 2>/dev/null || true
+    done < <(find "$PG_RUNTIME_ROOT" -mindepth 1 -maxdepth 1 -type d \
+      -name "${RUN_ID}_*" -print 2>/dev/null)
+    rmdir "$PG_RUNTIME_ROOT" 2>/dev/null || true
+  fi
+
+  rmdir "$PG_PORT_LEASE_ROOT" 2>/dev/null || true
+  rmdir "${ENROOT_TEMP_PATH:-}" "${ENROOT_RUNTIME_PATH:-}" "${ENROOT_CACHE_PATH:-}" 2>/dev/null || true
+}
+
+generate_audit_html() {
+  local case_dir="$1"
+  [[ "$AUTO_AUDIT_HTML" == "1" ]] || return 0
+  [[ -f "${PROJECT_ROOT}/scripts/audit_html_gen.py" ]] || return 0
+  echo "=== generate audit.html ==="
+  if python3 "${PROJECT_ROOT}/scripts/audit_html_gen.py" "$case_dir"; then
+    [[ -f "${case_dir}/audit.html" ]] && echo "[audit] wrote ${case_dir}/audit.html"
+  else
+    echo "[warn] audit.html generation failed for ${case_dir}" >&2
+  fi
+}
+
 run_one_task() {
   local TASK="$1"
   local SLOT="$2"
@@ -406,7 +485,7 @@ run_one_task() {
   PG_RUNTIME="${PG_RUNTIME_ROOT}/${RUN_ID}_${SLOT}_${TASK_HASH}"
   PGDATA="${PG_RUNTIME}/data"
   PGSOCKET="${PG_RUNTIME}/socket"
-  INST="agent-${TASK_ID}"
+  INST="agent-${RUN_ID}-${SLOT}-${TASK_HASH}-${SAFE}"
   OUTDIR="${DUMP_ROOT}/${TASK}/${RUN_ID}_slot${SLOT}"
   TASK_LOG="${OUTDIR}/run.log"
   mkdir -p "$OUTDIR" "$PG_RUNTIME"
@@ -414,6 +493,10 @@ run_one_task() {
   WORKER_PG_RUNTIME="$PG_RUNTIME"
   WORKER_PGDATA="$PGDATA"
   WORKER_INST=""
+  WORKER_TASK="$TASK"
+  WORKER_OUTDIR="$OUTDIR"
+  WORKER_PGPORT="$PGPORT"
+  WORKER_SUMMARY_WRITTEN=0
 
   {
     echo "PGPORT=$PGPORT"
@@ -423,6 +506,7 @@ run_one_task() {
   } >"${OUTDIR}/isolation.env"
 
   START_TS=$(date +%s)
+  WORKER_START_TS="$START_TS"
   log "START  $TASK  (slot=$SLOT pg_port=$PGPORT pgdata=$PGDATA)"
 
   {
@@ -441,6 +525,7 @@ run_one_task() {
         rm -rf -- "$PGDATA"
         if allocate_free_port; then
           PGPORT="$ALLOCATED_PG_PORT"
+          WORKER_PGPORT="$PGPORT"
           echo "PGPORT=$PGPORT" > "${OUTDIR}/isolation.env"
           log "[retry] $TASK moved to pg_port=$PGPORT"
         else
@@ -507,10 +592,21 @@ SQL
         "${ENROOT_DATA_PATH}/${INST}/workspace/utils/aux_tools/basic.py" \
       || ! cp -f "${PROJECT_ROOT}/utils/api_model/model_provider.py" \
         "${ENROOT_DATA_PATH}/${INST}/workspace/utils/api_model/model_provider.py" \
+      || ! mkdir -p "${ENROOT_DATA_PATH}/${INST}/workspace/tasks/finalpool" \
+      || ! rsync -a --delete "${PROJECT_ROOT}/tasks/finalpool/" \
+        "${ENROOT_DATA_PATH}/${INST}/workspace/tasks/finalpool/" \
       || ! cp -f "${PROJECT_ROOT}/local_servers/emails-mcp/src/emails_mcp/server.py" \
         "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/emails-mcp/src/emails_mcp/server.py" \
       || ! cp -f "${PROJECT_ROOT}/local_servers/excel-mcp-server/src/excel_mcp/__main__.py" \
         "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/excel-mcp-server/src/excel_mcp/__main__.py" \
+      || ! cp -f "${PROJECT_ROOT}/local_servers/mcp-canvas-lms/build/index.js" \
+        "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/mcp-canvas-lms/build/index.js" \
+      || ! cp -f "${PROJECT_ROOT}/local_servers/mcp-canvas-lms/build/client.js" \
+        "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/mcp-canvas-lms/build/client.js" \
+      || ! cp -f "${PROJECT_ROOT}/local_servers/mcp-canvas-lms/build/pg-canvas-router.js" \
+        "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/mcp-canvas-lms/build/pg-canvas-router.js" \
+      || ! cp -f "${PROJECT_ROOT}/local_servers/notion-mcp-server/scripts/notion-openapi.json" \
+        "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/notion-mcp-server/scripts/notion-openapi.json" \
       || ! cp -f "${PROJECT_ROOT}/local_servers/Office-Word-MCP-Server/word_document_server/main.py" \
         "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/Office-Word-MCP-Server/word_document_server/main.py" \
       || ! cp -f "${PROJECT_ROOT}/configs/mcp_servers/word.yaml" \
@@ -535,6 +631,17 @@ SQL
     printf '#!/bin/bash\nexec /usr/bin/node /opt/kimi-code/dist/main.mjs "$@"\n' \
       > "${ENROOT_DATA_PATH}/${INST}/usr/local/bin/kimi"
     chmod +x "${ENROOT_DATA_PATH}/${INST}/usr/local/bin/kimi"
+
+    # Bug B fix: v2 linkAttemptSignals missing `task.timeout <= 0` guard.
+    # When task.timeout=0, setTimeout(fn,0) fires immediately, aborting spawn
+    # and producing "not_started / Subagent timed out" for every AgentSwarm item.
+    # v1 and v2 source both have this guard; only bundle 0.33.0's v2 compile missed it.
+    # sed is idempotent: if bundle already fixed, grep won't match and patch is skipped.
+    local _kimi_main="${ENROOT_DATA_PATH}/${INST}/opt/kimi-code/dist/main.mjs"
+    if [[ -f "$_kimi_main" ]] && grep -q 'task\.timeout === void 0 ? void 0 : setTimeout' "$_kimi_main"; then
+      sed -i 's/task\.timeout === void 0 ? void 0 : setTimeout/task.timeout === void 0 || task.timeout <= 0 ? void 0 : setTimeout/g' "$_kimi_main"
+      echo "[bug-b-fix] patched v2 linkAttemptSignals (task.timeout <= 0 guard)"
+    fi
     mkdir -p "${ENROOT_DATA_PATH}/${INST}/workspace/dumps"
     if [[ ! -f "${ENROOT_DATA_PATH}/${INST}/workspace/scripts/eval_config.json" ]]; then
       echo "[error] missing /workspace/scripts/eval_config.json in rootfs $INST"
@@ -627,6 +734,7 @@ fi
 
     echo "=== sync dumps ==="
     rsync -a "${ENROOT_DATA_PATH}/${INST}/workspace/dumps/" "$OUTDIR/" || true
+    generate_audit_html "$OUTDIR"
 
     echo "=== cleanup ==="
     cleanup_worker
@@ -694,6 +802,7 @@ cleanup_parent() {
   done
   cleanup_fifo
   release_port_leases
+  cleanup_run_artifacts
   rmdir "$SUMMARY_LOCK" 2>/dev/null || true
 }
 trap cleanup_parent EXIT
@@ -727,9 +836,19 @@ for TASK in "${TASKS[@]}"; do
     WORKER_PG_RUNTIME=""
     WORKER_INST=""
     WORKER_PGID=""
+    WORKER_TASK=""
+    WORKER_OUTDIR=""
+    WORKER_PGPORT=""
+    WORKER_START_TS=""
+    WORKER_SUMMARY_WRITTEN=0
     worker_exit() {
       rc=$?
       trap - EXIT
+      if [[ -n "${WORKER_TASK:-}" && "${WORKER_SUMMARY_WRITTEN:-0}" != 1 ]]; then
+        now_ts="$(date +%s)"
+        start_ts="${WORKER_START_TS:-$now_ts}"
+        append_summary "${WORKER_TASK},interrupted,${rc:-1},${WORKER_OUTDIR:-},${WORKER_PGPORT:-},$((now_ts - start_ts))"
+      fi
       cleanup_worker
       echo >&3
       exit "$rc"
@@ -748,6 +867,7 @@ for pid in "${PIDS[@]}"; do
 done
 cleanup_fifo
 release_port_leases
+cleanup_run_artifacts
 trap - EXIT HUP INT TERM
 
 log "=============================================="
