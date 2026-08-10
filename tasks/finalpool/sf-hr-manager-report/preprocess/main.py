@@ -17,7 +17,7 @@ def main():
     cur.execute('DELETE FROM notion.blocks')
     cur.execute('DELETE FROM notion.pages')
     cur.execute('DELETE FROM notion.databases')
-    cur.execute('DELETE FROM notion.users')
+    # Do NOT delete notion.users — clearing users can break authentication / default user assignments
     conn.commit()
     cur.close()
     conn.close()

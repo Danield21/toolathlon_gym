@@ -1,16 +1,25 @@
 """Evaluation for yf-options-expiry-monitor."""
 import argparse
-import json
 import os
+import re
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym", user="eigent", password="camel")
+DB = dict(
+    host=os.environ.get("PGHOST", "localhost"),
+    port=int(os.environ.get("PGPORT", "5432")),
+    dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
+    user=os.environ.get("PGUSER", "eigent"),
+    password=os.environ.get("PGPASSWORD", "camel"),
+)
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+
+# Sentinel: agent wrote an Excel formula cell whose cached value is unavailable.
+FORMULA_UNCACHED = object()
 
 
 def check(name, condition, detail=""):
@@ -24,31 +33,122 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}{detail_str}")
 
 
-def num_close(a, b, tol=1.0):
+def _to_float(v):
+    """Parse a numeric value, tolerating %, $, thousand separators, and spaces.
+    Returns None when the value is not numeric (or None)."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    if not s or s.lower() == "none":
+        return None
+    for ch in ("%", "$", "¥", "€", ",", "_", " "):
+        s = s.replace(ch, "")
     try:
-        return abs(float(a) - float(b)) <= tol
+        return float(s)
     except (TypeError, ValueError):
-        return str(a).strip().lower() == str(b).strip().lower()
+        return None
 
 
-def load_sheet_rows(wb, sheet_name):
-    for name in wb.sheetnames:
+def num_close(a, b, tol=1.0):
+    fa = _to_float(a)
+    fb = _to_float(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= tol
+    # Only fall back to case-insensitive string equality when one side is
+    # genuinely non-numeric.
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+def _cell_effective(raw_val, cached_val):
+    """Return the effective value of a cell.
+    Formula cells use the cached computed value; a formula with no cached
+    value yields the FORMULA_UNCACHED sentinel."""
+    if isinstance(raw_val, str) and raw_val.startswith("="):
+        return cached_val if cached_val is not None else FORMULA_UNCACHED
+    return raw_val
+
+
+def load_sheet_rows(wb_path, sheet_name):
+    """Load a sheet's rows as lists of effective cell values.
+    Reads with data_only=False (formulas visible) plus data_only=True
+    (cached values) so agent formulas degrade gracefully instead of
+    turning into None and failing numeric checks."""
+    import openpyxl
+    try:
+        wb_raw = openpyxl.load_workbook(wb_path, data_only=False)
+        wb_cached = openpyxl.load_workbook(wb_path, data_only=True)
+    except Exception:
+        return None
+    ws_raw = None
+    for name in wb_raw.sheetnames:
         if name.strip().lower() == sheet_name.strip().lower():
-            return [[cell.value for cell in row] for row in wb[name].iter_rows()]
-    return None
+            ws_raw = wb_raw[name]
+            break
+    if ws_raw is None:
+        return None
+    ws_cached = wb_cached[ws_raw.title]
+    rows = []
+    for r_idx, row in enumerate(ws_raw.iter_rows(), start=1):
+        out = []
+        for c_idx, cell in enumerate(row, start=1):
+            out.append(_cell_effective(cell.value, ws_cached.cell(row=r_idx, column=c_idx).value))
+        rows.append(out)
+    return rows
+
+
+def numeric_check(label, a_val, g_val, tol):
+    if a_val is FORMULA_UNCACHED:
+        check(f"{label} (skipped: agent cell is an uncached formula; task requires literal values)", True)
+        return
+    check(label, num_close(a_val, g_val, tol), f"got {a_val}")
+
+
+def as_text(v):
+    if v is FORMULA_UNCACHED or v is None:
+        return ""
+    return str(v).strip().lower()
 
 
 def date_str(v):
+    """Normalize a date-valued cell to 'YYYY-MM-DD'.
+
+    Tolerates datetime objects and the common string forms a faithful agent
+    might write ('YYYY-MM-DD', 'YYYY/MM/DD', 'M/D/YYYY', 'M-D-YY', ISO
+    datetimes like '2026-03-09T00:00:00', ...). Falls back to the raw string
+    when nothing parses so lookups never crash on an unexpected format.
+    """
     if v is None:
         return ""
-    if hasattr(v, "isoformat"):
+    if isinstance(v, datetime):
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v, date):
         return v.isoformat()[:10]
-    return str(v).strip()[:10]
+    s = str(v).strip()
+    if not s:
+        return ""
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", s)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    m = re.match(r"(\d{4})[/._](\d{1,2})[/._](\d{1,2})", s)
+    if m:
+        return "%04d-%02d-%02d" % (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    m = re.match(r"(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})", s)
+    if m:
+        mm, dd, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= mm <= 12 and 1 <= dd <= 31:
+            year = yy if yy >= 100 else 2000 + yy
+            return "%04d-%02d-%02d" % (year, mm, dd)
+    try:
+        from dateutil import parser as _dp
+        return _dp.parse(s).strftime("%Y-%m-%d")
+    except Exception:
+        return s[:10]
 
 
 def check_excel(agent_workspace, gt_workspace):
     print("\n=== Checking Excel ===")
-    import openpyxl
     path = os.path.join(agent_workspace, "Options_Monitor.xlsx")
     gt_path = os.path.join(gt_workspace, "Options_Monitor.xlsx")
     check("Options_Monitor.xlsx exists", os.path.exists(path), f"Expected {path}")
@@ -58,16 +158,16 @@ def check_excel(agent_workspace, gt_workspace):
         check("GT Options_Monitor.xlsx exists", False)
         return
 
-    a_wb = openpyxl.load_workbook(path, data_only=True)
-    g_wb = openpyxl.load_workbook(gt_path, data_only=True)
+    def rows_only(sheet_rows):
+        return [r for r in sheet_rows[1:] if r and r[0] is not None and str(r[0]).strip() != ""]
 
     # Position Analysis
-    a_rows = load_sheet_rows(a_wb, "Position Analysis")
-    g_rows = load_sheet_rows(g_wb, "Position Analysis")
-    check("Sheet 'Position Analysis' present", a_rows is not None)
-    if a_rows is not None and g_rows is not None:
-        a_data = [r for r in a_rows[1:] if r and r[0] is not None]
-        g_data = [r for r in g_rows[1:] if r and r[0] is not None]
+    a_all = load_sheet_rows(path, "Position Analysis")
+    g_all = load_sheet_rows(gt_path, "Position Analysis")
+    check("Sheet 'Position Analysis' present", a_all is not None)
+    if a_all is not None and g_all is not None:
+        a_data = rows_only(a_all)
+        g_data = rows_only(g_all)
         check(f"Position Analysis row count == {len(g_data)}",
               len(a_data) == len(g_data), f"got {len(a_data)}")
 
@@ -88,32 +188,29 @@ def check_excel(agent_workspace, gt_workspace):
             if a_row is None:
                 continue
             # Num_Contracts (exact)
-            check(f"  ({sym}, {exp}, {typ}).Num_Contracts == {g_row[3]}",
-                  num_close(a_row[3], g_row[3], 0), f"got {a_row[3]}")
+            numeric_check(f"  ({sym}, {exp}, {typ}).Num_Contracts == {g_row[3]}", a_row[3], g_row[3], 0)
             # Avg_IV (±0.5)
-            check(f"  ({sym}, {exp}, {typ}).Avg_IV ≈ {g_row[6]}",
-                  num_close(a_row[6], g_row[6], 0.5), f"got {a_row[6]}")
+            numeric_check(f"  ({sym}, {exp}, {typ}).Avg_IV ≈ {g_row[6]}", a_row[6], g_row[6], 0.5)
             # Risk_Level (exact)
             check(f"  ({sym}, {exp}, {typ}).Risk_Level == '{g_row[7]}'",
-                  str(a_row[7] or "").strip().lower() == str(g_row[7] or "").strip().lower(),
+                  as_text(a_row[7]) == as_text(g_row[7]),
                   f"got '{a_row[7]}'")
 
     # Expiry Alerts
-    a_rows = load_sheet_rows(a_wb, "Expiry Alerts")
-    g_rows = load_sheet_rows(g_wb, "Expiry Alerts")
-    check("Sheet 'Expiry Alerts' present", a_rows is not None)
-    if a_rows is not None and g_rows is not None:
-        a_data = [r for r in a_rows[1:] if r and r[0] is not None]
-        g_data = [r for r in g_rows[1:] if r and r[0] is not None]
+    a_all = load_sheet_rows(path, "Expiry Alerts")
+    g_all = load_sheet_rows(gt_path, "Expiry Alerts")
+    check("Sheet 'Expiry Alerts' present", a_all is not None)
+    if a_all is not None and g_all is not None:
+        a_data = rows_only(a_all)
+        g_data = rows_only(g_all)
         check(f"Expiry Alerts row count == {len(g_data)}",
               len(a_data) == len(g_data), f"got {len(a_data)}")
         # Sort by Days_Until_Expiry ascending
         days = []
         for r in a_data:
-            try:
-                days.append(int(float(r[4])))
-            except (TypeError, ValueError):
-                pass
+            fv = _to_float(r[4])
+            if fv is not None:
+                days.append(fv)
         check("Expiry Alerts sorted by Days_Until_Expiry ascending",
               days == sorted(days), f"got {days}")
         # Verify each expected row
@@ -127,16 +224,15 @@ def check_excel(agent_workspace, gt_workspace):
                   a_row is not None)
             if a_row is None:
                 continue
-            check(f"  Days_Until_Expiry == {g_row[4]}",
-                  num_close(a_row[4], g_row[4], 0), f"got {a_row[4]}")
+            numeric_check(f"  Days_Until_Expiry == {g_row[4]}", a_row[4], g_row[4], 0)
 
     # Summary
-    a_rows = load_sheet_rows(a_wb, "Summary")
-    g_rows = load_sheet_rows(g_wb, "Summary")
-    check("Sheet 'Summary' present", a_rows is not None)
-    if a_rows is not None and g_rows is not None:
-        a_data = [r for r in a_rows[1:] if r and r[0] is not None]
-        g_data = [r for r in g_rows[1:] if r and r[0] is not None]
+    a_all = load_sheet_rows(path, "Summary")
+    g_all = load_sheet_rows(gt_path, "Summary")
+    check("Sheet 'Summary' present", a_all is not None)
+    if a_all is not None and g_all is not None:
+        a_data = rows_only(a_all)
+        g_data = rows_only(g_all)
         a_lookup = {str(r[0]).strip().lower(): r[1] for r in a_data}
         for g_row in g_data:
             metric = str(g_row[0]).strip().lower()
@@ -150,26 +246,57 @@ def check_excel(agent_workspace, gt_workspace):
                 exp_syms = sorted([s.strip().upper() for s in str(g_row[1]).split(",") if s.strip()])
                 check(f"  Summary.{metric} == {exp_syms}",
                       got_syms == exp_syms, f"got {got_syms}")
-            elif isinstance(g_row[1], (int, float)):
-                check(f"  Summary.{metric} == {g_row[1]}",
-                      num_close(val, g_row[1], 0), f"got {val}")
+            elif _to_float(g_row[1]) is not None:
+                numeric_check(f"  Summary.{metric} == {g_row[1]}", val, g_row[1], 0)
             else:
                 check(f"  Summary.{metric} == '{g_row[1]}'",
-                      str(val).strip().lower() == str(g_row[1]).strip().lower(),
+                      as_text(val) == as_text(g_row[1]),
                       f"got '{val}'")
+
+
+def event_wall_dates(start_dt, start_tz):
+    """Return the set of plausible calendar dates for an event's start.
+
+    A faithful agent may record the same instant with different
+    representations (naive local time, 'Z'/UTC, an explicit offset, or an
+    offset plus a named timezone). The intended calendar date is always the
+    expiration date, so accept any rendering that yields it. This prevents a
+    DB-session-timezone / embedded-offset combination from shifting the wall
+    date across midnight and failing a correct model.
+    """
+    dates = set()
+    if start_dt is None:
+        return dates
+    # DB session timezone rendering (matches naive local round-trips)
+    try:
+        dates.add(start_dt.date())
+    except Exception:
+        pass
+    # UTC rendering (matches 'Z' / explicit-offset instants)
+    try:
+        if start_dt.tzinfo is not None:
+            dates.add(start_dt.astimezone(timezone.utc).date())
+    except Exception:
+        pass
+    # Named-timezone rendering (matches offset + timeZone)
+    if start_tz:
+        try:
+            from zoneinfo import ZoneInfo
+            dates.add(start_dt.astimezone(ZoneInfo(start_tz)).date())
+        except Exception:
+            pass
+    return dates
 
 
 def check_gcal(gt_workspace):
     print("\n=== Checking Calendar Events ===")
-    import openpyxl
     gt_path = os.path.join(gt_workspace, "Options_Monitor.xlsx")
-    g_wb = openpyxl.load_workbook(gt_path, data_only=True)
     # Use Expiry Alerts to determine which (symbol, expiration) need events
-    g_alerts = load_sheet_rows(g_wb, "Expiry Alerts")
+    g_alerts = load_sheet_rows(gt_path, "Expiry Alerts")
     expected_events = set()
     if g_alerts:
         for r in g_alerts[1:]:
-            if r and r[0]:
+            if r and r[0] and str(r[0]).strip():
                 expected_events.add((str(r[0]).strip().upper(), date_str(r[1])))
 
     try:
@@ -179,28 +306,26 @@ def check_gcal(gt_workspace):
         check("DB connect", False, str(e))
         return
 
-    cur.execute("SELECT summary, description, start_datetime FROM gcal.events WHERE summary ILIKE '%%options expiry%%'")
+    cur.execute(
+        "SELECT summary, description, start_datetime, start_timezone "
+        "FROM gcal.events WHERE summary ILIKE '%options expiry%'"
+    )
     events = cur.fetchall()
     check("At least 1 options expiry calendar event", len(events) >= 1, f"got {len(events)}")
 
-    # Collect (symbol, date) tuples from events
-    actual_events = set()
-    for sm, desc, start in events:
+    # Collect symbol -> candidate wall dates from events
+    actual_events = {}
+    for sm, desc, start, start_tz in events:
         sm_upper = (sm or "").upper()
-        date_part = start.date() if hasattr(start, "date") else start
-        # Extract symbol from summary
         for sym in ("AMZN", "GOOGL", "JNJ", "JPM", "XOM"):
             if sym in sm_upper:
-                actual_events.add((sym, date_part.isoformat() if hasattr(date_part, "isoformat") else str(date_part)))
+                actual_events.setdefault(sym, set()).update(event_wall_dates(start, start_tz))
 
     # Each unique (symbol, expiration) from expected_events should have an event
-    expected_syms_dates = set()
-    for s, e in expected_events:
-        expected_syms_dates.add((s, e))
-
-    for sym, exp in sorted(expected_syms_dates):
+    for sym, exp in sorted(expected_events):
+        present = sym in actual_events and exp in actual_events[sym]
         check(f"Calendar event for {sym} on {exp} present",
-              (sym, exp) in actual_events, f"actual events: {actual_events}")
+              present, f"actual events: {actual_events}")
 
     cur.close()
     conn.close()

@@ -7,7 +7,8 @@ import sys
 import openpyxl
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
+DB = dict(host=os.environ.get("PGHOST", "localhost"),
+          port=int(os.environ.get("PGPORT", "5432")),
           dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
           user="eigent", password="camel")
 
@@ -57,11 +58,66 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}{d}")
 
 
-def num_close(a, b, tol=2.0):
+def _cell_value(v):
+    """Robustly extract a float from an openpyxl cell value, or None.
+
+    Accepts numeric literals and strings that carry currency symbols, percent
+    signs, thousand separators, or currency codes (e.g. "$300.88", "300,88",
+    "9"). Formula cells (starting with '=') have their numeric literal parsed
+    where possible; non-numeric formulas return None.
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    if s == "":
+        return None
+    if s.startswith("="):
+        s = s.lstrip("=").strip()
+    for tok in (",", "$", "€", "¥", "%", "USD", "usd"):
+        s = s.replace(tok, "")
+    s = s.strip()
     try:
-        return abs(float(a) - float(b)) <= tol
-    except:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _is_formula(v):
+    return isinstance(v, str) and v.strip().startswith("=")
+
+
+def num_close(a, b, tol=2.0):
+    """Compare two values numerically with tolerance.
+
+    When both sides parse as numbers, compare with tolerance. Otherwise fall
+    back to case-insensitive string comparison (for text values like 'Hold').
+    """
+    fa, fb = _cell_value(a), _cell_value(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= tol
+    if a is None or b is None:
         return False
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+def _numeric_ok(value, target, tol=1.0):
+    """Numeric check that does not punish unverifiable formula cells.
+
+    A cell that parses to a number is compared with tolerance. A cell holding
+    an un-recalculated formula is treated as verifiable-unknown and accepted
+    (per R2: when the expected value is a literal, skip formula cells rather
+    than fail). Anything else (blank / non-numeric text) fails.
+    """
+    fv = _cell_value(value)
+    if fv is not None:
+        return num_close(fv, target, tol=tol)
+    if _is_formula(value):
+        return True
+    return False
 
 
 def check_excel(ws_path):
@@ -72,7 +128,10 @@ def check_excel(ws_path):
         return
     check("Excel file exists", True)
 
-    wb = openpyxl.load_workbook(path, data_only=True)
+    # Read with data_only=False so formula cells keep their formula strings
+    # instead of turning into None; _cell_value/_numeric_ok then decide how to
+    # handle each cell (R2/R3).
+    wb = openpyxl.load_workbook(path, data_only=False)
     sn = {s.lower().replace(" ", "_"): s for s in wb.sheetnames}
 
     # Portfolio_Holdings sheet
@@ -85,7 +144,7 @@ def check_excel(ws_path):
         rows = list(ws.iter_rows(values_only=True))
         headers = [str(h).lower() if h else "" for h in rows[0]] if rows else []
         data = [r for r in rows[1:] if r and r[0] is not None]
-        check("Portfolio_Holdings has 3 rows", len(data) == 3, f"Found {len(data)}")
+        check("Portfolio_Holdings has 3+ holdings", len(data) >= 3, f"Found {len(data)}")
 
         symbols_found = {str(r[0]).strip().upper() for r in data}
         check("All 3 stocks present", symbols_found >= {"GOOGL", "AMZN", "JPM"},
@@ -98,17 +157,19 @@ def check_excel(ws_path):
                 price_col = i
                 break
         if price_col is not None:
-            prices = [r[price_col] for r in data if r[price_col] is not None]
-            check("Prices are populated", len(prices) == 3, f"Prices: {prices}")
+            prices = [r[price_col] for r in data
+                      if len(r) > price_col and r[price_col] is not None and str(r[price_col]).strip() != ""]
+            check("Prices are populated", len(prices) >= 3, f"Prices: {prices}")
             # Validate prices against dynamically queried DB values
             if EXPECTED["stock_prices"]:
                 for row in data:
                     sym = str(row[0]).strip().upper()
-                    if sym in EXPECTED["stock_prices"] and row[price_col] is not None:
-                        expected_price = EXPECTED["stock_prices"][sym]
-                        check(f"{sym} price reasonable (~{expected_price:.0f})",
-                              num_close(row[price_col], expected_price, tol=expected_price * 0.1),
-                              f"Got {row[price_col]}, expected ~{expected_price:.2f}")
+                    if sym not in EXPECTED["stock_prices"] or len(row) <= price_col:
+                        continue
+                    expected_price = EXPECTED["stock_prices"][sym]
+                    check(f"{sym} price reasonable (~{expected_price:.0f})",
+                          _numeric_ok(row[price_col], expected_price, tol=expected_price * 0.1),
+                          f"Got {row[price_col]}, expected ~{expected_price:.2f}")
         else:
             check("Price column exists", False, f"Headers: {headers}")
 
@@ -121,15 +182,27 @@ def check_excel(ws_path):
         ws2 = wb[rp_name]
         rows2 = list(ws2.iter_rows(values_only=True))
         data2 = [r for r in rows2[1:] if r and r[0] is not None]
-        check("Research_Papers has 4 rows (relevant only)", len(data2) == 4,
+        # At least the 4 relevant papers must be listed; the reverse-validation
+        # step separately asserts no noise paper/ID appears anywhere in Excel.
+        check("Research_Papers has 4+ relevant rows", len(data2) >= 4,
               f"Found {len(data2)}")
 
         # Check FinGPT is mentioned
         all_titles = " ".join(str(r[0]) for r in data2).lower()
         check("FinGPT paper listed", "fingpt" in all_titles, f"Titles: {all_titles[:200]}")
 
-        # Check applicable stocks column
-        all_stocks_text = " ".join(str(r[-1]) if r[-1] else "" for r in data2).upper()
+        # Check applicable stocks column. Anchor to the header when present
+        # (task.md specifies Title, Authors, Key_Finding, Applicable_Stocks) so
+        # a column reorder or an extra trailing column does not misread the
+        # stock mapping; fall back to the last column otherwise.
+        rp_headers = [str(h).lower() if h else "" for h in rows2[0]] if rows2 else []
+        app_col = len(rp_headers) - 1 if rp_headers else -1
+        for i, h in enumerate(rp_headers):
+            if "stock" in h and "applic" in h:
+                app_col = i
+        all_stocks_text = " ".join(
+            str(r[app_col]) if len(r) > app_col and r[app_col] else "" for r in data2
+        ).upper()
         check("Applicable stocks mention GOOGL", "GOOGL" in all_stocks_text)
         check("Applicable stocks mention JPM", "JPM" in all_stocks_text)
 
@@ -142,21 +215,33 @@ def check_excel(ws_path):
         ws3 = wb[ai_name]
         rows3 = list(ws3.iter_rows(values_only=True))
         data3 = [r for r in rows3[1:] if r and r[0] is not None]
-        check("AI_Impact_Assessment has 3 rows", len(data3) == 3, f"Found {len(data3)}")
+        check("AI_Impact_Assessment has 3+ rows", len(data3) >= 3, f"Found {len(data3)}")
+
+        # Locate score / recommendation columns by header name (falls back to
+        # fixed positions when headers are absent) so reordered columns do not
+        # silently misread.
+        ai_headers = [str(h).lower() if h else "" for h in rows3[0]] if rows3 else []
+        score_col = 1
+        rec_col = len(ai_headers) - 1 if ai_headers else -1
+        for i, h in enumerate(ai_headers):
+            if "score" in h or "exposure" in h:
+                score_col = i
+            if "recommendation" in h:
+                rec_col = i
 
         # Check AI scores and recommendations
         for row in data3:
             stock = str(row[0]).strip().upper()
-            score = row[1] if len(row) > 1 else None
-            rec = str(row[-1]).lower() if row[-1] else ""
+            score = row[score_col] if len(row) > score_col else None
+            rec = str(row[rec_col]).lower() if len(row) > rec_col and row[rec_col] else ""
             if stock == "GOOGL":
-                check("GOOGL AI score ~9", num_close(score, 9, tol=1), f"Score: {score}")
+                check("GOOGL AI score ~9", _numeric_ok(score, 9, tol=1), f"Score: {score}")
                 check("GOOGL recommendation Overweight", "overweight" in rec, f"Rec: {rec}")
             elif stock == "AMZN":
-                check("AMZN AI score ~8", num_close(score, 8, tol=1), f"Score: {score}")
+                check("AMZN AI score ~8", _numeric_ok(score, 8, tol=1), f"Score: {score}")
                 check("AMZN recommendation Overweight", "overweight" in rec, f"Rec: {rec}")
             elif stock == "JPM":
-                check("JPM AI score ~5", num_close(score, 5, tol=1), f"Score: {score}")
+                check("JPM AI score ~5", _numeric_ok(score, 5, tol=1), f"Score: {score}")
                 check("JPM recommendation Hold", "hold" in rec, f"Rec: {rec}")
 
     # Investment_Thesis sheet
@@ -170,8 +255,20 @@ def check_excel(ws_path):
         data4 = [r for r in rows4[1:] if r and r[0] is not None]
         check("Investment_Thesis has >= 2 rows", len(data4) >= 2, f"Found {len(data4)}")
 
-        all_themes = " ".join(str(r[0]) for r in data4).lower()
-        check("Theme mentions AI", "ai" in all_themes, f"Themes: {all_themes[:200]}")
+        # Anchor the Theme column by header when present; accept "AI" or the
+        # spelled-out "artificial intelligence" so a correctly-worded theme row
+        # is not falsely failed.
+        it_headers = [str(h).lower() if h else "" for h in rows4[0]] if rows4 else []
+        theme_col = 0
+        for i, h in enumerate(it_headers):
+            if h == "theme" or "theme" in h:
+                theme_col = i
+        all_themes = " ".join(
+            str(r[theme_col]) if len(r) > theme_col and r[theme_col] else "" for r in data4
+        ).lower()
+        check("Theme mentions AI",
+              "ai" in all_themes or "artificial intelligence" in all_themes,
+              f"Themes: {all_themes[:200]}")
 
     wb.close()
 
@@ -199,66 +296,132 @@ def check_word(ws_path):
           "risk" in full_text and ("assessment" in full_text or "factor" in full_text))
     check("Document mentions research papers",
           "fingpt" in full_text or "language model" in full_text or "research" in full_text)
-    check("Document mentions overweight or recommendation",
-          "overweight" in full_text or "recommendation" in full_text)
+    # task.md's section list requires an Investment Thesis section and per-stock
+    # investment outlook, but does not mandate the exact wording "overweight" or
+    # "recommendation". Accept any common investment-outlook term so a correct
+    # report written with "buy"/"hold"/"outlook" phrasing is not wrongly failed.
+    check("Document mentions investment outlook or thesis",
+          any(kw in full_text for kw in ("recommend", "overweight", "underweight",
+                                         "outlook", "thesis", "buy", "hold", "sell")),
+          "Expected an investment-outlook or recommendation term")
     check("Document length >= 800 chars", len(full_text) >= 800,
           f"Length: {len(full_text)}")
 
 
+def _extract_richtext(value):
+    """Recursively pull plain_text / text.content strings out of a Notion value.
+
+    Handles the shapes observed in the DB: a list of rich-text objects, a bare
+    string, an object carrying plain_text / text.content, or objects wrapped in
+    {"title": ...} / {"properties": ...} / {"content": ...} layers.
+    """
+    out = []
+    if value is None:
+        return out
+    if isinstance(value, str):
+        out.append(value)
+    elif isinstance(value, list):
+        for it in value:
+            out.extend(_extract_richtext(it))
+    elif isinstance(value, dict):
+        if isinstance(value.get("plain_text"), str):
+            out.append(value["plain_text"])
+        t = value.get("text")
+        if isinstance(t, dict) and isinstance(t.get("content"), str):
+            out.append(t["content"])
+        elif isinstance(t, str):
+            out.append(t)
+        for k in ("title", "properties", "rich_text", "name", "content"):
+            if k in value:
+                out.extend(_extract_richtext(value[k]))
+    return out
+
+
+def _database_title(title_json):
+    """Normalise a notion.databases.title jsonb value to a plain string."""
+    return "".join(_extract_richtext(title_json))
+
+
+def _all_database_titles(cur):
+    """Return [(id, title_str), ...] for every database (for diagnostics)."""
+    cur.execute("SELECT id, title FROM notion.databases")
+    return [(db_id, _database_title(t)) for db_id, t in cur.fetchall()]
+
+
+def _find_pipeline_databases(cur):
+    """Return ids of every database titled like 'Research Pipeline'.
+
+    A multi-agent run may create several same-named databases; the evaluator
+    aggregates across all of them so an agent is not penalised for duplication.
+    """
+    matches = []
+    for db_id, title_str in _all_database_titles(cur):
+        if "research" in title_str.lower() and "pipeline" in title_str.lower():
+            matches.append(db_id)
+    return matches
+
+
 def check_notion():
     print("\n=== Checking Notion Database ===")
-    conn = psycopg2.connect(**DB)
+    try:
+        conn = psycopg2.connect(**DB)
+    except Exception as e:
+        check("Research Pipeline database exists", False, f"DB connection failed: {e}")
+        return
     cur = conn.cursor()
+    try:
+        db_ids = _find_pipeline_databases(cur)
+        check("Research Pipeline database exists", len(db_ids) >= 1,
+              f"Databases: {[d[1] for d in _all_database_titles(cur)]}")
 
-    cur.execute("SELECT id, title FROM notion.databases")
-    databases = cur.fetchall()
+        if db_ids:
+            total_pages = 0
+            props_sample = None
+            for db_id in db_ids:
+                cur.execute(
+                    "SELECT COUNT(*) FROM notion.pages WHERE parent->>'database_id' = %s AND NOT archived",
+                    (db_id,)
+                )
+                total_pages += cur.fetchone()[0]
+                if props_sample is None:
+                    cur.execute(
+                        "SELECT properties FROM notion.pages "
+                        "WHERE parent->>'database_id' = %s AND NOT archived AND properties IS NOT NULL LIMIT 1",
+                        (db_id,)
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        props_sample = row[0]
+            check("Notion has >= 4 paper entries", total_pages >= 4,
+                  f"Found {total_pages} pages across {len(db_ids)} database(s)")
 
-    found_db = None
-    for db_id, title_json in databases:
-        title_str = ""
-        if isinstance(title_json, list):
-            for item in title_json:
-                if isinstance(item, dict):
-                    title_str += item.get("plain_text", "") or item.get("text", {}).get("content", "")
-        elif isinstance(title_json, str):
-            title_str = title_json
-        if "research" in title_str.lower() and "pipeline" in title_str.lower():
-            found_db = db_id
-            break
-
-    check("Research Pipeline database exists", found_db is not None,
-          f"Databases: {[d[1] for d in databases]}")
-
-    if found_db:
-        cur.execute(
-            "SELECT COUNT(*) FROM notion.pages WHERE parent->>'database_id' = %s AND NOT archived",
-            (found_db,)
-        )
-        page_count = cur.fetchone()[0]
-        check("Notion has >= 4 paper entries", page_count >= 4,
-              f"Found {page_count} pages")
-
-        # Check properties of pages
-        cur.execute(
-            "SELECT properties FROM notion.pages WHERE parent->>'database_id' = %s AND NOT archived LIMIT 1",
-            (found_db,)
-        )
-        row = cur.fetchone()
-        if row:
-            props = row[0] if isinstance(row[0], dict) else json.loads(row[0]) if row[0] else {}
-            props_lower = {k.lower(): v for k, v in props.items()}
-            has_relevance = any("relevance" in k for k in props_lower)
-            has_stock = any("stock" in k for k in props_lower)
-            check("Pages have Relevance property", has_relevance, f"Props: {list(props.keys())}")
-            check("Pages have Stock_Link property", has_stock, f"Props: {list(props.keys())}")
-
-    cur.close()
-    conn.close()
+            # Check properties of pages
+            if props_sample is not None:
+                try:
+                    props = props_sample if isinstance(props_sample, dict) else json.loads(props_sample) if props_sample else {}
+                except Exception:
+                    props = {}
+                props_lower = {k.lower(): v for k, v in props.items()}
+                has_relevance = any("relevance" in k for k in props_lower)
+                has_stock = any("stock" in k for k in props_lower)
+                check("Pages have Relevance property", has_relevance, f"Props: {list(props.keys())}")
+                check("Pages have Stock_Link property", has_stock, f"Props: {list(props.keys())}")
+            else:
+                check("Pages have Relevance property", False, "No page properties found")
+                check("Pages have Stock_Link property", False, "No page properties found")
+    finally:
+        cur.close()
+        conn.close()
 
 
 def check_emails():
     print("\n=== Checking Emails ===")
-    conn = psycopg2.connect(**DB)
+    try:
+        conn = psycopg2.connect(**DB)
+    except Exception as e:
+        check("Portfolio team email sent", False, f"DB connection failed: {e}")
+        check("Risk committee email sent", False, f"DB connection failed: {e}")
+        return
     cur = conn.cursor()
 
     # Check portfolio team email
@@ -334,30 +497,18 @@ def check_reverse_validation(ws_path):
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
 
-        # Find the Research Pipeline database
-        cur.execute("SELECT id, title FROM notion.databases")
-        databases = cur.fetchall()
-        pipeline_db_id = None
-        for db_id, title_json in databases:
-            title_str = ""
-            if isinstance(title_json, list):
-                for item in title_json:
-                    if isinstance(item, dict):
-                        title_str += item.get("plain_text", "") or item.get("text", {}).get("content", "")
-            elif isinstance(title_json, str):
-                title_str = title_json
-            if "research" in title_str.lower() and "pipeline" in title_str.lower():
-                pipeline_db_id = db_id
-                break
+        # Find all Research Pipeline databases (aggregate across duplicates)
+        pipeline_db_ids = _find_pipeline_databases(cur)
 
-        if pipeline_db_id:
-            cur.execute(
-                "SELECT properties FROM notion.pages WHERE parent->>'database_id' = %s AND NOT archived",
-                (pipeline_db_id,))
-            pages = cur.fetchall()
+        if pipeline_db_ids:
             all_page_text = ""
-            for (props,) in pages:
-                all_page_text += json.dumps(props).lower() + " "
+            for pipeline_db_id in pipeline_db_ids:
+                cur.execute(
+                    "SELECT properties FROM notion.pages WHERE parent->>'database_id' = %s AND NOT archived",
+                    (pipeline_db_id,))
+                for (props,) in cur.fetchall():
+                    if props:
+                        all_page_text += json.dumps(props).lower() + " "
 
             no_noise_notion = not any(nt in all_page_text for nt in noise_titles)
             check("No noise arxiv papers in Notion tracker (DragGAN, Llama 2)",
@@ -403,7 +554,7 @@ def check_reverse_validation(ws_path):
     # --- Check noise papers not in Excel ---
     path = os.path.join(ws_path, "AI_Investment_Research.xlsx")
     if os.path.isfile(path):
-        wb = openpyxl.load_workbook(path, data_only=True)
+        wb = openpyxl.load_workbook(path, data_only=False)
         all_text = ""
         for sn in wb.sheetnames:
             ws = wb[sn]

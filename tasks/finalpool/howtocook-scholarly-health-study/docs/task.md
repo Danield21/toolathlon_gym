@@ -5,3 +5,8 @@ Please browse the recipe database and select 5 dishes from at least 3 different 
 Create an Excel spreadsheet called Health_Diet_Analysis.xlsx with the following three sheets. The first sheet should be named "Recipe Nutrition" with columns Dish_Name, Category, Estimated_Calories, Protein_g, Fat_g, Carbs_g, and Health_Rating. The Health_Rating should be Low, Medium, or High based on the calorie density of the dish. The second sheet should be named "Research Summary" with columns Paper_Title, Authors, Year, Citation_Count, and Key_Finding. The third sheet should be named "Combined Analysis" with columns Dish_Name, Health_Rating, and Supporting_Research, linking the dishes to relevant research findings.
 
 Also create a Word document called Chinese_Cuisine_Health_Report.docx. The document should have the title "Nutritional Analysis of Traditional Chinese Cuisine" and include the following sections: Introduction, Recipe Analysis, Literature Review, and Conclusions.
+
+Notes on expected output format:
+- All numeric values in the spreadsheet (Estimated_Calories, Protein_g, Fat_g, Carbs_g, Citation_Count, Year) must be written as literal numbers, not as Excel formulas.
+- "About 4 papers" is flexible: a Research Summary with 3 to 5 papers is acceptable. Only include papers that are genuinely related to Chinese diet and health or Asian cuisine nutrition.
+- Assign Health_Rating as Low, Medium, or High based on the calorie density of each dish (e.g., Low for low-calorie dishes, Medium for moderate, High for calorie-dense dishes).

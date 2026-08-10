@@ -29,6 +29,28 @@ def load_sheet_rows(wb, sheet_name):
     return None
 
 
+def _norm_header(h):
+    return " ".join(str(h or "").strip().lower().replace("-", " ").replace("_", " ").split())
+
+
+def _header_map(rows):
+    """Map normalized header text -> 0-based column index from row 1 of a sheet.
+    Lets checks locate columns by name regardless of column order."""
+    if not rows or not rows[0]:
+        return {}
+    return {_norm_header(h): i for i, h in enumerate(rows[0]) if _norm_header(h)}
+
+
+def _cell(row, idx):
+    """Safe cell access (None when idx out of range)."""
+    if row is None or idx is None:
+        return None
+    try:
+        return row[idx] if idx < len(row) else None
+    except (TypeError, IndexError):
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -68,7 +90,11 @@ def main():
         errors = []
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
-        
+
+        # Columns located by header name (order-independent).
+        a_col = _header_map(a_rows)
+        g_col = _header_map(g_rows)
+
         a_lookup = {}
         for row in a_data:
             if row and row[0] is not None:
@@ -81,29 +107,40 @@ def main():
             if a_row is None:
                 errors.append(f"Missing row: {g_row[0]}")
                 continue
-            
-            if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 0.1):
-                    errors.append(f"{key}.Avg_Satisfaction: {a_row[1]} vs {g_row[1]} (tol=0.1)")
 
-            if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 0.1):
-                    errors.append(f"{key}.Avg_Work_Life_Balance: {a_row[2]} vs {g_row[2]} (tol=0.1)")
+            # Avg_Satisfaction (tol 0.1)
+            av = _cell(a_row, a_col.get("avg satisfaction"))
+            gv = _cell(g_row, g_col.get("avg satisfaction"))
+            if av is not None and gv is not None and not num_close(av, gv, 0.1):
+                errors.append(f"{key}.Avg_Satisfaction: {av} vs {gv} (tol=0.1)")
 
-            if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 0.1):
-                    errors.append(f"{key}.Avg_Rating: {a_row[3]} vs {g_row[3]} (tol=0.1)")
+            # Avg_Work_Life_Balance (tol 0.1)
+            av = _cell(a_row, a_col.get("avg work life balance"))
+            gv = _cell(g_row, g_col.get("avg work life balance"))
+            if av is not None and gv is not None and not num_close(av, gv, 0.1):
+                errors.append(f"{key}.Avg_Work_Life_Balance: {av} vs {gv} (tol=0.1)")
 
-            if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 1):
-                    errors.append(f"{key}.Employees: {a_row[4]} vs {g_row[4]} (tol=1)")
+            # Avg_Rating (tol 0.1)
+            av = _cell(a_row, a_col.get("avg rating"))
+            gv = _cell(g_row, g_col.get("avg rating"))
+            if av is not None and gv is not None and not num_close(av, gv, 0.1):
+                errors.append(f"{key}.Avg_Rating: {av} vs {gv} (tol=0.1)")
 
-        # Validate sort order: descending by Avg_Satisfaction
+            # Employees (tol 1)
+            av = _cell(a_row, a_col.get("employees"))
+            gv = _cell(g_row, g_col.get("employees"))
+            if av is not None and gv is not None and not num_close(av, gv, 1):
+                errors.append(f"{key}.Employees: {av} vs {gv} (tol=1)")
+
+        # Validate sort order: descending by Avg_Satisfaction (resolve column by
+        # header name; still compares the rounded cell values, semantics unchanged).
+        sat_idx = a_col.get("avg satisfaction")
         a_satisfaction = []
         for r in a_data:
-            if r and r[0] is not None and len(r) > 1:
+            v = _cell(r, sat_idx) if sat_idx is not None else None
+            if r and r[0] is not None and v is not None:
                 try:
-                    a_satisfaction.append(float(r[1]))
+                    a_satisfaction.append(float(v))
                 except (TypeError, ValueError):
                     pass
         if a_satisfaction:
@@ -137,6 +174,10 @@ def main():
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
 
+        # Columns located by header name (order-independent).
+        a_col = _header_map(a_rows)
+        g_col = _header_map(g_rows)
+
         a_lookup = {}
         for row in a_data:
             if row and row[0] is not None:
@@ -150,19 +191,21 @@ def main():
                 errors.append(f"Missing row: {g_row[0]}")
                 continue
 
-            if len(a_row) > 1 and len(g_row) > 1:
+            av = _cell(a_row, a_col.get("value"))
+            gv = _cell(g_row, g_col.get("value"))
+            if av is not None and gv is not None:
                 # Tightened: 0.1 for numeric averages; string fields use exact-set match
                 if key == "happiest_dept":
-                    av = str(a_row[1] or "").strip().lower()
-                    if av not in HAPPIEST_ACCEPTED:
-                        errors.append(f"{key}.Value: {a_row[1]} not in accepted set {HAPPIEST_ACCEPTED}")
+                    avs = str(av or "").strip().lower()
+                    if avs not in HAPPIEST_ACCEPTED:
+                        errors.append(f"{key}.Value: {av} not in accepted set {HAPPIEST_ACCEPTED}")
                 elif key == "least_happy_dept":
-                    av = str(a_row[1] or "").strip().lower()
-                    if av not in LEAST_HAPPY_ACCEPTED:
-                        errors.append(f"{key}.Value: {a_row[1]} not in accepted set {LEAST_HAPPY_ACCEPTED}")
+                    avs = str(av or "").strip().lower()
+                    if avs not in LEAST_HAPPY_ACCEPTED:
+                        errors.append(f"{key}.Value: {av} not in accepted set {LEAST_HAPPY_ACCEPTED}")
                 else:
-                    if not num_close(a_row[1], g_row[1], 0.1):
-                        errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol=0.1)")
+                    if not num_close(av, gv, 0.1):
+                        errors.append(f"{key}.Value: {av} vs {gv} (tol=0.1)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")

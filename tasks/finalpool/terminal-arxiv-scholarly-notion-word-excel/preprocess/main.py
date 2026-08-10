@@ -7,8 +7,11 @@ import json
 import os
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
-          user="eigent", password="camel")
+DB = dict(host=os.environ.get("PGHOST", "localhost"),
+          port=int(os.environ.get("PGPORT", "5432")),
+          dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
+          user=os.environ.get("PGUSER", "eigent"),
+          password=os.environ.get("PGPASSWORD", "camel"))
 
 # 6 transformer/NLP papers (appear in both scholarly and arxiv)
 TRANSFORMER_PAPERS = [
@@ -38,7 +41,7 @@ TRANSFORMER_PAPERS = [
         "authors": [{"name": "Tom B. Brown"}, {"name": "Benjamin Mann"}, {"name": "Nick Ryder"}],
         "published": "2020-05-28T00:00:00",
         "journal_ref": "NeurIPS 2020",
-        "summary": "We demonstrate that scaling up language models greatly improves task-agnostic, few-shot performance, sometimes even reaching competitiveness with prior state-of-the-art fine-tuning approaches.",
+        "summary": "GPT-3 is a large Transformer-based neural language model trained on massive amounts of internet text. We demonstrate that scaling up language models greatly improves task-agnostic, few-shot performance, sometimes even reaching competitiveness with prior state-of-the-art fine-tuning approaches.",
         "categories": ["cs.CL", "cs.LG"],
         "category": "Training Methods"
     },
@@ -48,7 +51,7 @@ TRANSFORMER_PAPERS = [
         "authors": [{"name": "Dzmitry Bahdanau"}, {"name": "Kyunghyun Cho"}, {"name": "Yoshua Bengio"}],
         "published": "2014-09-01T00:00:00",
         "journal_ref": "ICLR 2015",
-        "summary": "Neural machine translation is a recently proposed approach to machine translation. We conjecture that the use of a fixed-length vector is a bottleneck and propose to allow a model to automatically search for parts of a source sentence that are relevant to predicting a target word.",
+        "summary": "Neural machine translation is a recently proposed approach to machine translation. We conjecture that the use of a fixed-length vector is a bottleneck and propose an attention mechanism that allows the neural network to automatically search for parts of a source sentence that are relevant to predicting a target word.",
         "categories": ["cs.CL", "cs.LG"],
         "category": "Applications"
     },
@@ -97,7 +100,7 @@ NOISE_PAPERS = [
         "title": "Playing Atari with Deep Reinforcement Learning",
         "authors": [{"name": "Volodymyr Mnih"}, {"name": "Koray Kavukcuoglu"}],
         "published": "2013-12-19T00:00:00",
-        "summary": "We present the first deep learning model to successfully learn control policies directly from high-dimensional sensory input using reinforcement learning.",
+        "summary": "We present the first deep neural network model to successfully learn control policies directly from high-dimensional sensory input using reinforcement learning.",
         "categories": ["cs.LG", "cs.AI"]
     },
 ]
@@ -118,11 +121,13 @@ def main():
         cur.execute("DELETE FROM notion.pages")
         cur.execute("DELETE FROM notion.databases")
         cur.execute("DELETE FROM scholarly.arxiv_papers")
+        cur.execute("DELETE FROM scholarly.scholar_papers")
         cur.execute("DELETE FROM arxiv.papers")
         conn.commit()
         print("[preprocess] Cleared notion, scholarly, arxiv schemas.")
 
-        # Inject scholarly papers (6 transformer papers)
+        # Inject scholarly papers (6 transformer papers) into the arXiv-style
+        # scholarly catalog (queried by the scholarly MCP search-arxiv tool).
         for p in TRANSFORMER_PAPERS:
             cur.execute("""
                 INSERT INTO scholarly.arxiv_papers (id, title, authors, published, journal_ref, abstract)
@@ -135,6 +140,33 @@ def main():
                   p["published"], p["journal_ref"], p["summary"]))
         conn.commit()
         print(f"[preprocess] Injected {len(TRANSFORMER_PAPERS)} papers into scholarly.arxiv_papers")
+
+        # Also inject the same papers into the Google Scholar catalog so the
+        # scholarly MCP search-google-scholar tool returns them as well.
+        for i, p in enumerate(TRANSFORMER_PAPERS, start=1):
+            pub_year = int(p["published"][:4])
+            abs_url = f"https://arxiv.org/abs/{p['id']}"
+            cur.execute("""
+                INSERT INTO scholarly.scholar_papers
+                    (id, title, authors, abstract, pub_year, venue, citation_count,
+                     url, eprint_url, pub_url, bib)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    title = EXCLUDED.title, authors = EXCLUDED.authors,
+                    abstract = EXCLUDED.abstract, pub_year = EXCLUDED.pub_year,
+                    venue = EXCLUDED.venue, citation_count = EXCLUDED.citation_count,
+                    url = EXCLUDED.url, eprint_url = EXCLUDED.eprint_url,
+                    pub_url = EXCLUDED.pub_url, bib = EXCLUDED.bib
+            """, (i, p["title"], json.dumps(p["authors"]), p["summary"],
+                  pub_year, p["journal_ref"], 0,
+                  abs_url, f"https://arxiv.org/pdf/{p['id']}", abs_url,
+                  json.dumps({})))
+        cur.execute("""
+            SELECT setval('scholarly.scholar_papers_id_seq',
+                          (SELECT COALESCE(MAX(id), 1) FROM scholarly.scholar_papers), true)
+        """)
+        conn.commit()
+        print(f"[preprocess] Injected {len(TRANSFORMER_PAPERS)} papers into scholarly.scholar_papers")
 
         # Inject arxiv papers (6 transformer + 3 noise)
         all_arxiv = TRANSFORMER_PAPERS + NOISE_PAPERS
@@ -154,9 +186,11 @@ def main():
         # Verify
         cur.execute("SELECT COUNT(*) FROM scholarly.arxiv_papers")
         s_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM scholarly.scholar_papers")
+        gs_count = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM arxiv.papers")
         a_count = cur.fetchone()[0]
-        print(f"[preprocess] scholarly: {s_count} papers, arxiv: {a_count} papers")
+        print(f"[preprocess] scholarly.arxiv_papers: {s_count}, scholarly.scholar_papers: {gs_count}, arxiv.papers: {a_count}")
 
     except Exception as e:
         conn.rollback()

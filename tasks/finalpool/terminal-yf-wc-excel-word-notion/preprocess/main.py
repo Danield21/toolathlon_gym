@@ -8,11 +8,25 @@ import glob as globmod
 
 import psycopg2
 
-DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
-    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
-    "user": "eigent", "password": "camel",
-}
+def _db_config():
+    """Build the PostgreSQL connection config.
+
+    The MCP servers the agent calls (local_servers/*/pg_adapter.py) read the
+    PG_HOST / PG_PORT / PG_DATABASE / PG_USER / PG_PASSWORD env-var family,
+    while this preprocess (and evaluation) historically read the PGHOST family.
+    Prefer the PGHOST family when it is present, otherwise fall back to the
+    PG_* family so judge and agent keep reading the same database when only one
+    family is exported, then to the local seeded defaults.
+    """
+    host = os.environ["PGHOST"] if "PGHOST" in os.environ else os.environ.get("PG_HOST", "localhost")
+    port = int(os.environ["PGPORT"] if "PGPORT" in os.environ else os.environ.get("PG_PORT", "5432"))
+    dbname = os.environ["PGDATABASE"] if "PGDATABASE" in os.environ else os.environ.get("PG_DATABASE", "toolathlon_gym")
+    user = os.environ["PGUSER"] if "PGUSER" in os.environ else os.environ.get("PG_USER", "eigent")
+    password = os.environ["PGPASSWORD"] if "PGPASSWORD" in os.environ else os.environ.get("PG_PASSWORD", "camel")
+    return {"host": host, "port": port, "dbname": dbname, "user": user, "password": password}
+
+
+DB_CONFIG = _db_config()
 
 
 def main():

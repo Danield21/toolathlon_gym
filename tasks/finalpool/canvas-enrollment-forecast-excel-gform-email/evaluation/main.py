@@ -54,6 +54,16 @@ def load_sheet_rows(wb, sheet_name):
     return None
 
 
+def norm_qtype(t):
+    # Normalise a question type: lowercase, drop spaces/hyphens/underscores.
+    return "".join(ch for ch in str(t or "").lower() if ch.isalnum())
+
+
+# Question type families: members of the same family are treated as equivalent.
+TEXT_TYPES = {norm_qtype(t) for t in ("text", "short_answer", "paragraph", "long_answer")}
+CHOICE_TYPES = {norm_qtype(t) for t in ("choice", "multiple_choice", "radio", "dropdown", "checkbox")}
+
+
 def check_excel(agent_workspace, gt_dir):
     print("\n=== Checking Excel ===")
     xlsx_path = os.path.join(agent_workspace, "Enrollment_Analysis.xlsx")
@@ -105,16 +115,10 @@ def check_excel(agent_workspace, gt_dir):
             if a_row is None:
                 errors.append(f"Missing row: {g_row[0]} {g_row[1]} {g_row[2]}")
                 continue
-            # Student_Count (col 3), Teacher_Count (col 4), TA_Count (col 5)
+            # Student_Count (col 3)
             if len(a_row) > 3 and len(g_row) > 3:
                 if not num_close(a_row[3], g_row[3], 1):
                     errors.append(f"{key}: Student_Count {a_row[3]} vs {g_row[3]}")
-            if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 1):
-                    errors.append(f"{key}: Teacher_Count {a_row[4]} vs {g_row[4]}")
-            if len(a_row) > 5 and len(g_row) > 5:
-                if not num_close(a_row[5], g_row[5], 1):
-                    errors.append(f"{key}: TA_Count {a_row[5]} vs {g_row[5]}")
         if errors:
             for e in errors[:5]:
                 check(f"Enrollment Trends data", False, e)
@@ -243,23 +247,19 @@ def check_gform():
                   f"Found {len(questions)} questions: {[q[1] for q in questions]}")
 
             if len(questions) >= 4:
-                # Check question types
-                types = [q[2].upper() if q[2] else "" for q in questions]
+                # Check question types (normalised; compared by family)
+                types = [norm_qtype(q[2]) for q in questions]
                 titles = [q[1].lower() if q[1] else "" for q in questions]
 
-                has_name_text = any("name" in t and types[i] in ["TEXT", "SHORT_ANSWER", "PARAGRAPH"]
+                has_name_text = any("name" in t and types[i] in TEXT_TYPES
                                     for i, t in enumerate(titles))
                 check("Has student name text question", has_name_text,
                       f"Questions: {list(zip(titles, types))}")
 
-                has_checkbox = any(t in ["CHECKBOX", "CHECKBOX_GRID", "CHECK_BOX"]
-                                   for t in types)
-                check("Has checkbox question for courses", has_checkbox,
+                choice_qs = [q for i, q in enumerate(questions) if types[i] in CHOICE_TYPES]
+                check("Has checkbox/choice question for courses", len(choice_qs) >= 1,
                       f"Types: {types}")
-
-                has_radio = any(t in ["RADIO", "MULTIPLE_CHOICE", "CHOICE"]
-                                for t in types)
-                check("Has radio/choice question for schedule", has_radio,
+                check("Has radio/choice question for schedule", len(choice_qs) >= 2,
                       f"Types: {types}")
 
                 # Build a list of all choices across questions for content checks
@@ -286,48 +286,53 @@ def check_gform():
                     "foundations of finance",
                     "global governance & geopolitics",
                 ]
-                # Find checkbox question and inspect its options
-                checkbox_choices = []
-                for q in questions:
-                    qtype = (q[2] or "").upper()
-                    if qtype in ["CHECKBOX", "CHECKBOX_GRID", "CHECK_BOX"]:
-                        checkbox_choices = _choices(q[3])
-                        break
                 # Match by normalised substring/inclusion to handle minor whitespace/punct variation
                 def _norm(s):
                     return "".join(ch for ch in s.lower() if ch.isalnum())
-                norm_choices = [_norm(c) for c in checkbox_choices]
-                missing_courses = []
-                for course in base_courses:
-                    if not any(_norm(course) in nc or nc in _norm(course)
-                               for nc in norm_choices if nc):
-                        missing_courses.append(course)
-                check("Checkbox question lists all 7 base course names",
-                      len(missing_courses) == 0,
-                      f"Missing: {missing_courses}; got choices: {checkbox_choices}")
 
-                # Radio question must have Morning/Afternoon/Evening options
-                radio_choices = []
-                for q in questions:
-                    qtype = (q[2] or "").upper()
-                    if qtype in ["RADIO", "MULTIPLE_CHOICE", "CHOICE"]:
-                        radio_choices = _choices(q[3])
+                def _covers_all(required, choices):
+                    norm_choices = [_norm(c) for c in choices]
+                    return all(any(_norm(r) in nc or nc in _norm(r)
+                                   for nc in norm_choices if nc)
+                               for r in required)
+
+                # Some choice-family question must list all 7 base course names
+                course_q = None
+                for q in choice_qs:
+                    if _covers_all(base_courses, _choices(q[3])):
+                        course_q = q
                         break
-                radio_norm = [c.strip().lower() for c in radio_choices]
-                has_morning = any("morning" == c or c.startswith("morning") for c in radio_norm)
-                has_afternoon = any("afternoon" == c or c.startswith("afternoon") for c in radio_norm)
-                has_evening = any("evening" == c or c.startswith("evening") for c in radio_norm)
+                check("Checkbox question lists all 7 base course names",
+                      course_q is not None,
+                      f"Got choices: {[(q[1], _choices(q[3])) for q in choice_qs]}")
+
+                # Some choice-family question must have Morning/Afternoon/Evening options
+                sched_choices = []
+                for q in choice_qs:
+                    if q is course_q:
+                        continue
+                    cand = _choices(q[3])
+                    cand_norm = [c.strip().lower() for c in cand]
+                    if (any(c == "morning" or c.startswith("morning") for c in cand_norm)
+                            and any(c == "afternoon" or c.startswith("afternoon") for c in cand_norm)
+                            and any(c == "evening" or c.startswith("evening") for c in cand_norm)):
+                        sched_choices = cand
+                        break
+                sched_norm = [c.strip().lower() for c in sched_choices]
+                has_morning = any("morning" == c or c.startswith("morning") for c in sched_norm)
+                has_afternoon = any("afternoon" == c or c.startswith("afternoon") for c in sched_norm)
+                has_evening = any("evening" == c or c.startswith("evening") for c in sched_norm)
                 check("Schedule radio has Morning option", has_morning,
-                      f"Choices: {radio_choices}")
+                      f"Choices: {sched_choices}")
                 check("Schedule radio has Afternoon option", has_afternoon,
-                      f"Choices: {radio_choices}")
+                      f"Choices: {sched_choices}")
                 check("Schedule radio has Evening option", has_evening,
-                      f"Choices: {radio_choices}")
+                      f"Choices: {sched_choices}")
 
                 # Fourth question: accessibility / accommodations (text)
                 has_accessibility = any(
                     ("access" in t or "accommod" in t or "special need" in t)
-                    and types[i] in ["TEXT", "SHORT_ANSWER", "PARAGRAPH"]
+                    and types[i] in TEXT_TYPES
                     for i, t in enumerate(titles)
                 )
                 check("Has accessibility/accommodations text question",

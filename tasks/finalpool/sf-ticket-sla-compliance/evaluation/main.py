@@ -152,7 +152,7 @@ def main():
     print("  Checking email...")
     try:
         import psycopg2
-        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
+        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
         cur.execute("""
@@ -173,31 +173,68 @@ def main():
             """)
             sent = cur.fetchall()
 
-        found_email = False
+        # Tightened: recipient ops-manager@company.com, subject contains
+        # 'SLA Compliance Report Summary', and body must carry the overall
+        # compliance rate value plus the worst-performing priority name.
+        # Expected values come from the GT Summary sheet (sender address is
+        # fixed by the email environment and not checked).
+        gt_summary = load_sheet_rows(gt_wb, "Summary")
+        expected_overall_rate = None
+        expected_worst = None
+        for row in gt_summary[1:] if gt_summary else []:
+            if not row or row[0] is None:
+                continue
+            k = str(row[0]).strip().lower()
+            if k == "overall_compliance_rate" and row[1] is not None:
+                try:
+                    expected_overall_rate = float(row[1])
+                except (TypeError, ValueError):
+                    pass
+            elif k == "worst_priority" and row[1] is not None:
+                expected_worst = str(row[1]).strip()
+
+        def _compliance_subject_match(s):
+            s = str(s or "").lower()
+            return ("sla compliance report summary" in s or
+                    ("sla" in s and "compliance" in s and "summary" in s))
+
+        found_email = None
         for subj, to_addr, body in sent:
-            subj_str = str(subj or "").lower()
-            to_str = str(to_addr or "").lower()
-            if "sla" in subj_str and "ops-manager" in to_str:
-                found_email = True
+            if (_compliance_subject_match(subj) and
+                    "ops-manager@company.com" in str(to_addr or "").lower()):
+                found_email = (subj, to_addr, body)
                 break
 
         if not found_email:
-            # Check INBOX of ops-manager
+            # Also scan messages addressed to ops-manager (e.g. inbox mirror)
             cur.execute("""
                 SELECT m.subject, m.to_addr, m.body_text, m.from_addr
                 FROM email.messages m
                 WHERE LOWER(m.to_addr::text) LIKE '%%ops-manager%%'
             """)
-            inbox_msgs = cur.fetchall()
-            for subj, to_addr, body, from_addr in inbox_msgs:
-                if "sla" in str(subj or "").lower():
-                    found_email = True
+            for subj, to_addr, body, from_addr in cur.fetchall():
+                if (_compliance_subject_match(subj) and
+                        "ops-manager@company.com" in str(to_addr or "").lower()):
+                    found_email = (subj, to_addr, body)
                     break
 
         if not found_email:
-            all_errors.append("No email with 'SLA' in subject sent to ops-manager@company.com")
+            all_errors.append("Email not found: to=ops-manager@company.com, subject contains 'SLA Compliance Report Summary'")
         else:
-            print("    PASS")
+            print("    Email envelope PASS")
+            body_str = str(found_email[2] or "")
+            if expected_overall_rate is not None:
+                rate_str = f"{expected_overall_rate:g}"
+                rate_alt = f"{expected_overall_rate:.2f}"
+                if rate_str not in body_str and rate_alt not in body_str:
+                    all_errors.append(f"Email body missing overall compliance rate {rate_str} or {rate_alt}; body: {body_str[:200]}")
+                else:
+                    print(f"    Body contains overall_compliance_rate={rate_str}")
+            if expected_worst is not None:
+                if expected_worst.lower() not in body_str.lower():
+                    all_errors.append(f"Email body missing worst priority '{expected_worst}'; body: {body_str[:200]}")
+                else:
+                    print(f"    Body mentions worst_priority={expected_worst}")
 
         cur.close()
         conn.close()

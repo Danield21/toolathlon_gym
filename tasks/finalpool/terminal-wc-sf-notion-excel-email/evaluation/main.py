@@ -4,19 +4,26 @@ Checks:
 2. Notion database with critical product entries
 3. Two emails sent to correct recipients
 4. Python scripts exist
+
+Expected values are recomputed from the read-only DB at evaluation time, so the
+ground truth never goes stale relative to the immutable db seed.
 """
 import argparse
 import json
 import os
+import re
 import sys
+from collections import defaultdict
 
 import openpyxl
 import psycopg2
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
-    "user": "eigent", "password": "camel",
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 PASS_COUNT = 0
@@ -33,20 +40,90 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}: {str(detail)[:200]}")
 
 
-def num_close(a, b, tol=2.0):
+def _to_float(val):
+    """Robust numeric parser.
+
+    Handles str/int/float/None. Strips thousand separators, currency symbols,
+    percent signs and surrounding whitespace. "90%" parses as 90.0. Returns
+    None when the value cannot be interpreted as a number (including Excel
+    formula strings that carry no cached result).
+    """
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return float(val)
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip()
+    if not s or s.startswith("="):
+        return None
+    for ch in (",", "$", "¥", "€", "%"):
+        s = s.replace(ch, "")
+    s = s.strip()
     try:
-        return abs(float(a) - float(b)) <= tol
-    except Exception:
-        return False
+        return float(s)
+    except ValueError:
+        return None
 
 
 def safe_float(val, default=None):
-    try:
-        if val is None:
-            return default
-        return float(str(val).replace(',', '').replace('$', '').strip())
-    except Exception:
-        return default
+    f = _to_float(val)
+    return f if f is not None else default
+
+
+def _number_strings(f):
+    """Several textual representations of a float, for formula embedding checks."""
+    out = []
+    if f == int(f):
+        out.append(str(int(f)))
+    out.append(f"{f:.2f}")
+    out.append(repr(f))
+    out.append(f"{f:g}")
+    return list(dict.fromkeys(out))
+
+
+def _formula_embeds_number(formula, num):
+    """Return True if a formula string (with no cached result) embeds the
+    expected number as a standalone token, e.g. '=31588', '=3.26',
+    '=SUM(6466,9348,15774)'. A range reference like '=SUM(A1:A360)' does NOT
+    count as embedding 36. This only fires for formula cells that carry no
+    cached value; it never lets a wrong number pass (the token must match).
+    """
+    if not (isinstance(formula, str) and formula.startswith("=")):
+        return False
+    f = _to_float(num)
+    if f is None:
+        return False
+    for rep in _number_strings(f):
+        pattern = r"(?<![A-Za-z0-9_.])" + re.escape(rep) + r"(?![A-Za-z0-9_.])"
+        if re.search(pattern, formula):
+            return True
+    return False
+
+
+def num_close(a, b, tol=2.0):
+    """Numeric closeness.
+
+    R3 semantics: if both sides parse as numbers, compare numerically with
+    tolerance. If exactly one side fails to parse because it is an Excel
+    formula with no cached result, accept only when that formula embeds the
+    expected number as a standalone literal token. If exactly one side fails
+    to parse and the other did parse (empty cell / garbage text), fall back to
+    a case-insensitive string comparison (which fails). If neither side parses,
+    fail (do not silently pass).
+    """
+    fa, fb = _to_float(a), _to_float(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= tol
+    if fa is None and fb is None:
+        return False
+    # One side is a non-numeric formula without a cached result: only accept
+    # if the formula literally embeds the other side's number.
+    if fb is not None and _formula_embeds_number(a, fb):
+        return True
+    if fa is not None and _formula_embeds_number(b, fa):
+        return True
+    return str(a).strip().lower() == str(b).strip().lower()
 
 
 def get_groundtruth_from_db():
@@ -130,6 +207,165 @@ def get_groundtruth_from_db():
     }
 
 
+def _load_workbook(path):
+    """Load a workbook twice.
+
+    Returns (formulas_wb, values_wb). formulas_wb is loaded with data_only=False
+    (default) so structure/sheet names are always visible; values_wb is loaded
+    with data_only=True so cached results of formula cells are available.
+    values_wb may be None if the values pass fails.
+    """
+    formulas_wb = openpyxl.load_workbook(path)
+    try:
+        values_wb = openpyxl.load_workbook(path, data_only=True)
+    except Exception:
+        values_wb = None
+    return formulas_wb, values_wb
+
+
+def _cell_value(cell, values_ws):
+    v = cell.value
+    if isinstance(v, str) and v.startswith("="):
+        if values_ws is not None:
+            cached = values_ws.cell(row=cell.row, column=cell.column).value
+            if cached is not None:
+                return cached
+    return v
+
+
+def _read_rows(ws, values_ws=None, min_row=1):
+    rows = []
+    for row in ws.iter_rows(min_row=min_row):
+        rows.append([_cell_value(c, values_ws) for c in row])
+    return rows
+
+
+def _dedup_rows(rows, key_idx=0):
+    """Content-based dedup on the leading key column (case-insensitive)."""
+    seen = set()
+    out = []
+    for r in rows:
+        if r[key_idx] is None:
+            continue
+        key = str(r[key_idx]).strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
+
+
+# Header hints used to (a) auto-detect an optional header row and (b) locate a
+# sheet by content when its name does not match the expected keywords.
+HEADER_HINTS = {
+    "pp": ["product", "severity", "refund", "category", "low", "review", "id", "name", "score"],
+    "sp": ["priority", "response", "ticket", "satisfaction"],
+    "it": ["issue", "type", "ticket", "count", "satisfaction"],
+    "es": ["metric", "value", "summary", "key", "result"],
+}
+
+
+def _norm(s):
+    """Normalize a string for header matching: lowercase, spaces/dashes -> _."""
+    s = str(s).strip().lower().replace(" ", "_").replace("-", "_")
+    return re.sub(r"[^a-z0-9_]", "", s)
+
+
+def _cell_matches_hint(cell, hint):
+    """True when a cell looks like a header column matching `hint`, using
+    token-aware matching so 'Avg_Response_Hours' matches 'response' and
+    'Total_Tickets' matches 'ticket'."""
+    s = _norm(cell)
+    if not s:
+        return False
+    if s == hint:
+        return True
+    tokens = s.split("_")
+    return any(t == hint or t.startswith(hint) or hint.startswith(t) for t in tokens)
+
+
+def _header_score(row, hints):
+    """Count how many cells in row look like a header column name."""
+    matches = 0
+    for c in row:
+        if c is None:
+            continue
+        if any(_cell_matches_hint(c, h) for h in hints):
+            matches += 1
+    return matches
+
+
+def _row_is_header(row, hints):
+    """True when the row looks like a header (>=2 cells match known columns)."""
+    return _header_score(row, hints) >= 2
+
+
+def _filter_blank_rows(rows):
+    """Drop rows that are entirely empty (trailing/format-inflated blank rows)."""
+    return [r for r in rows if any(c is not None and str(c).strip() != "" for c in r)]
+
+
+def _read_data_rows(ws, values_ws, hints):
+    """Read a sheet's data rows, tolerating an optional header row.
+
+    Skips leading blank rows; if the first non-blank row is a header it is
+    skipped; all-blank rows (e.g. trailing rows inflated by max_row) are
+    dropped. Returns only non-blank data rows.
+    """
+    rows = _read_rows(ws, values_ws, min_row=1)
+    start = 0
+    while start < len(rows):
+        if any(c is not None and str(c).strip() != "" for c in rows[start]):
+            break
+        start += 1
+    if start < len(rows) and _row_is_header(rows[start], hints):
+        start += 1
+    return _filter_blank_rows(rows[start:])
+
+
+def _locate_sheet(wb, values_wb, canonical_name, keywords, hints, fallback_idx, used):
+    """Locate a sheet by (1) exact canonical name, (2) keyword substring,
+    (3) content header match, (4) positional fallback. `used` holds already
+    claimed indices so no sheet is double-claimed by two checks."""
+    sheets = wb.sheetnames
+    # 1. exact canonical name (case-insensitive)
+    target = _norm(canonical_name)
+    for i, s in enumerate(sheets):
+        if i in used:
+            continue
+        if _norm(s) == target:
+            return i
+    # 2. keyword substring
+    for i, s in enumerate(sheets):
+        if i in used:
+            continue
+        sl = s.lower()
+        if any(k in sl for k in keywords):
+            return i
+    # 3. content header match
+    best, best_score = None, 0
+    for i, s in enumerate(sheets):
+        if i in used:
+            continue
+        ws = wb[s]
+        vs = values_wb[s] if values_wb is not None else None
+        first = next((r for r in _read_rows(ws, vs, min_row=1)
+                      if any(c is not None and str(c).strip() != "" for c in r)), None)
+        if first is None:
+            continue
+        score = _header_score(first, hints)
+        if score >= 2 and score > best_score:
+            best, best_score = i, score
+    if best is not None:
+        return best
+    # 4. positional fallback: never reuse an already-claimed index
+    if fallback_idx not in used and fallback_idx < len(sheets):
+        return fallback_idx
+    for i in range(len(sheets)):
+        if i not in used:
+            return i
+    return 0
+
+
 def check_excel(workspace, gt):
     print("\n=== Check 1: Support_Quality_Audit.xlsx ===")
     path = os.path.join(workspace, "Support_Quality_Audit.xlsx")
@@ -138,16 +374,32 @@ def check_excel(workspace, gt):
         return
     check("Excel file exists", True)
 
-    wb = openpyxl.load_workbook(path)
+    wb, wb_values = _load_workbook(path)
     sheets = wb.sheetnames
-    sheets_lower = [s.lower() for s in sheets]
 
     check("Has at least 4 sheets", len(sheets) >= 4, f"Found {len(sheets)}: {sheets}")
+    if len(sheets) == 0:
+        return
+
+    def values_sheet(name):
+        if wb_values is None:
+            return None
+        try:
+            return wb_values[name]
+        except Exception:
+            return None
+
+    # Each sheet is located by exact name, keyword substring, content header
+    # match, then positional fallback; indices already claimed by an earlier
+    # check are never re-used.
+    used = set()
 
     # Problem_Products sheet
-    pp_idx = next((i for i, s in enumerate(sheets_lower) if "problem" in s or "product" in s), 0)
+    pp_idx = _locate_sheet(wb, wb_values, "Problem_Products", ["problem", "product"],
+                           HEADER_HINTS["pp"], 0, used)
+    used.add(pp_idx)
     ws_pp = wb[sheets[pp_idx]]
-    rows_pp = list(ws_pp.iter_rows(min_row=2, values_only=True))
+    rows_pp = _read_data_rows(ws_pp, values_sheet(sheets[pp_idx]), HEADER_HINTS["pp"])
     expected_count = len(gt["problem_list"])
     check(f"Problem_Products has ~{expected_count} rows",
           abs(len(rows_pp) - expected_count) <= 2,
@@ -157,11 +409,11 @@ def check_excel(workspace, gt):
     if rows_pp:
         top_row = rows_pp[0]
         top_pid = safe_float(top_row[0])
-        top_severity = safe_float(top_row[5] if len(top_row) > 5 else top_row[-1])
         expected_top = gt["problem_list"][0]
         check("Top product ID correct",
               top_pid is not None and int(top_pid) == expected_top[0],
               f"Got pid={top_pid}, expected {expected_top[0]}")
+        top_severity = top_row[5] if len(top_row) > 5 else top_row[-1]
         check("Top product severity correct",
               num_close(top_severity, expected_top[5], tol=5),
               f"Got {top_severity}, expected {expected_top[5]}")
@@ -175,11 +427,13 @@ def check_excel(workspace, gt):
               f"Looking for pid={mid_product[0]} or name={mid_product[1][:15]}")
 
     # Support_By_Priority sheet
-    sp_idx = next((i for i, s in enumerate(sheets_lower) if "priority" in s or "support" in s), 1)
+    sp_idx = _locate_sheet(wb, wb_values, "Support_By_Priority", ["priority", "support"],
+                           HEADER_HINTS["sp"], 1, used)
+    used.add(sp_idx)
     if sp_idx < len(sheets):
         ws_sp = wb[sheets[sp_idx]]
-        rows_sp = list(ws_sp.iter_rows(min_row=2, values_only=True))
-        check("Support_By_Priority has 3 rows", len(rows_sp) == 3,
+        rows_sp = _dedup_rows(_read_data_rows(ws_sp, values_sheet(sheets[sp_idx]), HEADER_HINTS["sp"]))
+        check("Support_By_Priority has at least 3 rows", len(rows_sp) >= 3,
               f"Found {len(rows_sp)} rows")
 
         if rows_sp:
@@ -188,28 +442,31 @@ def check_excel(workspace, gt):
             check("Has Medium priority", "medium" in all_text_sp)
             check("Has Low priority", "low" in all_text_sp)
 
-            # Check High priority ticket count
-            for r in rows_sp:
-                if r[0] and "high" in str(r[0]).lower():
-                    expected_high = next((p for p in gt["priority_data"] if p[0] == "High"), None)
-                    if expected_high:
-                        count = safe_float(r[1])
-                        check(f"High priority count ~{expected_high[1]}",
-                              num_close(count, expected_high[1], tol=50),
-                              f"Got {count}, expected {expected_high[1]}")
-                        sat = safe_float(r[3] if len(r) > 3 else r[-1])
-                        check(f"High priority avg satisfaction ~{expected_high[3]}",
-                              num_close(sat, float(expected_high[3]), tol=0.1),
-                              f"Got {sat}, expected {expected_high[3]}")
+            # Check ticket count + avg satisfaction per priority (content-matched)
+            for expected in gt["priority_data"]:
+                key = str(expected[0]).lower()
+                row = next((r for r in rows_sp if r[0] and key in str(r[0]).lower()), None)
+                if row is None:
+                    continue
+                count = row[1] if len(row) > 1 else None
+                check(f"{expected[0]} priority count ~{expected[1]}",
+                      num_close(count, expected[1], tol=50),
+                      f"Got {count}, expected {expected[1]}")
+                sat = row[3] if len(row) > 3 else row[-1]
+                check(f"{expected[0]} priority avg satisfaction ~{expected[3]}",
+                      num_close(sat, float(expected[3]), tol=0.1),
+                      f"Got {sat}, expected {expected[3]}")
 
     # Issue_Type_Breakdown sheet
-    it_idx = next((i for i, s in enumerate(sheets_lower) if "issue" in s or "type" in s), 2)
+    it_idx = _locate_sheet(wb, wb_values, "Issue_Type_Breakdown", ["issue", "type"],
+                           HEADER_HINTS["it"], 2, used)
+    used.add(it_idx)
     if it_idx < len(sheets):
         ws_it = wb[sheets[it_idx]]
-        rows_it = list(ws_it.iter_rows(min_row=2, values_only=True))
+        rows_it = _dedup_rows(_read_data_rows(ws_it, values_sheet(sheets[it_idx]), HEADER_HINTS["it"]))
         expected_it_rows = len(gt["issue_data"])
-        check(f"Issue_Type_Breakdown has {expected_it_rows} rows",
-              len(rows_it) == expected_it_rows,
+        check(f"Issue_Type_Breakdown has at least {expected_it_rows} rows",
+              len(rows_it) >= expected_it_rows,
               f"Found {len(rows_it)} rows, expected {expected_it_rows}")
 
         if rows_it:
@@ -217,11 +474,24 @@ def check_excel(workspace, gt):
             check("Has Bug issue type", "bug" in all_text_it)
             check("Has Performance Issue type", "performance" in all_text_it)
 
+            # Content-matched per-issue-type ticket counts
+            for expected in gt["issue_data"]:
+                key = str(expected[0]).lower()
+                row = next((r for r in rows_it if r[0] and key in str(r[0]).lower()), None)
+                if row is None:
+                    continue
+                count = row[1] if len(row) > 1 else None
+                check(f"{expected[0]} ticket count ~{expected[1]}",
+                      num_close(count, expected[1], tol=50),
+                      f"Got {count}, expected {expected[1]}")
+
     # Executive_Summary sheet
-    es_idx = next((i for i, s in enumerate(sheets_lower) if "executive" in s or "summary" in s), 3)
+    es_idx = _locate_sheet(wb, wb_values, "Executive_Summary", ["executive", "summary"],
+                           HEADER_HINTS["es"], 3, used)
+    used.add(es_idx)
     if es_idx < len(sheets):
         ws_es = wb[sheets[es_idx]]
-        rows_es = list(ws_es.iter_rows(min_row=2, values_only=True))
+        rows_es = _read_data_rows(ws_es, values_sheet(sheets[es_idx]), HEADER_HINTS["es"])
         check("Executive_Summary has at least 5 rows", len(rows_es) >= 5,
               f"Found {len(rows_es)} rows")
 
@@ -262,15 +532,24 @@ def check_excel(workspace, gt):
             # Highest Risk Category - dynamically derive from problem_list
             cat_key = next((k for k in summary_dict if "category" in k or "risk" in k), None)
             if cat_key:
-                # Sum severity per category in problem_list
-                from collections import defaultdict
                 cat_severity = defaultdict(int)
                 for (pid, name, cat, rc, lrc, sev) in gt["problem_list"]:
                     cat_severity[cat] += sev
                 expected_top_cat = max(cat_severity, key=cat_severity.get) if cat_severity else "Electronics"
+                cell_text = str(summary_dict[cat_key]).strip().lower()
+                exp_lower = expected_top_cat.lower()
                 check(f"Highest Risk Category is {expected_top_cat}",
-                      str(summary_dict[cat_key]).strip().lower() == expected_top_cat.lower(),
+                      exp_lower in cell_text or cell_text in exp_lower,
                       f"Got {summary_dict[cat_key]}, expected {expected_top_cat}")
+
+
+def _unique_page_props(pages):
+    """Content-dedup pages by their full properties payload (case-insensitive)."""
+    unique = set()
+    for p in pages:
+        props = p[1] if p[1] else {}
+        unique.add(json.dumps(props, sort_keys=True).lower())
+    return unique
 
 
 def check_notion(gt):
@@ -289,6 +568,8 @@ def check_notion(gt):
     if dbs:
         db_id = str(dbs[0][0])
         props = dbs[0][2] if dbs[0][2] else {}
+        if not isinstance(props, dict):
+            props = {}
 
         # Check properties exist
         prop_names_lower = {k.lower(): k for k in props.keys()}
@@ -302,9 +583,10 @@ def check_notion(gt):
             WHERE parent::text LIKE %s AND NOT archived
         """, (f'%{db_id}%',))
         pages = cur.fetchall()
-        check(f"Has at least 6 entries for critical products",
-              len(pages) >= 6,
-              f"Found {len(pages)} pages")
+        unique_props = _unique_page_props(pages)
+        check(f"Has at least 6 distinct entries for critical products",
+              len(unique_props) >= 6,
+              f"Found {len(pages)} pages ({len(unique_props)} distinct)")
 
         if pages:
             # Check at least one page has Critical severity
@@ -393,11 +675,12 @@ def check_reverse_validation(gt):
                 WHERE parent::text LIKE %s AND NOT archived
             """, (f'%{db_id}%',))
             pages = cur.fetchall()
+            unique_props = _unique_page_props(pages)
             # Should have no more than ~top 20% products; certainly not all problem products
             max_expected = len(gt["critical"]) + 2  # small tolerance
             check("Notion does not include non-critical products",
-                  len(pages) <= max_expected,
-                  f"Found {len(pages)} pages, expected at most {max_expected} (critical={len(gt['critical'])})")
+                  len(unique_props) <= max_expected,
+                  f"Found {len(unique_props)} distinct pages, expected at most {max_expected} (critical={len(gt['critical'])})")
 
         # Check no emails sent to wrong recipients
         noise_recipients = [

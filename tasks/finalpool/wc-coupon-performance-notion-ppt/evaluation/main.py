@@ -33,6 +33,25 @@ def load_sheet_rows(wb, sheet_name):
     return None
 
 
+def _norm_header(h):
+    return str(h or "").strip().lower().replace(" ", "_")
+
+
+def _header_map(rows):
+    """Map normalized header text -> 0-based column index from row 1 of a sheet.
+    Lets checks locate columns by name regardless of column order."""
+    if not rows or not rows[0]:
+        return {}
+    return {_norm_header(h): i for i, h in enumerate(rows[0]) if _norm_header(h)}
+
+
+def _cell(row, idx):
+    """Safe cell access (None when idx out of range)."""
+    if row is None or idx is None:
+        return None
+    return row[idx] if idx < len(row) else None
+
+
 def get_coupon_data():
     conn = psycopg2.connect(**DB)
     cur = conn.cursor()
@@ -183,18 +202,27 @@ def main():
         else:
             print(f"    PASS ({len(data_rows)} data rows)")
 
+        # Map header names -> column index (order-independent; fall back to the
+        # documented column order when a header is missing).
+        col = _header_map(a_rows)
+        code_idx = col.get("coupon_code", 0)
+        times_used_idx = col.get("times_used", 3)
+        rate_idx = col.get("usage_rate_pct", 5)
+
         # Build lookup by coupon code
         a_lookup = {}
         for row in data_rows:
-            if row and row[0] is not None:
-                a_lookup[str(row[0]).strip().upper()] = row
+            code_v = _cell(row, code_idx)
+            if code_v is not None:
+                a_lookup[str(code_v).strip().upper()] = row
 
         # Check HOLIDAY30
         if "HOLIDAY30" in a_lookup:
             row = a_lookup["HOLIDAY30"]
-            if len(row) >= 4:
-                if not num_close(row[3], 50, 0):
-                    all_errors.append(f"HOLIDAY30.Times_Used: {row[3]} vs 50")
+            times_val = _cell(row, times_used_idx)
+            if times_val is not None:
+                if not num_close(times_val, 50, 0):
+                    all_errors.append(f"HOLIDAY30.Times_Used: {times_val} vs 50")
                 else:
                     print("    HOLIDAY30 usage PASS")
         else:
@@ -203,16 +231,21 @@ def main():
         # Check SAVE20 usage rate
         if "SAVE20" in a_lookup:
             row = a_lookup["SAVE20"]
-            if len(row) >= 4:
-                if not num_close(row[3], 39, 0):
-                    all_errors.append(f"SAVE20.Times_Used: {row[3]} vs 39")
-            if len(row) >= 6:
-                rate_val = row[5]
-                if str(rate_val).strip().upper() != "N/A":
-                    if not num_close(rate_val, 78.00, 0.5):
-                        all_errors.append(f"SAVE20.Usage_Rate_Pct: {rate_val} vs 78.00 (tol=0.5)")
-                    else:
-                        print("    SAVE20 rate PASS")
+            times_val = _cell(row, times_used_idx)
+            if times_val is not None and not num_close(times_val, 39, 0):
+                all_errors.append(f"SAVE20.Times_Used: {times_val} vs 39")
+            rate_val = _cell(row, rate_idx)
+            # SAVE20 HAS a usage limit (50), so a numeric rate (~78.00) is
+            # required; writing "N/A" here is wrong and must FAIL (it is not a
+            # no-limit coupon).
+            if rate_val is None:
+                all_errors.append("SAVE20.Usage_Rate_Pct missing")
+            elif str(rate_val).strip().upper() == "N/A":
+                all_errors.append(f"SAVE20.Usage_Rate_Pct: 'N/A' vs 78.00 (SAVE20 has a usage limit; expected a number)")
+            elif not num_close(rate_val, 78.00, 0.5):
+                all_errors.append(f"SAVE20.Usage_Rate_Pct: {rate_val} vs 78.00 (tol=0.5)")
+            else:
+                print("    SAVE20 rate PASS")
 
     # Check Summary sheet
     print("  Checking Summary sheet...")

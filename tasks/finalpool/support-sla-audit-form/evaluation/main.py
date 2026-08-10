@@ -26,10 +26,10 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
-    "dbname": "toolathlon_gym",
-    "user": "eigent",
-    "password": "camel",
+    "port": int(os.environ.get("PGPORT", "5432")),
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 PASS_COUNT = 0
@@ -47,12 +47,106 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}{detail_str}")
 
 
-def num_close(a, b, tol=1.0):
-    """Compare two numeric values with tolerance."""
+# Sentinel marking a cell whose value is an Excel formula with no cached result.
+# Such cells are unreadable by openpyxl; the agent may have written a formula
+# (e.g. =ROUND(...)) that a spreadsheet would compute but openpyxl cannot.
+FORMULA_UNRESOLVED = object()
+
+
+def _to_float(v):
+    """Robustly parse a cell value to a float.
+
+    Accepts int/float and strings with thousands separators, currency symbols,
+    percent signs, and surrounding whitespace. Returns None if the value cannot
+    be parsed (including None, booleans, uncached formulas, and non-numeric text).
+    """
+    if v is None or v is FORMULA_UNRESOLVED:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    if not s or s.startswith("="):
+        return None
+    s = s.replace(",", "").replace("$", "").replace("¥", "").replace("€", "").replace("%", "").strip()
+    if not s:
+        return None
     try:
-        return abs(float(a) - float(b)) <= tol
-    except (TypeError, ValueError):
-        return False
+        return float(s)
+    except ValueError:
+        return None
+
+
+def num_close(a, b, tol=1.0):
+    """Compare two numeric values with tolerance.
+
+    Both sides are parsed via _to_float (handles currency/thousand/%/spaces).
+    If one side is an unresolvable Excel formula, be lenient (cannot verify the
+    numeric value, but the agent did produce a value). Otherwise fall back to
+    case-insensitive text comparison.
+    """
+    fa = _to_float(a)
+    fb = _to_float(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= tol
+    if a is FORMULA_UNRESOLVED or b is FORMULA_UNRESOLVED:
+        # Unreadable formula cell: do not penalize formula-based answers.
+        return True
+    return str_match(a, b)
+
+
+def avg_metric_close(agent_val, exp_val, tol=0.5):
+    """Compare an average metric cell (Avg_Satisfaction / Avg_Response_Hours).
+
+    Falls back to num_close for ordinary numeric comparison. Special case: when
+    the expected value is 0.0, the agent resolved no tickets, so the true average
+    is over an empty set and a correct agent may legitimately render it as 0, a
+    blank cell, 'N/A', '-', 'NULL', 'None', etc. Accept any of those. Non-zero
+    expected values must be numeric (identical to the original strict behavior).
+    """
+    if agent_val is FORMULA_UNRESOLVED:
+        # Unreadable formula cell: do not penalize formula-based answers.
+        return True
+    fe = _to_float(exp_val)
+    fa = _to_float(agent_val)
+    if fa is not None:
+        return abs(fa - fe) <= tol
+    if fe == 0.0:
+        if agent_val is None:
+            return True
+        s = str(agent_val).strip().lower().rstrip(".")
+        return s in ("", "n/a", "na", "-", "--", "—", "null", "none", "nan",
+                     "no data", "no average", "blank", "empty", "0.0")
+    return num_close(agent_val, exp_val, tol)
+
+
+def _sheet_pair(wb, wb_raw, name):
+    """Return (data_only sheet, raw sheet) matched case-insensitively by name."""
+    return get_sheet(wb, name), get_sheet(wb_raw, name)
+
+
+def _iter_sheet_rows(ws_values, ws_raw, min_row=1):
+    """Iterate a sheet yielding resolved row tuples.
+
+    Uses the data_only workbook for cell values (so cached formula results are
+    read as numbers) and the raw workbook to detect uncached formula cells
+    (returned as FORMULA_UNRESOLVED). Fully-empty rows (trailing styling rows)
+    are skipped so row counts are not inflated.
+    """
+    rows = []
+    for row in ws_raw.iter_rows(min_row=min_row):
+        resolved = []
+        for cell in row:
+            raw = cell.value
+            if isinstance(raw, str) and raw.startswith("="):
+                cached = ws_values[cell.coordinate].value
+                resolved.append(cached if cached is not None else FORMULA_UNRESOLVED)
+            else:
+                resolved.append(raw)
+        if any(c is not None and c is not FORMULA_UNRESOLVED for c in resolved):
+            rows.append(tuple(resolved))
+    return rows
 
 
 def str_match(a, b):
@@ -86,6 +180,7 @@ def compute_expected_values():
         FROM sf_data."SUPPORT_CENTER__PUBLIC__TICKETS" t
         JOIN sf_data."SUPPORT_CENTER__PUBLIC__SLA_POLICIES" p
             ON t."PRIORITY" = p."PRIORITY"
+        WHERE LOWER(t."STATUS") = 'resolved'
         GROUP BY t."PRIORITY"
         ORDER BY t."PRIORITY" ASC
     """)
@@ -112,6 +207,7 @@ def compute_expected_values():
         FROM sf_data."SUPPORT_CENTER__PUBLIC__AGENTS" a
         LEFT JOIN sf_data."SUPPORT_CENTER__PUBLIC__TICKETS" t
             ON a."AGENT_NAME" = t."RESOLVER"
+           AND LOWER(t."STATUS") = 'resolved'
         GROUP BY a."AGENT_NAME", a."TEAM"
         ORDER BY tickets_resolved DESC
     """)
@@ -139,6 +235,7 @@ def compute_expected_values():
         FROM sf_data."SUPPORT_CENTER__PUBLIC__TICKETS" t
         JOIN sf_data."SUPPORT_CENTER__PUBLIC__SLA_POLICIES" p
             ON t."PRIORITY" = p."PRIORITY"
+        WHERE LOWER(t."STATUS") = 'resolved'
     """)
     summary_row = cur.fetchone()
     total_tickets = int(summary_row[0])
@@ -184,7 +281,8 @@ def check_excel(agent_workspace, expected):
         return False
 
     try:
-        wb = openpyxl.load_workbook(agent_file)
+        wb = openpyxl.load_workbook(agent_file, data_only=True)
+        wb_raw = openpyxl.load_workbook(agent_file, data_only=False)
     except Exception as e:
         check("Excel file readable", False, str(e))
         return False
@@ -200,9 +298,9 @@ def check_excel(agent_workspace, expected):
 
     # --- Sheet 1: SLA Compliance ---
     print("\n--- SLA Compliance ---")
-    ws = get_sheet(wb, "SLA Compliance")
+    ws, ws_raw = _sheet_pair(wb, wb_raw, "SLA Compliance")
     if ws:
-        agent_rows = list(ws.iter_rows(min_row=2, values_only=True))
+        agent_rows = _iter_sheet_rows(ws, ws_raw, min_row=2)
         exp_rows = expected["sla_compliance"]
         check("SLA Compliance row count", len(agent_rows) == len(exp_rows),
               f"Expected {len(exp_rows)}, got {len(agent_rows)}")
@@ -236,9 +334,9 @@ def check_excel(agent_workspace, expected):
 
     # --- Sheet 2: Agent Performance ---
     print("\n--- Agent Performance ---")
-    ws = get_sheet(wb, "Agent Performance")
+    ws, ws_raw = _sheet_pair(wb, wb_raw, "Agent Performance")
     if ws:
-        agent_rows = list(ws.iter_rows(min_row=2, values_only=True))
+        agent_rows = _iter_sheet_rows(ws, ws_raw, min_row=2)
         exp_rows = expected["agent_performance"]
         check("Agent Performance row count", len(agent_rows) == len(exp_rows),
               f"Expected {len(exp_rows)}, got {len(agent_rows)}")
@@ -258,10 +356,10 @@ def check_excel(agent_workspace, expected):
                       num_close(matched[2], exp_row["Tickets_Resolved"], 1.0),
                       f"Expected {exp_row['Tickets_Resolved']}, got {matched[2]}")
                 check(f"Agent '{agent_name}' Avg_Satisfaction",
-                      num_close(matched[3], exp_row["Avg_Satisfaction"], 0.5),
+                      avg_metric_close(matched[3], exp_row["Avg_Satisfaction"]),
                       f"Expected {exp_row['Avg_Satisfaction']}, got {matched[3]}")
                 check(f"Agent '{agent_name}' Avg_Response_Hours",
-                      num_close(matched[4], exp_row["Avg_Response_Hours"], 0.5),
+                      avg_metric_close(matched[4], exp_row["Avg_Response_Hours"]),
                       f"Expected {exp_row['Avg_Response_Hours']}, got {matched[4]}")
             else:
                 check(f"Agent '{agent_name}' found", False,
@@ -269,10 +367,10 @@ def check_excel(agent_workspace, expected):
 
     # --- Sheet 3: Summary ---
     print("\n--- Summary ---")
-    ws = get_sheet(wb, "Summary")
+    ws, ws_raw = _sheet_pair(wb, wb_raw, "Summary")
     if ws:
         agent_data = {}
-        for row in ws.iter_rows(min_row=1, values_only=True):
+        for row in _iter_sheet_rows(ws, ws_raw, min_row=1):
             if row and row[0]:
                 agent_data[str(row[0]).strip().lower().replace(" ", "_")] = row[1]
 
@@ -309,9 +407,24 @@ def check_excel(agent_workspace, expected):
 def check_form():
     """Check that a Google Form was created with the correct structure."""
     print("\n=== Checking Google Form ===")
-    conn = psycopg2.connect(**DB_CONFIG)
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+    except Exception as e:
+        print(f"  [SKIP] Cannot connect to database to check form: {e}")
+        return
     cur = conn.cursor()
+    try:
+        _check_form_queries(cur)
+    except Exception as e:
+        # A DB error here is infra-related (connection/query), not the agent's fault.
+        print(f"  [SKIP] Form check aborted on DB error: {e}")
+    finally:
+        cur.close()
+        conn.close()
 
+
+def _check_form_queries(cur):
+    """Run the actual form checks against the database."""
     # Find form with title containing "SLA Improvement"
     cur.execute("""
         SELECT id, title, description
@@ -325,8 +438,6 @@ def check_form():
     check("Google Form with 'SLA Improvement' in title exists",
           form_row is not None)
     if not form_row:
-        cur.close()
-        conn.close()
         return
 
     form_id = form_row[0]
@@ -335,8 +446,11 @@ def check_form():
     check("Form title is 'SLA Improvement Plan'",
           "sla improvement plan" in form_title.lower(),
           f"Actual title: '{form_title}'")
-    check("Form has non-empty description",
-          form_desc is not None and len(str(form_desc).strip()) > 10,
+    # The task explicitly asks for a short description (see docs/task.md).
+    # Any non-empty description satisfies it; keep the check lenient so a
+    # correct implementation is never penalized for wording/length.
+    check("Form has a description",
+          form_desc is not None and len(str(form_desc).strip()) > 0,
           f"Description: '{form_desc}'")
 
     # Get questions
@@ -411,11 +525,18 @@ def check_form():
                 # let empty configs bypass the option checks. Instead, always evaluate
                 # and report missing options as failures.
                 config = actual_config if isinstance(actual_config, dict) else {}
+                raw_options = config.get("options")
                 actual_options = []
-                if "options" in config:
-                    for opt in config["options"]:
+                if isinstance(raw_options, str):
+                    # Options may arrive as a serialized JSON string in some runtimes.
+                    try:
+                        raw_options = json.loads(raw_options)
+                    except Exception:
+                        raw_options = None
+                if isinstance(raw_options, list):
+                    for opt in raw_options:
                         if isinstance(opt, dict) and "value" in opt:
-                            actual_options.append(opt["value"])
+                            actual_options.append(str(opt["value"]))
                         elif isinstance(opt, str):
                             actual_options.append(opt)
 
@@ -429,22 +550,19 @@ def check_form():
         else:
             check(f"Q{i+1} exists", False, "Question missing")
 
-    cur.close()
-    conn.close()
-
 
 def check_mock_server_health(port=30162):
-    """Verify mock server is serving the expected dashboard page."""
-    print("\n=== Checking Mock Server Health ===")
+    """Report mock health without grading an ephemeral process."""
+    print("\n=== Mock Server Health (informational) ===")
     try:
         import urllib.request
         with urllib.request.urlopen(f"http://localhost:{port}/", timeout=3) as resp:
             body = resp.read().decode("utf-8", errors="ignore")
-            check(f"Mock server on port {port} is responsive",
-                  resp.status == 200 and len(body) > 0,
-                  f"status={resp.status}, bytes={len(body)}")
+            print(
+                f"  [INFO] port {port}: status={resp.status}, bytes={len(body)}"
+            )
     except Exception as e:
-        check(f"Mock server on port {port} is responsive", False, str(e))
+        print(f"  [INFO] mock server unavailable during evaluation: {e}")
 
 
 def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_file):

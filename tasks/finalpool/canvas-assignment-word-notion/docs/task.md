@@ -2,10 +2,10 @@ I am a teaching assistant for the Creative Computing and Culture course from Fal
 
 Create a Word document called Assignment_Guide.docx in the workspace. The document should have a heading "Assignment Guide - Creative Computing & Culture (Fall 2014)" at the top, followed by a line showing the course code CCC-2014J. Add a line that says "This document lists all assignments for the course with due dates and point values."
 
-Then include a table with four columns: Assignment Name, Due Date (formatted as YYYY-MM-DD, or "No due date" if not set), Points (showing the numeric point value), and Status (write "Past Due" if the assignment has a due date, or "No due date" if no due date is set).
+Then include a table with a header row followed by exactly one row per assignment (a header row plus 10 data rows — 11 rows total). The table has four columns: Assignment Name, Due Date (formatted as YYYY-MM-DD, or "No due date" if not set), Points (showing the numeric point value), and Status. For the Status column, write "Past Due" for every assignment that has a due date (regardless of whether that date is in the past or the future relative to right now), and write "No due date" for assignments without a due date. List every assignment exactly once: include all of them even when two share a name — for example if there are two "Final Exam ..." entries, both must appear, each on its own row.
 
-Sort the assignments by due date in ascending order, placing assignments without due dates at the end. Within assignments that have the same due date or no due date, sort by assignment ID ascending.
+Sort the assignments by due date in ascending order, placing assignments without due dates at the end. Within assignments that have the same due date or no due date, sort by the numeric ID embedded in the assignment name (for example the 24295 in "CMA 24295") ascending.
 
-After the table, include a blank line, then a line showing "Total Assignments: N" where N is the count of all assignments, and another line showing "Total Points: X" where X is the sum of all point values rounded to 1 decimal place.
+After the table, include a blank line, then a line showing "Total Assignments: N" where N is the count of all assignments, and another line showing "Total Points: X" where X is the sum of all point values rounded to 1 decimal place. Each of these totals must appear on its own line together with its numeric value.
 
-Also create a page in the knowledge base with the title "CCC-2014J Assignment Overview" containing a summary of the course assignments. The page content should mention the course name, number of assignments, and total points available.
+Also create a page in the knowledge base with the title "CCC-2014J Assignment Overview" containing a summary of the course assignments. Use this exact phrase as the page title so it can be located by name later. The page content should mention the course name, number of assignments, and total points available.

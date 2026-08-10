@@ -144,7 +144,6 @@ done
 for dir in \
   /opt/local_servers/Calendar-Autoauth-MCP-Server \
   /opt/local_servers/google-forms-mcp \
-  /opt/local_servers/mcp-google-sheets \
   /opt/local_servers/youtube-mcp-server \
   /opt/local_servers/filesystem \
   /opt/local_servers/HowToCook-mcp \
@@ -229,6 +228,7 @@ for dir in \
   /opt/local_servers/excel-mcp-server \
   /opt/local_servers/pdf-tools-mcp \
   /opt/local_servers/mcp-youtube-transcript \
+  /opt/local_servers/mcp-google-sheets \
   /opt/local_servers/cli-mcp-server; do
   if [[ -f "$dir/pyproject.toml" ]]; then
     echo "=== uv lock/sync: $dir ==="

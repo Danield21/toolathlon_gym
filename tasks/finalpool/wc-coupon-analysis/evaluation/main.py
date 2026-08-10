@@ -29,6 +29,25 @@ def load_sheet_rows(wb, sheet_name):
     return None
 
 
+def _norm_header(h):
+    return str(h or "").strip().lower().replace(" ", "_")
+
+
+def _header_map(rows):
+    """Map normalized header text -> 0-based column index from row 1 of a sheet.
+    Lets checks locate columns by name regardless of column order."""
+    if not rows or not rows[0]:
+        return {}
+    return {_norm_header(h): i for i, h in enumerate(rows[0]) if _norm_header(h)}
+
+
+def _cell(row, idx):
+    """Safe cell access (None when idx out of range)."""
+    if row is None or idx is None:
+        return None
+    return row[idx] if idx < len(row) else None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -64,19 +83,18 @@ def main():
     elif g_rows is None:
         all_errors.append("Sheet 'Coupon Analysis' not found in groundtruth")
     else:
-        sheet_name = "Coupon Analysis"
         errors = []
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
-        
-        # Header check
-        if a_rows and a_rows[0]:
-            ah = [str(h or "").strip().lower().replace(" ", "_") for h in a_rows[0]]
-            expected = ["code", "discount_type", "amount", "usage_count", "usage_limit", "utilization_pct"]
-            for i, eh in enumerate(expected):
-                got = ah[i] if i < len(ah) else "MISSING"
-                if got != eh:
-                    errors.append(f"Coupon Analysis header[{i}]: expected '{eh}' got '{got}'")
+
+        # Required columns located by header name (order-independent).
+        REQ_COLS = ["code", "discount_type", "amount", "usage_count",
+                    "usage_limit", "utilization_pct"]
+        a_col = _header_map(a_rows)
+        g_col = _header_map(g_rows)
+        for cname in REQ_COLS:
+            if cname not in a_col:
+                errors.append(f"Coupon Analysis missing column '{cname}'")
 
         # Row count check
         if len(a_data) != len(g_data):
@@ -84,49 +102,61 @@ def main():
 
         a_lookup = {}
         for row in a_data:
-            if row and row[0] is not None:
-                a_lookup[str(row[0]).strip().lower()] = row
+            code_v = _cell(row, a_col.get("code", 0))
+            if code_v is not None:
+                a_lookup[str(code_v).strip().lower()] = row
         for g_row in g_data:
-            if not g_row or g_row[0] is None:
+            g_code = _cell(g_row, g_col.get("code", 0))
+            if g_code is None:
                 continue
-            key = str(g_row[0]).strip().lower()
+            key = str(g_code).strip().lower()
             a_row = a_lookup.get(key)
             if a_row is None:
-                errors.append(f"Missing row: {g_row[0]}")
+                errors.append(f"Missing row: {g_code}")
                 continue
-            # Discount_Type (col 1)
-            if len(a_row) > 1 and len(g_row) > 1:
-                if not str_match(a_row[1], g_row[1]):
-                    errors.append(f"{key}.Discount_Type: '{a_row[1]}' vs '{g_row[1]}'")
-            # Amount (col 2) tol 0
-            if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 0.1):
-                    errors.append(f"{key}.Amount: {a_row[2]} vs {g_row[2]}")
-            # Usage_Count (col 3) tol 0 (deterministic count)
-            if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 0):
-                    errors.append(f"{key}.Usage_Count: {a_row[3]} vs {g_row[3]}")
-            # Usage_Limit (col 4) — None or specific number
-            if len(a_row) > 4 and len(g_row) > 4:
-                if g_row[4] is None:
-                    if a_row[4] is not None and str(a_row[4]).strip() != "":
-                        # Allow "None"/"-"/"" for "no limit"
-                        try:
-                            if float(a_row[4]) != 0:
-                                errors.append(f"{key}.Usage_Limit: {a_row[4]} vs None (no limit)")
-                        except (TypeError, ValueError):
-                            pass  # accept string variants like "-", "None"
-                else:
-                    if not num_close(a_row[4], g_row[4], 0):
-                        errors.append(f"{key}.Usage_Limit: {a_row[4]} vs {g_row[4]}")
-            # Utilization_Pct (col 5) tol 0.2
-            if len(a_row) > 5 and len(g_row) > 5:
-                if not num_close(a_row[5], g_row[5], 0.2):
-                    errors.append(f"{key}.Utilization_Pct: {a_row[5]} vs {g_row[5]}")
+            # Discount_Type
+            av = _cell(a_row, a_col.get("discount_type"))
+            gv = _cell(g_row, g_col.get("discount_type"))
+            if av is not None and gv is not None and not str_match(av, gv):
+                errors.append(f"{key}.Discount_Type: '{av}' vs '{gv}'")
+            # Amount (tol 0.1)
+            av = _cell(a_row, a_col.get("amount"))
+            gv = _cell(g_row, g_col.get("amount"))
+            if av is not None and gv is not None and not num_close(av, gv, 0.1):
+                errors.append(f"{key}.Amount: {av} vs {gv}")
+            # Usage_Count (tol 0)
+            av = _cell(a_row, a_col.get("usage_count"))
+            gv = _cell(g_row, g_col.get("usage_count"))
+            if av is not None and gv is not None and not num_close(av, gv, 0):
+                errors.append(f"{key}.Usage_Count: {av} vs {gv}")
+            # Usage_Limit — None (no limit) or specific number
+            av = _cell(a_row, a_col.get("usage_limit"))
+            gv = _cell(g_row, g_col.get("usage_limit"))
+            if gv is None:
+                if av is not None and str(av).strip() != "":
+                    # Allow "None"/"-"/"" for "no limit"
+                    try:
+                        if float(av) != 0:
+                            errors.append(f"{key}.Usage_Limit: {av} vs None (no limit)")
+                    except (TypeError, ValueError):
+                        pass  # accept string variants like "-", "None"
+            else:
+                if av is not None and not num_close(av, gv, 0):
+                    errors.append(f"{key}.Usage_Limit: {av} vs {gv}")
+            # Utilization_Pct (tol 0.2)
+            av = _cell(a_row, a_col.get("utilization_pct"))
+            gv = _cell(g_row, g_col.get("utilization_pct"))
+            if av is not None and gv is not None and not num_close(av, gv, 0.2):
+                errors.append(f"{key}.Utilization_Pct: {av} vs {gv}")
 
-        # Sort: descending by Usage_Count
+        # Sort: descending by Usage_Count (resolve column by header name, not a
+        # fixed positional index, so a column reorder doesn't silently misread).
         try:
-            counts = [int(r[3]) if r[3] is not None else 0 for r in a_data]
+            uc_idx = a_col.get("usage_count")
+            counts = []
+            for r in a_data:
+                v = _cell(r, uc_idx) if uc_idx is not None else None
+                counts.append(int(float(v)) if v not in (None, "") else 0)
             if counts != sorted(counts, reverse=True):
                 errors.append(f"Coupon Analysis not sorted descending by Usage_Count: {counts}")
         except (TypeError, ValueError):

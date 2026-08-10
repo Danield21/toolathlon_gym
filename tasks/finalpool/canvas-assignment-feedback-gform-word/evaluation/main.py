@@ -1,5 +1,6 @@
 """Evaluation for canvas-assignment-feedback-gform-word."""
 import argparse
+import email.utils
 import json
 import os
 import re
@@ -7,8 +8,11 @@ import sys
 
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
-          dbname="toolathlon_gym", user="eigent", password="camel")
+DB = dict(host=os.environ.get("PGHOST", "localhost"),
+          port=int(os.environ.get("PGPORT", "5432")),
+          dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
+          user=os.environ.get("PGUSER", "eigent"),
+          password=os.environ.get("PGPASSWORD", "camel"))
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -25,11 +29,144 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}{detail_str}")
 
 
-def num_close(a, b, tol):
+def _to_float(s):
+    """Robust numeric parse: handles int/float/None, strips %, currency symbols,
+    thousands separators and whitespace. Returns None when unparseable."""
+    if s is None:
+        return None
+    if isinstance(s, bool):
+        return None
+    if isinstance(s, (int, float)):
+        return float(s)
+    t = str(s).strip()
+    if not t:
+        return None
+    t = re.sub(r'[^\d.+\-]', '', t.replace(',', ''))
+    if not t:
+        return None
     try:
-        return abs(float(a) - float(b)) <= tol
-    except (TypeError, ValueError):
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _to_int(s):
+    f = _to_float(s)
+    return int(f) if f is not None else None
+
+
+def num_close(a, b, tol):
+    fa = _to_float(a)
+    fb = _to_float(b)
+    if fa is None or fb is None:
         return False
+    return abs(fa - fb) <= tol
+
+
+def _load_email_config():
+    """Derive the expected From address from this task's email_config.json (R7)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    task_dir = os.path.dirname(here)  # evaluation/ -> task root
+    cfg_path = os.path.join(task_dir, "email_config.json")
+    email = "analytics@university.example.com"
+    if os.path.isfile(cfg_path):
+        try:
+            with open(cfg_path) as f:
+                cfg = json.load(f)
+            email = cfg.get("email") or email
+        except Exception:
+            pass
+    return email
+
+
+def _from_matches(from_addr, expected_email):
+    """True when the stored From header carries the expected email address,
+    tolerating a display name prefix (e.g. 'Analytics Team <...>')."""
+    if not from_addr:
+        return False
+    s = str(from_addr).strip()
+    if not s:
+        return False
+    _, addr = email.utils.parseaddr(s)
+    if addr and addr.lower() == expected_email.lower():
+        return True
+    if expected_email.lower() in s.lower():
+        return True
+    return False
+
+
+def _norm_alpha(s):
+    """Lowercase and strip all non-alphanumeric chars, for tolerant name/title
+    matching (handles 'CMA 34879' vs 'CMA34879', en/em dashes, etc.)."""
+    return re.sub(r'[^a-z0-9]', '', (s or "").lower())
+
+
+def _extract_address(addr):
+    """Return the bare email address from a possibly display-name-qualified
+    string (e.g. 'Instructor <instructor@...>' -> 'instructor@...')."""
+    if not addr:
+        return ""
+    s = str(addr).strip()
+    if not s:
+        return ""
+    _, parsed = email.utils.parseaddr(s)
+    return (parsed or s).strip()
+
+
+def _recipient_in(to_addr, target):
+    """True when any recipient element in to_addr matches target address,
+    tolerating display-name forms like 'Instructor <instructor@...>'."""
+    t = target.lower()
+    if to_addr is None:
+        return False
+    elems = []
+    if isinstance(to_addr, list):
+        elems = [str(r) for r in to_addr]
+    elif isinstance(to_addr, str):
+        try:
+            parsed = json.loads(to_addr)
+            if isinstance(parsed, list):
+                elems = [str(r) for r in parsed]
+            else:
+                elems = [to_addr]
+        except (json.JSONDecodeError, TypeError):
+            elems = [to_addr]
+    for e in elems:
+        a = _extract_address(e).lower()
+        if a == t or t in a:
+            return True
+    return False
+
+
+_NUM_WORDS = {
+    0: "zero", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+    7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve",
+    13: "thirteen", 14: "fourteen", 15: "fifteen", 16: "sixteen", 17: "seventeen",
+    18: "eighteen", 19: "nineteen", 20: "twenty", 30: "thirty", 40: "forty",
+    50: "fifty", 60: "sixty", 70: "seventy", 80: "eighty", 90: "ninety",
+}
+
+
+def _num_word(n):
+    """English word form for small integers (12 -> 'twelve'); None if unsupported."""
+    if n in _NUM_WORDS:
+        return _NUM_WORDS[n]
+    if 21 <= n < 100:
+        t = (n // 10) * 10
+        o = n % 10
+        return _NUM_WORDS[t] + ("-" + _NUM_WORDS[o] if o else "")
+    return None
+
+
+def _mentions_number(body, expected_val, tol=0.01):
+    """True when body contains a number numerically close to expected_val."""
+    if expected_val is None or not body:
+        return False
+    for m in re.finditer(r'\d+(?:[.,]\d+)?', str(body)):
+        v = _to_float(m.group(0))
+        if v is not None and abs(v - expected_val) <= tol:
+            return True
+    return False
 
 
 def _fetch_expected_from_db():
@@ -103,14 +240,14 @@ def check_word(agent_workspace, expected):
                       "All expected assignments present with correct numeric values",
                       "Rows are sorted alphabetically by Assignment_Name"]:
             check(label, False, "Word file missing")
-        return
+        return None
     check("Word file exists", True)
 
     try:
         doc = Document(agent_file)
     except Exception as e:
         check("Word file readable", False, str(e))
-        return
+        return None
 
     # Check title
     full_text = "\n".join(p.text for p in doc.paragraphs)
@@ -125,7 +262,7 @@ def check_word(agent_workspace, expected):
     # Find table
     if not doc.tables:
         check("Document has at least one table", False, "no table found")
-        return
+        return None
     check("Document has at least one table", True)
 
     tbl = doc.tables[0]
@@ -133,7 +270,7 @@ def check_word(agent_workspace, expected):
     # Check headers (exact normalized match)
     if not tbl.rows:
         check("Table has rows", False, "Empty table")
-        return
+        return None
 
     headers = [c.text.strip() for c in tbl.rows[0].cells]
     headers_norm = [_norm_header(h) for h in headers]
@@ -162,14 +299,16 @@ def check_word(agent_workspace, expected):
     # Check rows
     data_rows = list(tbl.rows)[1:]
     expected_count = len(expected)
-    # DB query already filters HAVING COUNT > 0, so row count must equal expected_count
+    # DB query filters HAVING COUNT > 0 (the Final Exam has 0 submissions). An agent
+    # following "include all assignments" may still add that 0-submission row, so
+    # require at least expected_count rows instead of an exact match.
     check("Table has expected number of data rows",
-          len(data_rows) == expected_count,
-          f"Found {len(data_rows)} rows, expected {expected_count}")
+          len(data_rows) >= expected_count,
+          f"Found {len(data_rows)} rows, expected at least {expected_count}")
 
     # Build row map by name
     expected_by_name = {a[0].strip().lower(): a for a in expected}
-    found_count = 0
+    matched_names = set()
     bad_values = []
     for row in data_rows:
         if not row.cells:
@@ -179,23 +318,11 @@ def check_word(agent_workspace, expected):
         if ekey not in expected_by_name:
             continue  # could be the optional zero-submission row
         e_name, e_total, e_avg, e_late, e_rate = expected_by_name[ekey]
-        # Read agent values
-        try:
-            a_total = int(re.sub(r'[^\d-]', '', row.cells[col_total_idx].text)) if col_total_idx is not None else None
-        except Exception:
-            a_total = None
-        try:
-            a_avg = float(re.sub(r'[^\d.\-]', '', row.cells[col_avg_idx].text)) if col_avg_idx is not None else None
-        except Exception:
-            a_avg = None
-        try:
-            a_late = int(re.sub(r'[^\d-]', '', row.cells[col_late_idx].text)) if col_late_idx is not None else None
-        except Exception:
-            a_late = None
-        try:
-            a_rate = float(re.sub(r'[^\d.\-]', '', row.cells[col_rate_idx].text)) if col_rate_idx is not None else None
-        except Exception:
-            a_rate = None
+        # Read agent values (robust parse of %, thousands separators, currency)
+        a_total = _to_int(row.cells[col_total_idx].text) if col_total_idx is not None else None
+        a_avg = _to_float(row.cells[col_avg_idx].text) if col_avg_idx is not None else None
+        a_late = _to_int(row.cells[col_late_idx].text) if col_late_idx is not None else None
+        a_rate = _to_float(row.cells[col_rate_idx].text) if col_rate_idx is not None else None
 
         ok = True
         if a_total is None or a_total != e_total:
@@ -211,21 +338,34 @@ def check_word(agent_workspace, expected):
         elif a_rate is None or not num_close(a_rate, e_rate, 0.05):
             ok = False
         if ok:
-            found_count += 1
+            matched_names.add(ekey)
         else:
             bad_values.append((name, (a_total, a_avg, a_late, a_rate),
                                (e_total, e_avg, e_late, e_rate)))
 
+    # Set-based: every expected assignment must appear at least once with correct
+    # values. Duplicate rows (e.g. from multi-agent writes) don't inflate the count.
     check("All expected assignments present with correct numeric values",
-          found_count == expected_count,
-          f"matched={found_count}/{expected_count}, bad={bad_values[:3]}")
+          len(matched_names) == expected_count,
+          f"matched={len(matched_names)}/{expected_count}, bad={bad_values[:3]}")
 
-    # Sort check (alphabetical by name)
-    names_in_order = [r.cells[col_name_idx].text.strip() for r in data_rows]
-    sorted_names = sorted(names_in_order, key=lambda s: s.lower())
+    # Sort check (alphabetical by name) over the rows that carry an expected
+    # assignment name. Empty trailing rows and non-data rows (common python-docx
+    # artifacts, or the optional zero-submission row) are ignored so they cannot
+    # break the ordering check.
+    data_names = []
+    for r in data_rows:
+        if not r.cells:
+            continue
+        nm = r.cells[col_name_idx].text.strip()
+        if nm and nm.lower() in expected_by_name:
+            data_names.append(nm)
+    sorted_data_names = sorted(data_names, key=lambda s: s.lower())
     check("Rows are sorted alphabetically by Assignment_Name",
-          names_in_order == sorted_names,
-          f"Order: {names_in_order[:5]}")
+          data_names == sorted_data_names,
+          f"Order: {data_names[:5]}")
+
+    return len(data_rows)
 
 
 def check_gform():
@@ -234,7 +374,7 @@ def check_gform():
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
-        cur.execute("SELECT id, title FROM gform.forms")
+        cur.execute("SELECT id, title FROM gform.forms ORDER BY created_at, id")
         forms = cur.fetchall()
     except Exception as e:
         check("GForm DB query OK", False, str(e))
@@ -243,24 +383,33 @@ def check_gform():
     check("At least one form created", len(forms) >= 1, f"Found {len(forms)} forms")
 
     expected_title = "foundations of finance - assignment feedback survey"
-    matching_form = None
-    for fid, title in forms:
-        if (title or "").strip().lower() == expected_title:
-            matching_form = (fid, title)
-            break
+    expected_norm = _norm_alpha(expected_title)
+    # Tolerant title match (dashes/spacing/case-insensitive). An agent may have
+    # created a same-titled abandoned form before the real one, so consider ALL
+    # matching forms below.
+    matching_forms = [(fid, title) for fid, title in forms
+                      if _norm_alpha(title) == expected_norm]
 
     check("Form title matches 'Foundations of Finance - Assignment Feedback Survey' exactly",
-          matching_form is not None,
-          f"Forms: {[(f[1] if len(f) > 1 else None) for f in forms]}")
+          len(matching_forms) >= 1,
+          f"Forms: {[t for _, t in forms]}")
 
-    if matching_form:
-        form_id = matching_form[0]
-        try:
-            cur.execute("SELECT COUNT(*) FROM gform.questions WHERE form_id = %s", (form_id,))
-            q_count = cur.fetchone()[0]
-        except Exception:
-            q_count = 0
-        check("Form has exactly 5 questions", q_count == 5, f"Found {q_count} questions")
+    if matching_forms:
+        # The delivered survey is complete if ANY matching form carries exactly
+        # 5 questions; an abandoned/re-created incomplete form must not penalise
+        # a correct agent that also delivered a complete form.
+        q_ok = False
+        for fid, _title in matching_forms:
+            try:
+                cur.execute("SELECT COUNT(*) FROM gform.questions WHERE form_id = %s", (fid,))
+                q_count = cur.fetchone()[0]
+            except Exception:
+                q_count = 0
+            if q_count == 5:
+                q_ok = True
+                break
+        check("Form has exactly 5 questions", q_ok,
+              f"Matched forms: {[t for _, t in matching_forms]}")
 
     try:
         cur.close()
@@ -269,40 +418,24 @@ def check_gform():
         pass
 
 
-def check_emails(expected):
+def check_emails(expected, doc_rows=None):
     """Check that summary email was sent."""
     print("\n=== Checking Emails ===")
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
-        cur.execute("SELECT subject, from_addr, to_addr, body_text FROM email.messages")
+        cur.execute("SELECT id, subject, from_addr, to_addr, body_text "
+                    "FROM email.messages ORDER BY id")
         all_emails = cur.fetchall()
         conn.close()
     except Exception as e:
         check("Emails DB query OK", False, str(e))
         return
 
-    def find_email_for_recipient(recipient):
-        for subj, from_addr, to_addr, body in all_emails:
-            if to_addr:
-                recipients = []
-                if isinstance(to_addr, list):
-                    recipients = [str(r).strip().lower() for r in to_addr]
-                elif isinstance(to_addr, str):
-                    try:
-                        parsed = json.loads(to_addr)
-                        if isinstance(parsed, list):
-                            recipients = [str(r).strip().lower() for r in parsed]
-                        else:
-                            recipients = [str(to_addr).strip().lower()]
-                    except (json.JSONDecodeError, TypeError):
-                        recipients = [str(to_addr).strip().lower()]
-                if recipient.lower() in recipients:
-                    return subj, from_addr, to_addr, body
-        return None
-
-    result = find_email_for_recipient("instructor@financeou.example.com")
-    check("Summary email sent to instructor@financeou.example.com", result is not None,
+    target = "instructor@financeou.example.com"
+    # Recipient match tolerates display-name forms like 'Instructor <instructor@...>'.
+    emails_to = [e for e in all_emails if _recipient_in(e[3], target)]
+    check(f"Summary email sent to {target}", len(emails_to) >= 1,
           f"Total emails found: {len(all_emails)}")
 
     # Compute expected highlights
@@ -316,42 +449,78 @@ def check_emails(expected):
         top_avg = None
         top_late = None
 
-    if not result:
+    if not emails_to:
         for label in ["Email subject exact match", "Email from analytics",
                       "Email mentions count of assignments", "Email mentions highest-avg assignment",
                       "Email mentions most-late assignment", "Email contains form link"]:
             check(label, False, "no email")
         return
 
-    subj, from_addr, to_addr, body = result
     expected_subject = "Assignment Analysis Report - Foundations of Finance (Fall 2013)"
-    check("Email subject exact match",
-          (subj or "").strip().lower() == expected_subject.lower(),
-          f"Subject: {subj!r}, expected: {expected_subject!r}")
 
-    check("Email from analytics@university.example.com",
-          (from_addr or "").strip().lower() == "analytics@university.example.com",
+    def _subject_matches(subj):
+        return (subj or "").strip().lower() == expected_subject.lower()
+
+    # An agent may have sent a test/retry email first; require that SOME email to
+    # the recipient carries the exact expected subject (the summary report).
+    subject_ok = any(_subject_matches(e[1]) for e in emails_to)
+    check("Email subject exact match", subject_ok,
+          f"Subjects: {[e[1] for e in emails_to]}")
+
+    # Evaluate body/from checks on the summary email: prefer the latest email to
+    # the recipient with the expected subject, else the latest email to the
+    # recipient (rows are ordered by id).
+    primary = None
+    with_subject = [e for e in emails_to if _subject_matches(e[1])]
+    if with_subject:
+        primary = with_subject[-1]
+    else:
+        primary = emails_to[-1]
+
+    _pid, subj, from_addr, to_addr, body = primary
+    expected_from = _load_email_config()
+    check(f"Email from {expected_from}",
+          _from_matches(from_addr, expected_from),
           f"From: {from_addr}")
 
     body_lower = (body or "").lower()
     n = len(expected)
     body_clean = re.sub(r'\s+', ' ', body_lower)
-    has_count = re.search(r'\b' + str(n) + r'\b', body_clean) is not None
+    # Accept the expected count, the count actually written into the Word doc, and
+    # the all-assignments count (expected + the optional 0-submission row). Also
+    # accept English word forms of the number (e.g. 'twelve assignments').
+    accepted_counts = {n, n + 1}
+    if doc_rows is not None:
+        accepted_counts.add(doc_rows)
+    count_alts = []
+    for c in sorted(accepted_counts):
+        count_alts.append(str(c))
+        w = _num_word(c)
+        if w:
+            count_alts.append(w.replace("-", r"[-\s]"))
+    count_pat = r'\b(?:' + '|'.join(count_alts) + r')\b'
+    has_count = re.search(count_pat, body_clean) is not None
     check(f"Email mentions count of {n} assignments", has_count, f"Body[:200]: {body_lower[:200]}")
 
     if top_avg:
-        # require both name (full) and the avg score
-        has_top_avg = top_avg[0].lower() in body_lower
+        # mention the assignment: tolerant name match (whitespace/punctuation-free)
+        # or the unique avg-score value for that assignment.
+        name_ok = _norm_alpha(top_avg[0]) in _norm_alpha(body)
+        val_ok = _mentions_number(body, top_avg[2])
+        has_top_avg = name_ok or val_ok
         check(f"Email mentions highest-avg assignment ({top_avg[0]})",
               has_top_avg, f"Body[:200]: {body_lower[:200]}")
     if top_late:
-        has_top_late = top_late[0].lower() in body_lower
+        name_ok = _norm_alpha(top_late[0]) in _norm_alpha(body)
+        val_ok = _mentions_number(body, top_late[3])
+        has_top_late = name_ok or val_ok
         check(f"Email mentions most-late assignment ({top_late[0]})",
               has_top_late, f"Body[:200]: {body_lower[:200]}")
 
-    # Form link check: should have the form URL or a UUID-style id
+    # Form link check: should have the form URL or a UUID-style id, mentioned as
+    # a form/survey link.
     has_form_link = (
-        "form" in body_lower and
+        ("form" in body_lower or "survey" in body_lower) and
         (re.search(r'https?://[^\s]+', body or "") is not None or
          re.search(r'\b[a-f0-9-]{16,}\b', body or "") is not None)
     )
@@ -374,9 +543,9 @@ def main():
     expected = _fetch_expected_from_db() or EXPECTED_ASSIGNMENTS_FALLBACK
     print(f"\nExpected {len(expected)} assignments from DB.")
 
-    check_word(args.agent_workspace, expected)
+    doc_rows = check_word(args.agent_workspace, expected)
     check_gform()
-    check_emails(expected)
+    check_emails(expected, doc_rows)
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

@@ -3,6 +3,7 @@
 
 import os
 import shutil
+import json
 from argparse import ArgumentParser
 from pathlib import Path
 
@@ -38,6 +39,64 @@ def clear_writable_schemas():
     cur.close(); conn.close()
 
 
+def seed_publications():
+    papers = json.loads(
+        (TASK_ROOT / "files" / "research_papers.json").read_text(encoding="utf-8")
+    )
+    if len(papers) < 10:
+        raise ValueError("research publication seed must contain at least 10 papers")
+    conn = psycopg2.connect(**DB)
+    cur = conn.cursor()
+    try:
+        cur.execute("DELETE FROM arxiv_latex.papers")
+        cur.execute("DELETE FROM arxiv.papers")
+        for paper in papers:
+            pdf_url = f"https://arxiv.org/pdf/{paper['id']}"
+            cur.execute(
+                """
+                INSERT INTO arxiv.papers
+                    (id, title, authors, summary, categories, primary_category,
+                     published, updated, pdf_url, links, markdown_content,
+                     is_downloaded)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE)
+                """,
+                (
+                    paper["id"],
+                    paper["title"],
+                    json.dumps(paper["authors"]),
+                    paper["abstract"],
+                    json.dumps(paper["categories"]),
+                    paper["categories"][0],
+                    paper["published"],
+                    paper["published"],
+                    pdf_url,
+                    json.dumps([{"href": pdf_url, "type": "application/pdf"}]),
+                    paper["full_prompt"],
+                ),
+            )
+            cur.execute(
+                """
+                INSERT INTO arxiv_latex.papers
+                    (id, title, abstract, full_prompt, sections)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    paper["id"],
+                    paper["title"],
+                    paper["abstract"],
+                    paper["full_prompt"],
+                    json.dumps(paper["sections"]),
+                ),
+            )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        conn.close()
+
+
 def main():
     parser = ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -45,6 +104,7 @@ def main():
     args = parser.parse_args()
 
     clear_writable_schemas()
+    seed_publications()
 
     if args.agent_workspace:
         agent_ws = Path(args.agent_workspace)
@@ -55,7 +115,7 @@ def main():
             if item.is_file() and not dst.exists():
                 shutil.copy(item, dst)
 
-    print("Preprocess completed successfully")
+    print("Preprocess completed successfully with seeded arXiv publications")
 
 
 if __name__ == "__main__":

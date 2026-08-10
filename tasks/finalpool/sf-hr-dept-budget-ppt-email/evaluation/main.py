@@ -83,6 +83,19 @@ def check_excel(agent_workspace, gt_dir):
         a_data = [r for r in (a_rows[1:] if len(a_rows) > 1 else []) if r and r[0] is not None]
         g_data = [r for r in (g_rows[1:] if g_rows and len(g_rows) > 1 else []) if r and r[0] is not None]
 
+        # Header check (order-independent): all expected columns must be present.
+        expected_headers = [
+            "Department", "Headcount", "Budget", "Location", "Budget_Per_Employee",
+        ]
+        actual_headers = [str(c or "").strip() for c in (a_rows[0] if a_rows else [])]
+        header_lower = [h.lower() for h in actual_headers]
+        missing_headers = [h for h in expected_headers if h.lower() not in header_lower]
+        if missing_headers:
+            errors.append(f"Department Summary missing headers: {missing_headers}; found {actual_headers}")
+        # Map expected columns to the agent's column indices by header name so
+        # the column order in the output does not matter.
+        a_col = {h.lower(): i for i, h in enumerate(actual_headers)}
+
         if len(a_data) < 7:
             errors.append(f"Department Summary: expected 7 data rows, got {len(a_data)}")
         else:
@@ -97,14 +110,17 @@ def check_excel(agent_workspace, gt_dir):
                 exp_headcount = (dept_expected or {}).get(key, {}).get("headcount", g_row[1]) if dept_expected else g_row[1]
                 exp_budget = (dept_expected or {}).get(key, {}).get("budget", g_row[2]) if dept_expected else g_row[2]
                 # Headcount exact int
-                if len(a_row) > 1 and not num_close(a_row[1], exp_headcount, 0):
-                    errors.append(f"{g_row[0]} Headcount: got {a_row[1]}, expected {exp_headcount}")
+                hc_i = a_col.get("headcount")
+                if hc_i is not None and hc_i < len(a_row) and not num_close(a_row[hc_i], exp_headcount, 0):
+                    errors.append(f"{g_row[0]} Headcount: got {a_row[hc_i]}, expected {exp_headcount}")
                 # Budget tol=1 (rounded to 2 decimals in source)
-                if len(a_row) > 2 and not num_close(a_row[2], exp_budget, 1.0):
-                    errors.append(f"{g_row[0]} Budget: got {a_row[2]}, expected {exp_budget}")
-                # Budget_Per_Employee col 4 - tol=1
-                if len(a_row) > 4 and not num_close(a_row[4], g_row[4], 1.0):
-                    errors.append(f"{g_row[0]} Budget_Per_Employee: got {a_row[4]}, expected {g_row[4]}")
+                bud_i = a_col.get("budget")
+                if bud_i is not None and bud_i < len(a_row) and not num_close(a_row[bud_i], exp_budget, 1.0):
+                    errors.append(f"{g_row[0]} Budget: got {a_row[bud_i]}, expected {exp_budget}")
+                # Budget_Per_Employee (GT col 4) - tol=1
+                bpe_i = a_col.get("budget_per_employee")
+                if bpe_i is not None and bpe_i < len(a_row) and 4 < len(g_row) and not num_close(a_row[bpe_i], g_row[4], 1.0):
+                    errors.append(f"{g_row[0]} Budget_Per_Employee: got {a_row[bpe_i]}, expected {g_row[4]}")
 
     # Check Summary sheet
     a_sum = load_sheet_rows(agent_wb, "Summary")
@@ -145,10 +161,13 @@ def check_excel(agent_workspace, gt_dir):
             errors.append(f"Highest_Budget_Dept: got '{hbd}', expected '{exp_top_dept}'")
 
         # Avg_Budget_Per_Employee validation (if present)
+        # tol=25: task.md now defines this as Total_Budget / Total_Headcount, but a
+        # model may legitimately compute the average of the per-department
+        # Budget_Per_Employee values instead (differs by ~13 on this dataset).
         abpe = a_sum_data.get("avg_budget_per_employee")
         if abpe is not None and exp_tot_hc > 0:
             expected_avg = exp_tot_bud / exp_tot_hc
-            if not num_close(abpe, expected_avg, 10.0):
+            if not num_close(abpe, expected_avg, 25.0):
                 errors.append(f"Avg_Budget_Per_Employee: got {abpe}, expected ~{expected_avg:.2f}")
 
     return errors
@@ -172,7 +191,12 @@ def check_pptx(agent_workspace):
                 if shape.has_text_frame:
                     all_text += " " + shape.text_frame.text
         all_text_lower = all_text.lower()
-        for dept in ["engineering", "finance", "hr", "operations", "r&d", "sales", "support"]:
+        # Department names must match the data source verbatim (e.g. "HR", "R&D");
+        # pull the actual names from the warehouse so rephrased/expanded names fail.
+        dept_names = list((_fetch_dept_expected() or {}).keys())
+        if not dept_names:
+            dept_names = ["engineering", "finance", "hr", "operations", "r&d", "sales", "support"]
+        for dept in dept_names:
             if dept not in all_text_lower:
                 errors.append(f"PPTX missing department: {dept}")
     except ImportError:
@@ -206,6 +230,42 @@ def check_gsheet():
             row_count = cur.fetchone()[0]
             if row_count < 7:
                 errors.append(f"HR Department Tracker has only {row_count} data rows, expected at least 7")
+            else:
+                # Verify the sheet actually contains the department data (not just
+                # a title + empty rows). Pull every cell value and check that the
+                # expected department names + headcounts (derived from the live DB)
+                # appear among the cells.
+                cur.execute("""
+                    SELECT c.value FROM gsheet.cells c
+                    WHERE c.spreadsheet_id = %s AND c.row_index > 0
+                """, (ss_id,))
+                cell_values = [str(r[0]) for r in cur.fetchall() if r[0] is not None]
+                cell_blob = " ".join(cell_values).lower()
+                cur.execute('''
+                    SELECT "DEPARTMENT", COUNT(*)
+                    FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES"
+                    GROUP BY "DEPARTMENT"
+                ''')
+                dept_rows = cur.fetchall()
+                # Require every department name to be present; headcount check is
+                # best-effort (at least half of the headcount values must appear).
+                missing_depts = [
+                    d for (d, _) in dept_rows
+                    if str(d).strip().lower() not in cell_blob
+                ]
+                if missing_depts:
+                    errors.append(
+                        f"HR Department Tracker missing department names in cells: {missing_depts}"
+                    )
+                headcount_hits = 0
+                for _, hc in dept_rows:
+                    if str(int(hc)) in cell_values or f"{int(hc):,}" in cell_values:
+                        headcount_hits += 1
+                if dept_rows and headcount_hits < (len(dept_rows) + 1) // 2:
+                    errors.append(
+                        f"HR Department Tracker cells do not contain enough department "
+                        f"headcount values ({headcount_hits}/{len(dept_rows)} found)"
+                    )
         cur.close()
         conn.close()
     except Exception as e:

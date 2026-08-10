@@ -16,9 +16,28 @@ from datetime import datetime
 from docx import Document
 from pptx import Presentation
 
-def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
-    return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
 
+def _norm(s):
+    """Lowercase and strip spaces/hyphens/underscores for fuzzy matching."""
+    return re.sub(r"[\s\-_]+", "", s.lower())
+
+
+def text_contains_mention(text, mention):
+    """Case-insensitive presence check that tolerates common writing variants.
+
+    In addition to a plain substring check, this accepts:
+      - hyphen/space variants ("chain-of-thought" vs "chain of thought"),
+      - the standard "ToT" abbreviation for "tree of thoughts" (word-bounded so
+        "total"/"totally" do not falsely match).
+    """
+    if mention.lower() in text:
+        return True
+    nm = _norm(mention)
+    if nm and nm in _norm(text):
+        return True
+    if mention.lower() == "tree of thoughts" and re.search(r"\btot\b", text):
+        return True
+    return False
 
 
 def check_word_doc(agent_workspace, gt_data):
@@ -45,87 +64,178 @@ def check_word_doc(agent_workspace, gt_data):
 
     doc = Document(doc_path)
 
-    # Extract all text and headings
+    # Extract text from paragraphs (tracking heading-style paragraphs and
+    # short/bold candidate headings for robustness) AND from all table cells.
     all_text = []
-    headings_found = []
+    headings_found = []   # paragraphs that use a Heading paragraph style
+    short_paras = []      # short standalone paragraphs (heading fallback candidates)
+    bold_paras = []       # paragraphs that are entirely bold (heading fallback candidates)
     for para in doc.paragraphs:
+        txt = para.text.strip()
         all_text.append(para.text)
+        if not txt:
+            continue
         if para.style and para.style.name and "Heading" in para.style.name:
-            headings_found.append(para.text.strip())
+            headings_found.append(txt)
+        else:
+            is_bold = bool(para.runs) and all((r.bold or not r.text.strip()) for r in para.runs)
+            if is_bold:
+                bold_paras.append(txt)
+            if len(txt) <= 60:
+                short_paras.append(txt)
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                all_text.append(cell.text)
 
     full_text = " ".join(all_text).lower()
 
-    # Check required headings
+    # Check required headings. A heading counts as present if:
+    #   1) a Heading-styled paragraph contains it (case-insensitive), OR
+    #   2) a short standalone paragraph contains it (case-insensitive), OR
+    #   3) a bold paragraph contains it (case-insensitive).
+    # This accepts python-docx Heading styles, bold-plain-paragraph headings,
+    # and plain-text headings that carry a numbering prefix ("1. Introduction")
+    # or a slightly extended title ("Introduction to LLM Reasoning").
     required_headings = gt_data["review_doc"]["required_headings"]
     for heading in required_headings:
         total += 1
-        found = any(heading.lower() in h.lower() for h in headings_found)
+        hl = heading.lower()
+        found = any(hl in h.lower() for h in headings_found)
+        if not found:
+            found = any(hl in h.lower() for h in short_paras)
+        if not found:
+            found = any(hl in h.lower() for h in bold_paras)
         if found:
             passed += 1
             print(f"  PASS: Heading '{heading}' found")
         else:
-            print(f"  FAIL: Heading '{heading}' not found. Found headings: {headings_found}")
+            print(f"  FAIL: Heading '{heading}' not found. Styled headings: {headings_found}")
 
-    # Check summary table (CRITICAL: exact row count)
-    total += 1
+    # Locate the summary table by matching its header row against the required
+    # columns (with synonym support), instead of assuming it is tables[0]. This
+    # is robust to other tables appearing earlier in the document.
     tables = doc.tables
-    if len(tables) == 0:
-        print("  FAIL: No tables found in document [CRITICAL]")
-        critical_failed += 1
-    else:
-        table = tables[0]
-        # Check row count (header + data rows)
-        expected_data_rows = gt_data["review_doc"]["required_table_rows"]
-        # Count non-empty data rows
-        data_rows = 0
-        for row in table.rows[1:]:  # skip header
+    expected_cols = [c.lower() for c in gt_data["review_doc"]["required_table_columns"]]
+    synonyms = {
+        "title": ["paper", "name", "title"],
+        "method": ["approach", "technique", "method"],
+        "contribution": ["contribution", "key", "main"],
+        "finding": ["result", "outcome", "finding"],
+        "author": ["author"],
+        "year": ["year", "date"],
+    }
+
+    def col_matches(expected_col, header_cells):
+        if any(expected_col in hc for hc in header_cells):
+            return True
+        for keyword, syns in synonyms.items():
+            if keyword in expected_col:
+                if any(any(s in hc for s in syns) for hc in header_cells):
+                    return True
+        return False
+
+    def count_non_empty(rows):
+        n = 0
+        for row in rows:
             cell_text = " ".join(cell.text.strip() for cell in row.cells)
             if cell_text.strip():
-                data_rows += 1
+                n += 1
+        return n
 
-        # task.md requires exactly N rows (CRITICAL)
-        if data_rows == expected_data_rows:
-            passed += 1
-            print(f"  PASS: Summary table has exactly {data_rows} data rows (expected == {expected_data_rows})")
-        else:
-            print(f"  FAIL: Summary table has {data_rows} data rows (expected == {expected_data_rows}) [CRITICAL]")
-            critical_failed += 1
+    def looks_like_header(row):
+        """True if the row is a column-header row rather than a data row.
 
-    # Check table columns (with synonym support)
-    total += 1
-    if len(tables) > 0:
-        header_cells = [cell.text.strip().lower() for cell in tables[0].rows[0].cells]
-        expected_cols = [c.lower() for c in gt_data["review_doc"]["required_table_columns"]]
-        synonyms = {
-            "title": ["paper", "name"],
-            "method": ["approach", "technique"],
-            "contribution": ["contribution", "key", "main"],
-            "finding": ["result", "outcome", "finding"],
-            "author": ["author"],
-            "year": ["year", "date"],
-        }
-        def col_matches(expected_col, header_cells):
-            if any(expected_col in hc for hc in header_cells):
-                return True
-            for keyword, syns in synonyms.items():
-                if keyword in expected_col:
-                    if any(any(s in hc for s in syns) for hc in header_cells):
-                        return True
+        A header row matches at least 2 required columns (via synonyms) AND
+        does not itself look like paper data (no 4-digit year cell, no long
+        paper-title cell). This keeps a no-header table whose first data row
+        happens to contain column-like words (e.g. a method cell "Method: CoT",
+        a title cell "Paper: X") from being misread as a header row, which
+        would otherwise undercount its data rows.
+        """
+        cells = [cell.text.strip().lower() for cell in row.cells]
+        score = sum(1 for ec in expected_cols if col_matches(ec, cells))
+        if score < 2:
             return False
-        cols_found = sum(1 for ec in expected_cols if col_matches(ec, header_cells))
-        if cols_found >= len(expected_cols):
-            passed += 1
-            print(f"  PASS: All {len(expected_cols)} required table columns found")
+        if any(re.match(r'^\s*(19|20)\d{2}\s*$', c) for c in cells):
+            return False
+        if any(len(c) > 40 for c in cells):
+            return False
+        return True
+
+    # Locate the summary table. For each table decide whether its first row is
+    # a header or already paper data; derive the data-row count under that
+    # interpretation. Prefer the table whose data-row count equals the expected
+    # count; among ties, prefer more column matches, then header tables. This
+    # accepts both header-row tables and no-header tables, and tolerates other
+    # tables appearing elsewhere in the document.
+    best_table = None
+    best_data_rows = None
+    best_col_score = -1
+    best_has_header = False
+    expected_data_rows = gt_data["review_doc"]["required_table_rows"]
+    for table in tables:
+        if len(table.rows) == 0:
+            continue
+        has_header = looks_like_header(table.rows[0])
+        if has_header:
+            header_cells = [cell.text.strip().lower() for cell in table.rows[0].cells]
+            data_rows = count_non_empty(table.rows[1:])
+            col_score = sum(1 for ec in expected_cols if col_matches(ec, header_cells))
         else:
-            print(f"  FAIL: Only {cols_found}/{len(expected_cols)} required columns found. Headers: {header_cells}")
+            data_rows = count_non_empty(table.rows)
+            col_score = 0
+        key = (data_rows == expected_data_rows, col_score, has_header)
+        if best_table is None or key > (best_data_rows == expected_data_rows, best_col_score, best_has_header):
+            best_table = table
+            best_data_rows = data_rows
+            best_col_score = col_score
+            best_has_header = has_header
+
+    # Check summary table (CRITICAL: exact data row count and required width).
+    total += 1
+    if best_table is None:
+        print("  FAIL: No table found in document [CRITICAL]")
+        critical_failed += 1
+    elif len(best_table.columns) < len(expected_cols):
+        print(f"  FAIL: Summary table has {len(best_table.columns)} columns (expected >= {len(expected_cols)}) [CRITICAL]")
+        critical_failed += 1
+    elif best_data_rows == expected_data_rows:
+        passed += 1
+        print(f"  PASS: Summary table has exactly {expected_data_rows} data rows")
+    else:
+        print(f"  FAIL: Summary table has {best_data_rows} data rows (expected == {expected_data_rows}) [CRITICAL]")
+        critical_failed += 1
+
+    # Check table columns against the located table. For a header table, verify
+    # the header text matches the required columns (with synonyms). For a
+    # no-header table, verify the table is at least as wide as the required
+    # columns.
+    total += 1
+    if best_table is not None:
+        if best_has_header:
+            header_cells = [cell.text.strip().lower() for cell in best_table.rows[0].cells]
+            cols_found = sum(1 for ec in expected_cols if col_matches(ec, header_cells))
+            if cols_found >= len(expected_cols):
+                passed += 1
+                print(f"  PASS: All {len(expected_cols)} required table columns found")
+            else:
+                print(f"  FAIL: Only {cols_found}/{len(expected_cols)} required columns found. Headers: {header_cells}")
+        else:
+            if len(best_table.columns) >= len(expected_cols):
+                passed += 1
+                print(f"  PASS: No-header table has {len(best_table.columns)} columns (>= {len(expected_cols)})")
+            else:
+                print(f"  FAIL: No-header table has {len(best_table.columns)} columns (expected >= {len(expected_cols)})")
     else:
         print("  FAIL: No tables to check columns")
 
-    # Check required mentions (keywords)
+    # Check required mentions (keywords) against paragraph + table cell text.
     required_mentions = gt_data["review_doc"]["required_mentions"]
     for mention in required_mentions:
         total += 1
-        if mention.lower() in full_text:
+        if text_contains_mention(full_text, mention):
             passed += 1
             print(f"  PASS: Keyword '{mention}' found in document")
         else:
@@ -200,7 +310,7 @@ def check_pptx(agent_workspace, gt_data):
     required_mentions = gt_data["slides"]["required_mentions"]
     for mention in required_mentions:
         total += 1
-        if mention.lower() in full_slides_text:
+        if text_contains_mention(full_slides_text, mention):
             passed += 1
             print(f"  PASS: Keyword '{mention}' found in slides")
         else:

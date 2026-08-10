@@ -436,22 +436,37 @@ def check_notion():
 
         record("Notion page with relevant title exists", True)
 
-        # Check that the page has content blocks
+        # Check that the page has content blocks (scoped to the target page).
         page_ids = [p[0] for p in pages]
         total_blocks = 0
+        scoped_texts = []
+        child_ids = []
         for page_id in page_ids:
             cur.execute("""
-                SELECT COUNT(*)
+                SELECT id, block_data
                 FROM notion.blocks
                 WHERE parent_id = %s
             """, (page_id,))
-            count = cur.fetchone()[0]
-            total_blocks += count
+            rows = cur.fetchall()
+            total_blocks += len(rows)
+            for bid, bdata in rows:
+                if bdata:
+                    scoped_texts.append(str(bdata))
+                child_ids.append(bid)
 
-        # Also check blocks that might be children of child pages
-        if total_blocks == 0:
-            cur.execute("SELECT COUNT(*) FROM notion.blocks")
-            total_blocks = cur.fetchone()[0]
+        # Blocks may also be nested under child blocks; traverse one level so
+        # the content check stays inside the target page's block tree instead
+        # of scanning every block in the database.
+        if child_ids:
+            cur.execute("""
+                SELECT block_data
+                FROM notion.blocks
+                WHERE parent_id = ANY(%s)
+            """, (child_ids,))
+            for (bdata,) in cur.fetchall():
+                if bdata:
+                    scoped_texts.append(str(bdata))
+                    total_blocks += 1
 
         record("Notion page has content blocks",
                total_blocks >= 3,
@@ -459,15 +474,9 @@ def check_notion():
         if total_blocks < 3:
             all_ok = False
 
-        # Check that page properties or blocks mention key paper topics
-        cur.execute("""
-            SELECT block_data
-            FROM notion.blocks
-        """)
-        blocks = cur.fetchall()
-        all_block_text = " ".join(
-            str(b[0]).lower() for b in blocks if b[0]
-        )
+        # Check that page properties or blocks mention key paper topics.
+        # Scoped to the target page, so unrelated pages can't satisfy the check.
+        all_block_text = " ".join(t.lower() for t in scoped_texts)
 
         # Also check page properties text
         all_props_text = " ".join(

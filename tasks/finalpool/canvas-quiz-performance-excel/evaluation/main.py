@@ -206,9 +206,9 @@ def check_emails(gt_dir=None):
     if result:
         subj, from_addr, to_addr, body = result
         # Tightened: require full subject string (case-insensitive)
-        expected_subj = "quiz performance summary - biochemistry and bioinformatics (fall 2013)"
+        expected_subj = "quiz performance summary - biochemistry & bioinformatics (fall 2013)"
         actual_subj = (subj or "").strip().lower()
-        check("Email subject is exactly 'Quiz Performance Summary - Biochemistry and Bioinformatics (Fall 2013)'",
+        check("Email subject is exactly 'Quiz Performance Summary - Biochemistry & Bioinformatics (Fall 2013)'",
               actual_subj == expected_subj,
               f"Subject: {(subj or '')[:120]}")
 

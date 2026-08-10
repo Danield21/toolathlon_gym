@@ -2,9 +2,9 @@ You are an accreditation coordinator preparing a comprehensive curriculum review
 
 Start by fetching the accreditation requirements from the accreditation portal at http://localhost:30238/api/accreditation_requirements.json. This document specifies minimum thresholds for course counts, faculty ratios, assessment types, and scholarly integration that the institution must meet.
 
-Next, connect to the learning management system and retrieve a list of all courses offered by the institution. For each course, gather the course name, the number of enrolled students, the number of assignments, whether the course has quizzes, and the number of discussion topics. Also determine how many faculty members (teachers and teaching assistants combined) are associated with each course.
+Next, connect to the learning management system and retrieve a list of all courses offered by the institution. For each course, gather the course name, the number of enrolled students, the number of assignments, the number of quizzes the course has (use 0 if it has none), and the number of discussion topics. Also determine how many faculty members (teachers and teaching assistants combined) are associated with each course. Use the course's enrollment count (total students) directly for the number of enrolled students, and derive the faculty count from each course's enrollment records, where faculty are enrollments of type TeacherEnrollment or TaEnrollment.
 
-Using this data, evaluate each course against the accreditation requirements. A course is considered compliant if it has at least one assignment, the student to faculty ratio does not exceed the maximum specified in the requirements, and the course has at least one form of assessment (quiz or assignment). Note which courses are compliant and which are not.
+Using this data, evaluate each course against the accreditation requirements. A course is considered compliant if the student to faculty ratio does not exceed the maximum specified in the requirements and the course has at least one form of assessment (quiz or assignment). Note which courses are compliant and which are not.
 
 Then search the scholarly literature for research supporting the pedagogical approaches used in the curriculum. Search for papers on the following topics: active learning in higher education, assessment best practices in education, online learning effectiveness, curriculum design frameworks, and student engagement strategies. For each topic, find at least one relevant paper and note its title, authors, and relevance to the curriculum.
 
@@ -14,6 +14,6 @@ The second sheet should be called "Literature Support" with columns for Search_T
 
 The third sheet should be called "Summary" with columns for Metric and Value. Include rows for total courses, compliant courses, non-compliant courses, compliance rate (as a percentage), total faculty across all courses, average student to faculty ratio, and the number of supporting papers found.
 
-Finally, create a page in the team's knowledge base (Notion) titled "Accreditation Review Report" that summarizes the curriculum audit findings. The page should mention the overall compliance rate, highlight any courses that fail to meet requirements, reference the scholarly literature that supports the institution's pedagogical approach, and note any recommendations for improvement before the accreditation visit.
+Finally, create a page in the team's knowledge base (Notion) titled "Accreditation Review Report" (the page title must contain this exact phrase) that summarizes the curriculum audit findings. The page should mention the overall compliance rate, highlight any courses that fail to meet requirements, reference the scholarly literature that supports the institution's pedagogical approach, and note any recommendations for improvement before the accreditation visit.
 
 When you have completed all tasks, call claim_done.

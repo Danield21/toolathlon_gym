@@ -64,7 +64,7 @@ def main():
             file_errors.append("Sheet 'Enrollment' not found in groundtruth")
         else:
             # Validate header (case/underscore-insensitive)
-            expected_headers = ["course_name", "course_code", "student_count", "teacher_count", "ta_count", "student_teacher_ratio"]
+            expected_headers = ["course_name", "course_code", "student_count", "teacher_count", "student_teacher_ratio"]
             if not a_rows or not a_rows[0]:
                 file_errors.append("Enrollment header row missing")
             else:
@@ -104,14 +104,10 @@ def main():
                 if len(a_row) > 3 and len(g_row) > 3:
                     if not num_close(a_row[3], g_row[3], 0):
                         file_errors.append(f"{key}.Teacher_Count: {a_row[3]} vs {g_row[3]}")
-                # TA_Count (col 4)
+                # Student_Teacher_Ratio (col 4)
                 if len(a_row) > 4 and len(g_row) > 4:
-                    if not num_close(a_row[4], g_row[4], 0):
-                        file_errors.append(f"{key}.TA_Count: {a_row[4]} vs {g_row[4]}")
-                # Student_Teacher_Ratio (col 5)
-                if len(a_row) > 5 and len(g_row) > 5:
-                    if not num_close(a_row[5], g_row[5], 0.2):
-                        file_errors.append(f"{key}.Student_Teacher_Ratio: {a_row[5]} vs {g_row[5]}")
+                    if not num_close(a_row[4], g_row[4], 0.2):
+                        file_errors.append(f"{key}.Student_Teacher_Ratio: {a_row[4]} vs {g_row[4]}")
 
             # Validate sort order: ascending by Student_Count
             try:

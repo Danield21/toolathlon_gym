@@ -66,17 +66,19 @@ def main():
     else:
         sheet_name = "Budget Analysis"
         errors = []
-        # Header row check
+        # Header check (order-independent): all expected columns must be present.
         expected_headers = [
             "Department", "Budget", "Planned_Headcount", "Actual_Headcount",
             "Avg_Salary", "Total_Salary_Cost", "Budget_Utilization_Pct",
         ]
         actual_headers = [str(c or "").strip() for c in (a_rows[0] if a_rows else [])]
-        for i, h in enumerate(expected_headers):
-            if i >= len(actual_headers) or actual_headers[i].lower() != h.lower():
-                errors.append(
-                    f"Budget Analysis header[{i}]: '{actual_headers[i] if i < len(actual_headers) else None}' vs '{h}'"
-                )
+        header_lower = [h.lower() for h in actual_headers]
+        missing_headers = [h for h in expected_headers if h.lower() not in header_lower]
+        if missing_headers:
+            errors.append(f"Budget Analysis missing headers: {missing_headers}; found {actual_headers}")
+        # Map expected columns to the agent's column indices by header name so the
+        # column order in the output does not matter.
+        col_of = {h.lower(): i for i, h in enumerate(actual_headers)}
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
 
@@ -102,31 +104,23 @@ def main():
                 errors.append(f"Missing row: {g_row[0]}")
                 continue
 
-            if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 100.0):
-                    errors.append(f"{key}.Budget: {a_row[1]} vs {g_row[1]} (tol=100.0)")
-
-            if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 1):
-                    errors.append(f"{key}.Planned_Headcount: {a_row[2]} vs {g_row[2]} (tol=1)")
-
-            if len(a_row) > 3 and len(g_row) > 3:
-                # Tighten Actual_Headcount tol from 5 -> 0 (exact count)
-                if not num_close(a_row[3], g_row[3], 0):
-                    errors.append(f"{key}.Actual_Headcount: {a_row[3]} vs {g_row[3]} (tol=0)")
-
-            if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 10.0):
-                    errors.append(f"{key}.Avg_Salary: {a_row[4]} vs {g_row[4]} (tol=10.0)")
-
-            if len(a_row) > 5 and len(g_row) > 5:
-                if not num_close(a_row[5], g_row[5], 1000.0):
-                    errors.append(f"{key}.Total_Salary_Cost: {a_row[5]} vs {g_row[5]} (tol=1000.0)")
-
-            if len(a_row) > 6 and len(g_row) > 6:
-                # Tighten Budget_Utilization_Pct tol from 1.0 -> 0.1 (rounded to 1 decimal)
-                if not num_close(a_row[6], g_row[6], 0.1):
-                    errors.append(f"{key}.Budget_Utilization_Pct: {a_row[6]} vs {g_row[6]} (tol=0.1)")
+            # Column-wise comparison using header-mapped indices, so the agent's
+            # column order does not matter. GT columns are fixed (1..6).
+            COLS = [
+                ("budget", "Budget", 100.0, 1),
+                ("planned_headcount", "Planned_Headcount", 1, 2),
+                ("actual_headcount", "Actual_Headcount", 0, 3),
+                ("avg_salary", "Avg_Salary", 10.0, 4),
+                ("total_salary_cost", "Total_Salary_Cost", 1000.0, 5),
+                ("budget_utilization_pct", "Budget_Utilization_Pct", 0.1, 6),
+            ]
+            for hkey, label, tol, gcol in COLS:
+                ai = col_of.get(hkey)
+                if ai is None:
+                    continue  # missing header already reported above
+                if ai < len(a_row) and gcol < len(g_row):
+                    if not num_close(a_row[ai], g_row[gcol], tol):
+                        errors.append(f"{key}.{label}: {a_row[ai]} vs {g_row[gcol]} (tol={tol})")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -156,11 +150,14 @@ def main():
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
 
-        # Per-metric tolerance map (rounded to 1 decimal => tol=0.1; integer count => tol=0)
+        # Per-metric tolerance map (rounded to 1 decimal => tol=0.1; integer count => tol=0).
+        # avg_budget_utilization gets a wider margin (0.5): the task asks for an average
+        # of per-department utilization, but agents may legitimately compute the aggregate
+        # ratio (total salary / total budget) instead, which can differ by a few tenths.
         TOL_BY_METRIC = {
             "total_budget": 100.0,
             "total_salary_cost": 1000.0,
-            "avg_budget_utilization": 0.1,
+            "avg_budget_utilization": 0.5,
             "over_budget_depts": 0,
         }
         a_lookup = {}

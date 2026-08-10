@@ -1,9 +1,43 @@
 """Evaluation for sf-hr-turnover-notion."""
 import argparse
 import os
+import re
 import sys
 import json
 import psycopg2
+
+
+def _normalize_title(s):
+    """Lowercase, replace punctuation with spaces, collapse whitespace."""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(s).lower()).split())
+
+
+def _levenshtein(a, b):
+    """Small-scale DP edit distance between two strings."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def titles_match(expected, actual):
+    """Exact Notion title match (task.md prescribes exact titles). After
+    normalization the titles must be identical — no fuzzy/edit-distance
+    tolerance, so the model must follow the titles given in task.md."""
+    e = _normalize_title(expected)
+    a = _normalize_title(actual)
+    if not e or not a:
+        return False
+    return e == a
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
@@ -99,15 +133,15 @@ def main():
                                 title_text += item.get("plain_text", "")
                             elif isinstance(item.get("text"), dict):
                                 title_text += item["text"].get("content", "")
-        # Tightened: require exact equality after lowercasing/trim (no incidental prefix/suffix)
-        if title_text.strip().lower() == target_phrase:
+        # Exact title match (task.md prescribes the exact page title)
+        if titles_match(target_phrase, title_text):
             found_page = True
             found_page_id = page[0]
             break
     if not found_page:
         all_errors.append(
-            f"Notion page titled exactly 'HR Department Workforce Analysis' not found "
-            f"(required exact match after trim+lower of '{target_phrase}')"
+            f"Notion page titled 'HR Department Workforce Analysis' not found "
+            f"(exact title match against '{target_phrase}')"
         )
     else:
         print("    Page found")
@@ -125,7 +159,7 @@ def main():
             for item in title_data:
                 if isinstance(item, dict):
                     title_text += item.get("plain_text", "") or item.get("text", {}).get("content", "")
-        if "department" in title_text.lower() and "metric" in title_text.lower():
+        if titles_match("Department Metrics", title_text):
             found_db = True
             db_id = db[0]
             break
@@ -277,9 +311,8 @@ def main():
                     f"Email body should mention {TOP_DEPT_KEY} avg salary value "
                     f"(any of {avg_candidates})"
                 )
-            # Validate FROM address
-            if "hr-analytics" not in from_addr:
-                all_errors.append(f"Email FROM should be hr-analytics@company.com, got {from_addr}")
+            # NOTE: the sender address is fixed by the email environment and
+            # cannot be changed by the agent, so we do not validate from_addr.
             break
     if not found_email:
         all_errors.append("Email to hr-director with workforce analysis subject not found")

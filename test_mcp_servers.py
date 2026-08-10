@@ -27,7 +27,10 @@ import yaml
 # ── Paths ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR = Path(__file__).parent.resolve()
 MCP_CONFIGS_DIR = SCRIPT_DIR / "configs" / "mcp_servers"
-MCP_SERVERS_DIR = SCRIPT_DIR / "local_servers"
+# Honor LOCAL_SERVERS_PATH so the gate tests the SAME servers the agent uses
+# at runtime (/opt/local_servers inside the container), not the source tree's
+# local_servers/ (which has no .venv). Falls back to source tree for host runs.
+MCP_SERVERS_DIR = Path(os.environ.get("LOCAL_SERVERS_PATH", str(SCRIPT_DIR / "local_servers")))
 WORKSPACE_BASE = SCRIPT_DIR / "_test_workspace"
 
 # ── Token placeholder values (PG-backed servers don't need real tokens) ───────

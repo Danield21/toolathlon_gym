@@ -11,7 +11,8 @@ import psycopg2
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
-    "user": "eigent", "password": "camel",
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 
@@ -41,20 +42,21 @@ def main():
         cur.execute("DELETE FROM email.attachments")
         cur.execute("DELETE FROM email.sent_log")
         cur.execute("DELETE FROM email.messages")
+        cur.execute("DELETE FROM email.drafts")
         print("[preprocess] Cleared email data.")
 
-        # Inject noise gform
+        # Inject noise gform (title avoids the lunch/preference keywords the evaluator matches on)
         noise_form_id = str(uuid.uuid4())
         cur.execute("""
             INSERT INTO gform.forms (id, title, document_title, description, created_at, updated_at)
             VALUES (%s, %s, %s, %s, NOW(), NOW())
-        """, (noise_form_id, "Old Employee Survey", "Old Employee Survey",
+        """, (noise_form_id, "Archived Workspace Feedback", "Archived Workspace Feedback",
               "This is an archived employee satisfaction survey."))
         cur.execute("""
             INSERT INTO gform.questions (id, form_id, item_id, title, question_type, required, position)
             VALUES (%s, %s, %s, %s, %s, true, 0)
         """, (str(uuid.uuid4()), noise_form_id, str(uuid.uuid4()),
-              "How satisfied are you with your workspace?", "SCALE"))
+              "How satisfied are you with your workspace?", "choiceQuestion"))
         print("[preprocess] Injected noise gform data.")
 
         # Inject noise notion data
@@ -89,7 +91,7 @@ def main():
                 VALUES (%s, %s, %s, %s, %s, %s::jsonb, NOW(), %s, false)
             """, (max_id, folder_id, f"noise-{uuid.uuid4()}@company.com",
                   "Parking Lot Update", "facilities@company.com",
-                  json.dumps(["all_staff@company.com"]),
+                  json.dumps(["facilities@company.com"]),
                   "The parking lot will be repaved this weekend."))
             print("[preprocess] Injected noise email data.")
 

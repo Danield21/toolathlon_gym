@@ -162,8 +162,9 @@ def main():
         """)
         all_msgs = cur.fetchall()
 
-        # Tightened: from sla-audit, to ops-director, subject 'SLA Breach Audit Results',
+        # Tightened: to ops-director, subject 'SLA Breach Audit Results',
         # body contains overall breach rate value and worst priority name
+        # (sender address is fixed by the email environment and not checked)
         # Determine expected values from GT Summary sheet
         gt_summary = load_sheet_rows(gt_wb, "Summary")
         expected_overall_rate = None
@@ -183,15 +184,14 @@ def main():
         for subj, to_addr, body, from_addr in all_msgs:
             subj_str = str(subj or "").lower()
             to_str = str(to_addr or "").lower()
-            from_str = str(from_addr or "").lower()
             if ("sla breach audit results" in subj_str or
                 ("sla" in subj_str and "breach" in subj_str and "audit" in subj_str)):
-                if "ops-director@company.com" in to_str and "sla-audit@company.com" in from_str:
+                if "ops-director@company.com" in to_str:
                     found_email = (subj, to_addr, body, from_addr)
                     break
 
         if not found_email:
-            all_errors.append("Email not found: from=sla-audit@company.com, to=ops-director@company.com, subject contains 'SLA Breach Audit Results'")
+            all_errors.append("Email not found: to=ops-director@company.com, subject contains 'SLA Breach Audit Results'")
         else:
             print("    Email envelope PASS")
             body_str = str(found_email[2] or "")

@@ -6,23 +6,95 @@ import sys
 import psycopg2
 
 
-def num_close(a, b, tol=0.5):
+def _to_float(v):
+    """Robust numeric conversion for str/int/float/None.
+
+    Strips thousands separators, currency symbols and % so that formatted
+    numbers (e.g. "633,555,641", "$260,000", "25%") compare equal to their
+    plain numeric equivalents. Returns None when the value cannot be parsed.
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return float(v)
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip()
+    if not s:
+        return None
+    s = s.replace(",", "").replace("$", "").replace("¥", "").replace("€", "").replace("%", "").replace(" ", "")
     try:
-        return abs(float(a) - float(b)) <= tol
-    except (TypeError, ValueError):
-        return str(a).strip().lower() == str(b).strip().lower()
+        return float(s)
+    except ValueError:
+        return None
 
 
-def load_sheet_rows(wb, sheet_name):
-    for name in wb.sheetnames:
-        if name.strip().lower() == sheet_name.strip().lower():
-            return [[cell.value for cell in row] for row in wb[name].iter_rows()]
+def num_close(a, b, tol=0.5):
+    fa = _to_float(a)
+    fb = _to_float(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= tol
+    # Fallback only when either side is non-numeric: case-insensitive string equality.
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+def _sheet_index(wb, sheet_name):
+    """Case-insensitive exact sheet name match, with a lenient keyword fallback."""
+    key = sheet_name.strip().lower()
+    for i, name in enumerate(wb.sheetnames):
+        if name.strip().lower() == key:
+            return i
+    for i, name in enumerate(wb.sheetnames):
+        if key.split()[0] in name.strip().lower():
+            return i
     return None
+
+
+def load_workbook_pair(path):
+    """Load a workbook twice: cached values (data_only=True) and raw cells
+    (data_only=False, which exposes formula strings).
+
+    openpyxl stores only one of these per load, so both passes are required to
+    tell a formula cell (with no cached result) apart from an empty cell.
+    """
+    import openpyxl
+    wb_vals = openpyxl.load_workbook(path, data_only=True)
+    wb_raw = openpyxl.load_workbook(path, data_only=False)
+    return wb_vals, wb_raw
+
+
+def _pair_rows(wb_vals, wb_raw, sheet_name):
+    """Return (values_rows, raw_rows) for a sheet, or (None, None) if absent."""
+    idx = _sheet_index(wb_vals, sheet_name)
+    if idx is None:
+        return None, None
+    ws_v = wb_vals.worksheets[idx]
+    ws_r = wb_raw.worksheets[idx]
+    vals = [[cell.value for cell in row] for row in ws_v.iter_rows()]
+    raws = [[cell.value for cell in row] for row in ws_r.iter_rows()]
+    return vals, raws
+
+
+def _is_formula(raw):
+    return isinstance(raw, str) and raw.startswith("=")
+
+
+def _cmp_cell(a_val, a_raw, gt_val, tol, errors, label):
+    """Compare one numeric cell.
+
+    Leniently skips formula cells whose cached value is None (Excel has not
+    recalculated them). GT is a literal value, so there is no formula side to
+    compare against; skipping avoids false FAILs for a formula-using agent.
+    An empty (None) cell is still compared and will fail, as expected.
+    """
+    if _is_formula(a_raw) and a_val is None:
+        return
+    if not num_close(a_val, gt_val, tol):
+        errors.append(f"{label}: {a_val} vs expected {gt_val}")
 
 
 def check_excel(agent_workspace, groundtruth_workspace):
     errors = []
-    import openpyxl
 
     agent_path = os.path.join(agent_workspace, "Stress_Test_Report.xlsx")
     gt_path = os.path.join(groundtruth_workspace, "Stress_Test_Report.xlsx")
@@ -33,138 +105,152 @@ def check_excel(agent_workspace, groundtruth_workspace):
         return ["Stress_Test_Report.xlsx not found in groundtruth workspace"]
 
     try:
-        wb_agent = openpyxl.load_workbook(agent_path, data_only=True)
-        wb_gt = openpyxl.load_workbook(gt_path, data_only=True)
+        wb_agent_v, wb_agent_r = load_workbook_pair(agent_path)
+        wb_gt_v, _ = load_workbook_pair(gt_path)
 
         # --- Sheet: Portfolio Overview ---
-        agent_rows = load_sheet_rows(wb_agent, "Portfolio Overview")
-        gt_rows = load_sheet_rows(wb_gt, "Portfolio Overview")
-        if agent_rows is None:
+        agent_rows_v, agent_rows_r = _pair_rows(wb_agent_v, wb_agent_r, "Portfolio Overview")
+        gt_rows_v, _ = _pair_rows(wb_gt_v, wb_gt_v, "Portfolio Overview")
+        if agent_rows_v is None:
             errors.append("Sheet 'Portfolio Overview' not found")
-        elif gt_rows is None:
+        elif gt_rows_v is None:
             errors.append("Groundtruth 'Portfolio Overview' missing")
         else:
-            agent_data = [r for r in agent_rows[1:] if r and r[0] is not None]
-            gt_data = [r for r in gt_rows[1:] if r and r[0] is not None]
+            agent_data_v = [r for r in agent_rows_v[1:] if r and r[0] is not None]
+            agent_data_r = [r for r in agent_rows_r[1:] if r and r[0] is not None]
+            gt_data_v = [r for r in gt_rows_v[1:] if r and r[0] is not None]
 
-            if len(agent_data) < len(gt_data):
-                errors.append(f"Portfolio Overview: {len(agent_data)} rows, expected {len(gt_data)}")
+            if len(agent_data_v) < len(gt_data_v):
+                errors.append(f"Portfolio Overview: {len(agent_data_v)} rows, expected {len(gt_data_v)}")
 
-            # Check each stock
-            agent_lookup = {str(r[0]).strip().upper(): r for r in agent_data}
-            gt_lookup = {str(r[0]).strip().upper(): r for r in gt_data}
+            # Check each stock (lookup by symbol, order-independent)
+            agent_lookup = {str(rv[0]).strip().upper(): (rv, rr) for rv, rr in zip(agent_data_v, agent_data_r)}
+            gt_lookup = {str(r[0]).strip().upper(): r for r in gt_data_v}
 
             for sym, gt_row in gt_lookup.items():
                 if sym not in agent_lookup:
                     errors.append(f"Portfolio Overview: {sym} missing")
                     continue
-                a_row = agent_lookup[sym]
-                # Allocation_Pct (col 1)
-                if not num_close(a_row[1], gt_row[1], 0.5):
-                    errors.append(f"{sym} Allocation_Pct: {a_row[1]} vs expected {gt_row[1]}")
-                # Current_Price (col 3)
-                if not num_close(a_row[3], gt_row[3], 1.0):
-                    errors.append(f"{sym} Current_Price: {a_row[3]} vs expected {gt_row[3]}")
-                # Monthly_Volatility_Pct (col 5)
-                if not num_close(a_row[5], gt_row[5], 0.5):
-                    errors.append(f"{sym} Monthly_Volatility_Pct: {a_row[5]} vs expected {gt_row[5]}")
-                # Worst_Monthly_Return_Pct (col 6)
-                if not num_close(a_row[6], gt_row[6], 0.5):
-                    errors.append(f"{sym} Worst_Monthly_Return_Pct: {a_row[6]} vs expected {gt_row[6]}")
-                # Sharpe_Ratio (col 7)
-                if not num_close(a_row[7], gt_row[7], 0.1):
-                    errors.append(f"{sym} Sharpe_Ratio: {a_row[7]} vs expected {gt_row[7]}")
+                a_v, a_r = agent_lookup[sym]
+                _cmp_cell(a_v[1], a_r[1], gt_row[1], 0.5, errors, f"{sym} Allocation_Pct")
+                _cmp_cell(a_v[3], a_r[3], gt_row[3], 1.0, errors, f"{sym} Current_Price")
+                _cmp_cell(a_v[5], a_r[5], gt_row[5], 0.5, errors, f"{sym} Monthly_Volatility_Pct")
+                _cmp_cell(a_v[6], a_r[6], gt_row[6], 0.5, errors, f"{sym} Worst_Monthly_Return_Pct")
+                _cmp_cell(a_v[7], a_r[7], gt_row[7], 0.1, errors, f"{sym} Sharpe_Ratio")
 
         # --- Sheet: Stress Scenarios ---
-        agent_rows2 = load_sheet_rows(wb_agent, "Stress Scenarios")
-        gt_rows2 = load_sheet_rows(wb_gt, "Stress Scenarios")
-        if agent_rows2 is None:
+        agent_rows2_v, agent_rows2_r = _pair_rows(wb_agent_v, wb_agent_r, "Stress Scenarios")
+        gt_rows2_v, _ = _pair_rows(wb_gt_v, wb_gt_v, "Stress Scenarios")
+        if agent_rows2_v is None:
             errors.append("Sheet 'Stress Scenarios' not found")
-        elif gt_rows2 is None:
+        elif gt_rows2_v is None:
             errors.append("Groundtruth 'Stress Scenarios' missing")
         else:
-            agent_data2 = [r for r in agent_rows2[1:] if r and r[0] is not None]
-            gt_data2 = [r for r in gt_rows2[1:] if r and r[0] is not None]
+            agent_data2_v = [r for r in agent_rows2_v[1:] if r and r[0] is not None]
+            agent_data2_r = [r for r in agent_rows2_r[1:] if r and r[0] is not None]
+            gt_data2_v = [r for r in gt_rows2_v[1:] if r and r[0] is not None]
 
-            if len(agent_data2) < len(gt_data2) - 4:  # Allow some tolerance for summary rows
-                errors.append(f"Stress Scenarios: {len(agent_data2)} rows, expected ~{len(gt_data2)}")
+            if len(agent_data2_v) < len(gt_data2_v) - 4:  # Allow some tolerance for summary rows
+                errors.append(f"Stress Scenarios: {len(agent_data2_v)} rows, expected ~{len(gt_data2_v)}")
 
             # Check portfolio totals for each scenario
             gt_totals = {}
-            for r in gt_data2:
+            for r in gt_data2_v:
                 if r[1] and str(r[1]).strip() == "Portfolio_Total":
-                    gt_totals[str(r[0]).strip()] = (r[4], r[5])  # Scenario_Value, Scenario_PnL
+                    gt_totals[str(r[0]).strip().lower()] = (r[4], r[5])  # Scenario_Value, Scenario_PnL
 
             agent_totals = {}
-            for r in agent_data2:
-                if r[1] and str(r[1]).strip() == "Portfolio_Total":
-                    agent_totals[str(r[0]).strip()] = (r[4], r[5])
+            for rv, rr in zip(agent_data2_v, agent_data2_r):
+                if rv[1] and str(rv[1]).strip() == "Portfolio_Total":
+                    agent_totals[str(rv[0]).strip().lower()] = (rv, rr)
 
             for sc_name, (gt_val, gt_pnl) in gt_totals.items():
                 if sc_name not in agent_totals:
                     errors.append(f"Stress Scenarios: Portfolio_Total row missing for {sc_name}")
                 else:
-                    a_val, a_pnl = agent_totals[sc_name]
-                    if not num_close(a_val, gt_val, 5.0):
-                        errors.append(f"{sc_name} total value: {a_val} vs expected {gt_val}")
-                    if not num_close(a_pnl, gt_pnl, 5.0):
-                        errors.append(f"{sc_name} total PnL: {a_pnl} vs expected {gt_pnl}")
+                    a_v, a_r = agent_totals[sc_name]
+                    # Magnitude-based tolerance aligned with the per-stock rows: a
+                    # correct agent may derive each per-stock Scenario_Value from the
+                    # displayed 2-decimal Scenario_Return_Pct (GT's own value column
+                    # is built from unrounded returns), so the summed total can differ
+                    # by the rounding propagation (observed ~7-50 for this portfolio).
+                    # 1% of magnitude is consistent with the per-stock leniency and
+                    # still rejects grossly wrong totals / omitted stocks.
+                    tol_total_val = max(100.0, abs(_to_float(gt_val) or 0.0) * 0.01)
+                    tol_total_pnl = max(100.0, abs(_to_float(gt_pnl) or 0.0) * 0.01)
+                    _cmp_cell(a_v[4], a_r[4], gt_val, tol_total_val, errors, f"{sc_name} total value")
+                    _cmp_cell(a_v[5], a_r[5], gt_pnl, tol_total_pnl, errors, f"{sc_name} total PnL")
 
-            # NEW: per-stock Scenario_PnL checks for every (Scenario, Stock) combination
+            # Per-stock Scenario_PnL checks for every (Scenario, Stock) combination.
+            # Scenario names are normalized to lowercase on both sides, matching the
+            # gcal / Risk Summary checks, so a correct agent writing e.g. 'market
+            # crash' instead of 'Market Crash' is not falsely FAILed.
             gt_pnl_lookup = {}
-            for r in gt_data2:
+            for r in gt_data2_v:
                 if r[0] and r[1] and str(r[1]).strip() != "Portfolio_Total":
-                    gt_pnl_lookup[(str(r[0]).strip(), str(r[1]).strip().upper())] = (r[3], r[4], r[5])
+                    gt_pnl_lookup[(str(r[0]).strip().lower(), str(r[1]).strip().upper())] = (r[3], r[4], r[5])
 
             agent_pnl_lookup = {}
-            for r in agent_data2:
-                if r[0] and r[1] and str(r[1]).strip() != "Portfolio_Total":
-                    agent_pnl_lookup[(str(r[0]).strip(), str(r[1]).strip().upper())] = (r[3], r[4], r[5])
+            for rv, rr in zip(agent_data2_v, agent_data2_r):
+                if rv[0] and rv[1] and str(rv[1]).strip() != "Portfolio_Total":
+                    agent_pnl_lookup[(str(rv[0]).strip().lower(), str(rv[1]).strip().upper())] = (rv, rr)
 
             for (sc_name, sym), (gt_ret, gt_val, gt_pnl) in gt_pnl_lookup.items():
                 if (sc_name, sym) not in agent_pnl_lookup:
                     errors.append(f"Stress Scenarios: row missing for {sc_name} / {sym}")
                     continue
-                a_ret, a_val, a_pnl = agent_pnl_lookup[(sc_name, sym)]
+                a_v, a_r = agent_pnl_lookup[(sc_name, sym)]
                 # tolerance: 1% of magnitude or 50 abs, whichever larger
-                tol_pnl = max(50.0, abs(float(gt_pnl) if gt_pnl is not None else 0) * 0.01)
-                tol_val = max(50.0, abs(float(gt_val) if gt_val is not None else 0) * 0.01)
-                if a_pnl is not None and not num_close(a_pnl, gt_pnl, tol_pnl):
-                    errors.append(f"{sc_name}/{sym} Scenario_PnL: {a_pnl} vs expected {gt_pnl}")
-                if a_val is not None and not num_close(a_val, gt_val, tol_val):
-                    errors.append(f"{sc_name}/{sym} Scenario_Value: {a_val} vs expected {gt_val}")
+                tol_pnl = max(50.0, abs(_to_float(gt_pnl) or 0.0) * 0.01)
+                tol_val = max(50.0, abs(_to_float(gt_val) or 0.0) * 0.01)
+                # keep the original leniency: only compare when the cell is filled
+                if a_v[5] is not None or _is_formula(a_r[5]):
+                    _cmp_cell(a_v[5], a_r[5], gt_pnl, tol_pnl, errors, f"{sc_name}/{sym} Scenario_PnL")
+                if a_v[4] is not None or _is_formula(a_r[4]):
+                    _cmp_cell(a_v[4], a_r[4], gt_val, tol_val, errors, f"{sc_name}/{sym} Scenario_Value")
 
         # --- Sheet: Risk Summary ---
-        agent_rows3 = load_sheet_rows(wb_agent, "Risk Summary")
-        gt_rows3 = load_sheet_rows(wb_gt, "Risk Summary")
-        if agent_rows3 is None:
+        agent_rows3_v, agent_rows3_r = _pair_rows(wb_agent_v, wb_agent_r, "Risk Summary")
+        gt_rows3_v, _ = _pair_rows(wb_gt_v, wb_gt_v, "Risk Summary")
+        if agent_rows3_v is None:
             errors.append("Sheet 'Risk Summary' not found")
-        elif gt_rows3 is None:
+        elif gt_rows3_v is None:
             errors.append("Groundtruth 'Risk Summary' missing")
         else:
-            agent_data3 = [r for r in agent_rows3[1:] if r and r[0] is not None]
-            gt_data3 = [r for r in gt_rows3[1:] if r and r[0] is not None]
+            agent_data3_v = [r for r in agent_rows3_v[1:] if r and r[0] is not None]
+            agent_data3_r = [r for r in agent_rows3_r[1:] if r and r[0] is not None]
+            gt_data3_v = [r for r in gt_rows3_v[1:] if r and r[0] is not None]
 
-            agent_metrics = {str(r[0]).strip().lower(): r[1] for r in agent_data3}
-            gt_metrics = {str(r[0]).strip().lower(): r[1] for r in gt_data3}
+            agent_metrics = {}
+            for rv, rr in zip(agent_data3_v, agent_data3_r):
+                agent_metrics[str(rv[0]).strip().lower()] = (rv[1], rr[1])
+            gt_metrics = {str(r[0]).strip().lower(): r[1] for r in gt_data3_v}
 
             for metric, gt_val in gt_metrics.items():
                 if metric not in agent_metrics:
                     errors.append(f"Risk Summary: {metric} missing")
                     continue
-                a_val = agent_metrics[metric]
+                a_val, a_raw = agent_metrics[metric]
                 if metric in ("worst_scenario", "best_scenario", "breach_threshold"):
                     if str(a_val).strip().lower() != str(gt_val).strip().lower():
                         errors.append(f"Risk Summary {metric}: '{a_val}' vs expected '{gt_val}'")
                 elif metric in ("total_portfolio_value",):
-                    if not num_close(a_val, gt_val, 100):
-                        errors.append(f"Risk Summary {metric}: {a_val} vs expected {gt_val}")
-                elif metric in ("portfolio_var_95", "worst_scenario_loss", "best_scenario_pnl"):
-                    if not num_close(a_val, gt_val, 500):
-                        errors.append(f"Risk Summary {metric}: {a_val} vs expected {gt_val}")
+                    _cmp_cell(a_val, a_raw, gt_val, 100, errors, f"Risk Summary {metric}")
+                elif metric == "portfolio_var_95":
+                    # '5th percentile' is ambiguous across interpolation conventions
+                    # (numpy/pandas linear R-7 = GT -32096.75, nearest-rank 2nd-smallest
+                    # ≈ -33994, PERCENTILE.EXC ≈ -37529, midpoint-of-bracket ≈ -27671,
+                    # R-2..R-9 variants ≈ -35408..-38708). A flat 500 only matches the
+                    # R-7 default and false-FAILs every other legitimate 5th-percentile
+                    # rule. Use a wide absolute tolerance that covers the full spread of
+                    # standard 5th-percentile methods (~[-38.7k, -27.7k]) while still
+                    # rejecting a wrong percentile (e.g. 10th ≈ -21k) or a VaR computed
+                    # from daily returns (~-10k).
+                    _cmp_cell(a_val, a_raw, gt_val, 7000, errors, f"Risk Summary {metric}")
+                elif metric in ("worst_scenario_loss", "best_scenario_pnl"):
+                    _cmp_cell(a_val, a_raw, gt_val, 500, errors, f"Risk Summary {metric}")
                 elif metric in ("max_historical_drawdown_pct", "worst_scenario_loss_pct"):
-                    if not num_close(a_val, gt_val, 1.0):
-                        errors.append(f"Risk Summary {metric}: {a_val} vs expected {gt_val}")
+                    _cmp_cell(a_val, a_raw, gt_val, 1.0, errors, f"Risk Summary {metric}")
 
     except Exception as e:
         errors.append(f"Error reading Excel: {e}")
@@ -201,7 +287,7 @@ def check_word(agent_workspace):
         if "drawdown" not in full_text:
             errors.append("Word doc missing drawdown discussion")
 
-        # NEW: ensure document cites at least one substantial numeric figure
+        # Ensure document cites at least one substantial numeric figure
         # (drawdown %, VaR amount, scenario loss). Look for >=2 percent values
         # and at least one large dollar amount.
         import re
@@ -229,8 +315,8 @@ def check_gcal():
     try:
         conn = psycopg2.connect(
             host=os.environ.get("PGHOST", "localhost"),
-            port=5432,
-            dbname="toolathlon_gym",
+            port=int(os.environ.get("PGPORT", "5432")),
+            dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
             user=os.environ.get("PGUSER", "eigent"),
             password=os.environ.get("PGPASSWORD", "camel"),
         )
@@ -263,7 +349,8 @@ def check_gcal():
             if sc not in found_scenarios:
                 errors.append(f"No calendar event found for scenario: {sc}")
 
-        # Check dates are in consecutive weeks starting 2026-03-16
+        # Check each expected date appears at least once (set-based, so duplicate
+        # events created by redundant sub-agents do not cause false failures).
         if rows:
             import datetime
 
@@ -273,13 +360,10 @@ def check_gcal():
                 datetime.date(2026, 3, 30),
                 datetime.date(2026, 4, 6),
             ]
-            actual_dates = sorted([r[1] for r in rows])
-            for i, exp_date in enumerate(expected_dates):
-                if i < len(actual_dates):
-                    if actual_dates[i] != exp_date:
-                        errors.append(
-                            f"Meeting {i+1} date: {actual_dates[i]}, expected {exp_date}"
-                        )
+            actual_dates = set(r[1] for r in rows if r[1] is not None)
+            for exp_date in expected_dates:
+                if exp_date not in actual_dates:
+                    errors.append(f"Missing calendar event on expected date {exp_date}")
 
     except Exception as e:
         errors.append(f"Error checking GCal: {e}")

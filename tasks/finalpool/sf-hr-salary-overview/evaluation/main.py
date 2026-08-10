@@ -29,6 +29,25 @@ def load_sheet_rows(wb, sheet_name):
     return None
 
 
+def _norm_header(h):
+    return str(h or "").strip().lower().replace(" ", "_")
+
+
+def _header_map(rows):
+    """Map normalized header text -> 0-based column index from row 1 of a sheet.
+    Lets checks locate columns by name regardless of column order."""
+    if not rows or not rows[0]:
+        return {}
+    return {_norm_header(h): i for i, h in enumerate(rows[0]) if _norm_header(h)}
+
+
+def _cell(row, idx):
+    """Safe cell access (None when idx out of range)."""
+    if row is None or idx is None:
+        return None
+    return row[idx] if idx < len(row) else None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -68,50 +87,64 @@ def main():
         errors = []
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
-        
+
+        # Locate columns by header name (order-independent).
+        a_col = _header_map(a_rows)
+        g_col = _header_map(g_rows)
+
         if len(a_data) != len(g_data):
             errors.append(f"{sheet_name} row count: agent={len(a_data)}, expected={len(g_data)}")
         a_lookup = {}
         for row in a_data:
-            if row and row[0] is not None:
-                a_lookup[str(row[0]).strip().lower()] = row
+            # Row key is the Department column (column 0 by convention).
+            dept = _cell(row, 0)
+            if dept is not None:
+                a_lookup[str(dept).strip().lower()] = row
         for g_row in g_data:
-            if not g_row or g_row[0] is None:
+            g_dept = _cell(g_row, 0)
+            if g_dept is None:
                 continue
-            key = str(g_row[0]).strip().lower()
+            key = str(g_dept).strip().lower()
             a_row = a_lookup.get(key)
             if a_row is None:
-                errors.append(f"Missing row: {g_row[0]}")
+                errors.append(f"Missing row: {g_dept}")
                 continue
-            
-            # Employee_Count is integer — exact equality
-            if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 0):
-                    errors.append(f"{key}.Employee_Count: {a_row[1]} vs {g_row[1]} (exact)")
 
-            if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 0.5):
-                    errors.append(f"{key}.Avg_Salary: {a_row[2]} vs {g_row[2]} (tol=0.5)")
+            # Employee_Count is integer — exact equality (tol=0 preserved)
+            av = _cell(a_row, a_col.get("employee_count"))
+            gv = _cell(g_row, g_col.get("employee_count"))
+            if av is not None and gv is not None and not num_close(av, gv, 0):
+                errors.append(f"{key}.Employee_Count: {av} vs {gv} (exact)")
 
-            if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 1.0):
-                    errors.append(f"{key}.Min_Salary: {a_row[3]} vs {g_row[3]} (tol=1.0)")
+            av = _cell(a_row, a_col.get("avg_salary"))
+            gv = _cell(g_row, g_col.get("avg_salary"))
+            if av is not None and gv is not None and not num_close(av, gv, 0.5):
+                errors.append(f"{key}.Avg_Salary: {av} vs {gv} (tol=0.5)")
 
-            if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 1.0):
-                    errors.append(f"{key}.Max_Salary: {a_row[4]} vs {g_row[4]} (tol=1.0)")
+            av = _cell(a_row, a_col.get("min_salary"))
+            gv = _cell(g_row, g_col.get("min_salary"))
+            if av is not None and gv is not None and not num_close(av, gv, 1.0):
+                errors.append(f"{key}.Min_Salary: {av} vs {gv} (tol=1.0)")
 
-            if len(a_row) > 5 and len(g_row) > 5:
-                if not num_close(a_row[5], g_row[5], 1.0):
-                    errors.append(f"{key}.Benchmark: {a_row[5]} vs {g_row[5]} (tol=1.0)")
+            av = _cell(a_row, a_col.get("max_salary"))
+            gv = _cell(g_row, g_col.get("max_salary"))
+            if av is not None and gv is not None and not num_close(av, gv, 1.0):
+                errors.append(f"{key}.Max_Salary: {av} vs {gv} (tol=1.0)")
 
-            if len(a_row) > 6 and len(g_row) > 6:
-                if not num_close(a_row[6], g_row[6], 1.0):
-                    errors.append(f"{key}.Variance: {a_row[6]} vs {g_row[6]} (tol=1.0)")
+            av = _cell(a_row, a_col.get("benchmark"))
+            gv = _cell(g_row, g_col.get("benchmark"))
+            if av is not None and gv is not None and not num_close(av, gv, 1.0):
+                errors.append(f"{key}.Benchmark: {av} vs {gv} (tol=1.0)")
 
-            if len(a_row) > 7 and len(g_row) > 7:
-                if not num_close(a_row[7], g_row[7], 0.1):
-                    errors.append(f"{key}.Variance_Pct: {a_row[7]} vs {g_row[7]} (tol=0.1)")
+            av = _cell(a_row, a_col.get("variance"))
+            gv = _cell(g_row, g_col.get("variance"))
+            if av is not None and gv is not None and not num_close(av, gv, 1.0):
+                errors.append(f"{key}.Variance: {av} vs {gv} (tol=1.0)")
+
+            av = _cell(a_row, a_col.get("variance_pct"))
+            gv = _cell(g_row, g_col.get("variance_pct"))
+            if av is not None and gv is not None and not num_close(av, gv, 0.1):
+                errors.append(f"{key}.Variance_Pct: {av} vs {gv} (tol=0.1)")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")
@@ -134,21 +167,30 @@ def main():
         errors = []
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
-        
+
+        # Locate columns by header name (order-independent).
+        a_col = _header_map(a_rows)
+        g_col = _header_map(g_rows)
+
         a_lookup = {}
         for row in a_data:
-            if row and row[0] is not None:
-                a_lookup[str(row[0]).strip().lower()] = row
+            # Row key is the Metric column (column 0 by convention).
+            metric = _cell(row, 0)
+            if metric is not None:
+                a_lookup[str(metric).strip().lower()] = row
         for g_row in g_data:
-            if not g_row or g_row[0] is None:
+            g_metric = _cell(g_row, 0)
+            if g_metric is None:
                 continue
-            key = str(g_row[0]).strip().lower()
+            key = str(g_metric).strip().lower()
             a_row = a_lookup.get(key)
             if a_row is None:
-                errors.append(f"Missing row: {g_row[0]}")
+                errors.append(f"Missing row: {g_metric}")
                 continue
-            
-            if len(a_row) > 1 and len(g_row) > 1:
+
+            av = _cell(a_row, a_col.get("value"))
+            gv = _cell(g_row, g_col.get("value"))
+            if av is not None and gv is not None:
                 # Per-metric tolerance: counts exact, others 0.5 abs
                 key_l = key.lower()
                 is_count = (
@@ -158,8 +200,8 @@ def main():
                     or "departments_below" in key_l
                 )
                 tol = 0 if is_count else 0.5
-                if not num_close(a_row[1], g_row[1], tol):
-                    errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (tol={tol})")
+                if not num_close(av, gv, tol):
+                    errors.append(f"{key}.Value: {av} vs {gv} (tol={tol})")
         if errors:
             all_errors.extend(errors)
             print(f"    ERRORS: {len(errors)}")

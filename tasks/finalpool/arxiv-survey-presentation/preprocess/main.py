@@ -185,8 +185,12 @@ def inject_arxiv_latex(conn, papers):
             if "latex_sections" not in p:
                 continue
             sections = p["latex_sections"]
-            parts = [f"\\section{{{s['title']}}}\n{s['content']}" for s in sections]
-            full_prompt = f"\\title{{{p['title']}}}\n\\begin{{abstract}}\n{p['abstract']}\n\\end{{abstract}}\n\n" + "\n\n".join(parts)
+            # Section headings must appear as markdown '#' lines: the
+            # arxiv-latex MCP's list_sections/extract_section only parse lines
+            # starting with '#'. The \title/\begin{abstract} preamble is kept
+            # in LaTeX form so it is NOT counted as a section.
+            parts = [f"# {s['title']}\n{s['content']}" for s in sections]
+            full_prompt = f"\\title{{{p['title']}}}\n\n\\begin{{abstract}}\n{p['abstract']}\n\\end{{abstract}}\n\n" + "\n\n".join(parts)
             cur.execute("""
                 INSERT INTO arxiv_latex.papers (id, title, abstract, full_prompt, sections)
                 VALUES (%s, %s, %s, %s, %s)

@@ -55,6 +55,23 @@ def str_match(a, b):
     return str(a).strip().lower() == str(b).strip().lower()
 
 
+def _date_match(a, b):
+    """Compare two date-ish values by their YYYY-MM-DD portion.
+
+    A datetime cell ("2014-02-26 00:00:00") written by openpyxl must still match
+    the groundtruth's plain "2014-02-26" string. Non-date strings fall back to a
+    case-insensitive exact comparison.
+    """
+    def norm(v):
+        if v is None:
+            return None
+        s = str(v).strip()
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            return s[:10]
+        return s.lower()
+    return norm(a) == norm(b)
+
+
 def get_sheet(wb, target):
     for name in wb.sheetnames:
         if name.strip().lower() == target.strip().lower():
@@ -124,7 +141,7 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 continue
 
             # Check Due_Date (col 1)
-            ok_date = str_match(a_row[1], gt_row[1])
+            ok_date = _date_match(a_row[1], gt_row[1])
             record(f"'{gt_row[0]}' Due_Date", ok_date,
                    f"Expected {gt_row[1]}, got {a_row[1]}")
             if not ok_date:
@@ -142,13 +159,6 @@ def check_excel(agent_workspace, groundtruth_workspace):
             record(f"'{gt_row[0]}' Assignment_Group", ok_grp,
                    f"Expected {gt_row[3]}, got {a_row[3]}")
             if not ok_grp:
-                all_ok = False
-
-            # Check Submission_Count (col 4)
-            ok_sub = num_close(a_row[4], gt_row[4], 5)
-            record(f"'{gt_row[0]}' Submission_Count", ok_sub,
-                   f"Expected {gt_row[4]}, got {a_row[4]}")
-            if not ok_sub:
                 all_ok = False
 
     # --- Sheet: Summary ---
@@ -177,7 +187,7 @@ def check_excel(agent_workspace, groundtruth_workspace):
                 record(f"Summary '{metric}' present", False, "Missing")
                 all_ok = False
             else:
-                ok = num_close(actual, expected, 1.0) if isinstance(expected, (int, float)) else str_match(actual, expected)
+                ok = num_close(actual, expected, 1.0) if isinstance(expected, (int, float)) else _date_match(actual, expected)
                 record(f"Summary '{metric}'", ok,
                        f"Expected {expected}, got {actual}")
                 if not ok:

@@ -27,10 +27,14 @@ def clear_tables(conn):
         cur.execute("DELETE FROM email.attachments")
         cur.execute("DELETE FROM email.sent_log")
         cur.execute("DELETE FROM email.messages")
-        try:
+        # email.drafts may be absent in some live schemas; clear it only if it
+        # exists so a missing table cannot roll back the DELETEs above.
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema='email' AND table_name='drafts')"
+        )
+        if cur.fetchone()[0]:
             cur.execute("DELETE FROM email.drafts")
-        except Exception:
-            conn.rollback()
     conn.commit()
     print("[preprocess] Cleared gcal and email tables.")
 

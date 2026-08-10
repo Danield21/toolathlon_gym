@@ -177,7 +177,7 @@ def main():
     print(f"  Checking Google Sheet 'Support Issue Dashboard'...")
     try:
         import psycopg2
-        conn = psycopg2.connect(host='localhost', port=5432, database='toolathlon_gym',
+        conn = psycopg2.connect(host=os.environ.get('PGHOST', 'localhost'), port=5432, database='toolathlon_gym',
                                 user='eigent', password='camel', connect_timeout=5)
         cur = conn.cursor()
         cur.execute(

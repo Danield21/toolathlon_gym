@@ -194,10 +194,11 @@ def check_pptx(agent_workspace, expected):
         num_slides = len(prs.slides)
 
         expected_slides = len(expected) + 2  # title + per-category + summary
-        # Tighten: must be exactly title + N + summary (no ±2)
-        record(f"Slide count exactly {expected_slides}",
-               num_slides == expected_slides,
-               f"Got {num_slides}")
+        # Allow up to 2 extra slides (e.g. agenda/thank-you/divider) on top of the
+        # required title + one-per-category + summary structure.
+        record(f"Slide count {expected_slides} (allow up to +2)",
+               expected_slides <= num_slides <= expected_slides + 2,
+               f"Got {num_slides}, expected {expected_slides}..{expected_slides + 2}")
 
         # Check for title slide (slide 1)
         first_slide = prs.slides[0]
@@ -242,14 +243,29 @@ def check_pptx(agent_workspace, expected):
             slide_text = " ".join(
                 shape.text for shape in slide.shapes if shape.has_text_frame
             ).lower()
-            # Check the 4 metrics by value (text-based contains)
-            pc = str(cat_info['product_count'])
-            av = str(cat_info['avg_price'])
-            tu = str(cat_info['total_units_sold'])
-            ar = str(cat_info['avg_rating'])
-            metrics_found = sum(
-                1 for v in [pc, av, tu, ar] if v in slide_text
-            )
+            # Check the 4 metrics by value. Extract all numeric tokens from the
+            # slide text and compare each expected value with tolerance, so a
+            # rounded rendering (e.g. 78.1 vs 78.05) still matches.
+            import re as _re
+            numeric_tokens = []
+            for tok in _re.findall(r"[-+]?\d*\.?\d+", slide_text):
+                try:
+                    numeric_tokens.append(float(tok))
+                except ValueError:
+                    pass
+
+            def _value_present(expected_val, tol):
+                try:
+                    ev = float(expected_val)
+                except (TypeError, ValueError):
+                    return str(expected_val) in slide_text
+                return any(num_close(ev, t, tol) for t in numeric_tokens)
+
+            pc_ok = _value_present(cat_info['product_count'], 0)
+            av_ok = _value_present(cat_info['avg_price'], 1.0)
+            tu_ok = _value_present(cat_info['total_units_sold'], 2)
+            ar_ok = _value_present(cat_info['avg_rating'], 0.1)
+            metrics_found = sum(1 for ok in [pc_ok, av_ok, tu_ok, ar_ok] if ok)
             record(
                 f"Slide for '{cat_info['category']}' has at least 3 of 4 metric values",
                 metrics_found >= 3,

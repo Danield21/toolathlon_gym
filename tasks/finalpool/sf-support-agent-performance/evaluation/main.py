@@ -270,7 +270,13 @@ def main():
         try:
             from docx import Document
             doc = Document(docx_path)
-            text = " ".join(p.text for p in doc.paragraphs)
+            parts = [p.text for p in doc.paragraphs]
+            # Include table cell text so agent names written into tables count.
+            for _tbl in doc.tables:
+                for _row in _tbl.rows:
+                    for _cell in _row.cells:
+                        parts.append(_cell.text)
+            text = " ".join(parts)
             text_lower = text.lower()
             if len(text.strip()) < 200:
                 all_errors.append(f"Agent_Review.docx too short ({len(text)} chars, need >=200)")
@@ -283,6 +289,32 @@ def main():
                 names_mentioned = sum(1 for a in expected_agents if a["name"] in text)
                 if names_mentioned < 3:
                     all_errors.append(f"Agent_Review.docx mentions only {names_mentioned} agents (need >=3)")
+
+                # The "highlights" must name a real top performer (most tickets),
+                # and the "needing attention" section must name a real low
+                # performer — generic keywords alone are not sufficient. The
+                # attention set accepts lowest-satisfaction OR fewest-tickets
+                # agents, since "needing attention" can be read either way.
+                max_tk = max(a["tickets"] for a in expected_agents)
+                top_names = {a["name"] for a in expected_agents if a["tickets"] == max_tk}
+                attn_names = set()
+                sat_agents = [a for a in expected_agents
+                              if a["avg_sat"] is not None and a["tickets"] > 0]
+                if sat_agents:
+                    min_sat = min(a["avg_sat"] for a in sat_agents)
+                    attn_names |= {a["name"] for a in sat_agents
+                                   if a["avg_sat"] == min_sat}
+                min_tk = min(a["tickets"] for a in expected_agents)
+                attn_names |= {a["name"] for a in expected_agents
+                               if a["tickets"] == min_tk}
+                if not any(n.lower() in text_lower for n in top_names):
+                    all_errors.append(
+                        f"Agent_Review.docx does not name a top performer "
+                        f"(one of {sorted(top_names)})")
+                if not any(n.lower() in text_lower for n in attn_names):
+                    all_errors.append(
+                        f"Agent_Review.docx does not name a low performer "
+                        f"needing attention (one of {sorted(attn_names)})")
             # Highlights / attention section — drop 'performance' (already required globally)
             has_highlights = any(k in text_lower for k in ["highlight", "top", "best"])
             has_attention = any(k in text_lower for k in ["attention", "needs", "concern", "improve"])

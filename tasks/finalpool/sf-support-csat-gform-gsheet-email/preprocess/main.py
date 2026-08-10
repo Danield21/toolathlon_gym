@@ -6,7 +6,13 @@ import os
 import shutil
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym", user="eigent", password="camel")
+DB = dict(
+    host=os.environ.get("PGHOST", "localhost"),
+    port=int(os.environ.get("PGPORT", "5432")),
+    dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
+    user=os.environ.get("PGUSER", "eigent"),
+    password=os.environ.get("PGPASSWORD", "camel"),
+)
 
 
 def clear_writable_schemas(conn):

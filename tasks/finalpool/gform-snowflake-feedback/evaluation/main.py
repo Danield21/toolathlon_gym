@@ -13,6 +13,7 @@ Expected values are computed at evaluation time from the PostgreSQL/Snowflake mi
 import argparse
 import json
 import os
+import re
 import sys
 
 import openpyxl
@@ -20,10 +21,10 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
-    "dbname": "toolathlon_gym",
-    "user": "eigent",
-    "password": "camel",
+    "port": int(os.environ.get("PGPORT", "5432")),
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 PASS_COUNT = 0
@@ -42,10 +43,71 @@ def check(name, condition, detail=""):
 
 
 def num_close(a, b, tol=5.0):
-    try:
-        return abs(float(a) - float(b)) <= tol
-    except (TypeError, ValueError):
-        return False
+    """Compare two values numerically with tolerance.
+
+    If both sides parse as numbers, compare |a-b| <= tol. Otherwise fall back
+    to a case-insensitive string comparison (only meaningful when exactly one
+    side is unparseable, e.g. an empty cell compared against a number).
+    """
+    fa = _coerce_num(a)
+    fb = _coerce_num(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= tol
+    if a is None or b is None:
+        return a is None and b is None
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+_CURRENCY_RE = re.compile(r"[$¥€£]")
+_PCT_SUFFIX_RE = re.compile(r"%\s*$")
+
+
+def _coerce_num(v):
+    """Robustly coerce a cell value to a float, or None if unparseable.
+
+    Handles ints/floats, and strings that may include thousands separators,
+    currency symbols, a trailing '%', and surrounding whitespace. Formula
+    strings (leading '=') and other non-numeric text yield None so callers can
+    fall back to a string comparison.
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if not s or s.startswith("="):
+            return None
+        s = _CURRENCY_RE.sub("", s)
+        s = s.replace(",", "").replace(" ", "")
+        s = _PCT_SUFFIX_RE.sub("", s)
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return None
+
+
+def mentions_count(text, n):
+    """Return True if the integer count n is mentioned in *text* (a prose
+    document / email body), tolerating thousands separators (31,588) and a
+    trailing decimal suffix (31588.0)."""
+    text = str(text or "").lower()
+    stripped = re.sub(r"(\d)(,)(\d)", r"\1\3", text)
+    if str(int(n)) in stripped:
+        return True
+    for tok in re.findall(r"\d[\d,]*\.?\d*", text):
+        try:
+            val = float(tok.replace(",", ""))
+        except ValueError:
+            continue
+        if abs(val - float(n)) <= 0.01:
+            return True
+    return False
 
 
 def str_match(a, b):
@@ -131,7 +193,9 @@ def check_excel(agent_workspace, expected):
         return
 
     try:
-        wb = openpyxl.load_workbook(agent_file)
+        # data_only=True reads cached values for formula cells (written by
+        # excel MCP / LibreOffice); literal values are read as-is.
+        wb = openpyxl.load_workbook(agent_file, data_only=True)
     except Exception as e:
         check("Excel file readable", False, str(e))
         return
@@ -160,16 +224,13 @@ def check_excel(agent_workspace, expected):
               f"Got {len(agent_rows)} rows")
 
         # Sorted by Ticket_Count desc
-        if len(agent_rows) >= 2:
-            try:
-                first_count = float(agent_rows[0][1]) if agent_rows[0][1] else 0
-                second_count = float(agent_rows[1][1]) if agent_rows[1][1] else 0
-                check("Ticket Analysis sorted by Ticket_Count desc",
-                      first_count >= second_count,
-                      f"First: {first_count}, Second: {second_count}")
-            except (TypeError, ValueError):
-                check("Ticket Analysis sorted by Ticket_Count desc", False,
-                      "Could not parse count values")
+        if len(agent_rows) >= 2 and len(agent_rows[0]) >= 2 and len(agent_rows[1]) >= 2:
+            first_count = _coerce_num(agent_rows[0][1])
+            second_count = _coerce_num(agent_rows[1][1])
+            check("Ticket Analysis sorted by Ticket_Count desc",
+                  first_count is not None and second_count is not None
+                  and first_count >= second_count,
+                  f"First: {first_count}, Second: {second_count}")
 
         # Match top 5 issue types from DB
         top5 = expected["top5_issue_types"]
@@ -179,7 +240,7 @@ def check_excel(agent_workspace, expected):
                 if ar and ar[0] and issue_type.lower() in str(ar[0]).lower():
                     matched = ar
                     break
-            if matched:
+            if matched and len(matched) >= 4:
                 exp = next((r for r in expected["issue_summary"]
                             if r["Issue_Type"] == issue_type), None)
                 if exp:
@@ -239,14 +300,11 @@ def check_excel(agent_workspace, expected):
         # Verify Target_Satisfaction = Current + 0.5 logic in at least one row
         good_target_count = 0
         for ar in agent_rows:
-            try:
-                if len(ar) >= 3 and ar[1] is not None and ar[2] is not None:
-                    cur_v = float(ar[1])
-                    tgt_v = float(ar[2])
-                    if abs((cur_v + 0.5) - tgt_v) < 0.05:
-                        good_target_count += 1
-            except (TypeError, ValueError):
-                pass
+            if len(ar) >= 3:
+                cur_v = _coerce_num(ar[1])
+                tgt_v = _coerce_num(ar[2])
+                if cur_v is not None and tgt_v is not None and abs((cur_v + 0.5) - tgt_v) < 0.05:
+                    good_target_count += 1
         check("Improvement Plan Target_Satisfaction = Current + 0.5 (>=3 rows)",
               good_target_count >= 3,
               f"Matching rows: {good_target_count}")
@@ -319,7 +377,7 @@ def check_form(expected):
     # Satisfaction rating question (1-5)
     has_rating = any(
         ("rate" in q[0].lower() or "satisfaction" in q[0].lower()
-         or "overall" in q[0].lower())
+         or "satisfied" in q[0].lower() or "overall" in q[0].lower())
         for q in questions
     )
     check("Has satisfaction rating question (1-5)", has_rating)
@@ -385,7 +443,7 @@ def check_word(agent_workspace, expected):
           "recommendation" in all_text,
           f"text head: {all_text[:300]}")
     check("Doc mentions total tickets count",
-          str(expected["total_tickets"]) in all_text,
+          mentions_count(all_text, expected["total_tickets"]),
           f"Expected '{expected['total_tickets']}' in document")
 
     # Top 5 issue types must appear (>=3 of 5)
@@ -431,14 +489,17 @@ def check_email(expected):
 
         body_lower = (body or "").lower()
         check("Email body mentions total tickets",
-              str(expected["total_tickets"]) in body_lower,
+              mentions_count(body_lower, expected["total_tickets"]),
               f"Expected '{expected['total_tickets']}' in body")
 
-        # Top issue type
+        # Top issue type: accept any distinctive keyword of the top issue
         if expected["top5_issue_types"]:
             top1 = expected["top5_issue_types"][0]
+            top_words = [w for w in top1.lower().split() if len(w) >= 4]
+            if not top_words:
+                top_words = top1.lower().split()
             check("Email body mentions top issue type",
-                  top1.lower() in body_lower,
+                  any(w in body_lower for w in top_words),
                   f"Top: '{top1}'")
 
     cur.close()

@@ -5,7 +5,13 @@ Canvas is read-only.
 """
 import argparse
 import asyncio
+import json
 import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from urllib.request import urlopen
 
 import psycopg2
 
@@ -24,7 +30,7 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
     parser.add_argument("--launch_time", required=False)
-    args = parser.parse_args()
+    parser.parse_args()
 
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
@@ -46,23 +52,47 @@ async def main():
         cur.close()
         conn.close()
 
-    # Start mock HTTP server
-    task_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    serve_dir = os.path.join(task_root, "tmp", "mock_pages")
+    # The proxy stages task assets under files/. Keep the server in the
+    # preprocess worker's process group so the framework can reclaim it.
+    task_root = Path(__file__).resolve().parent.parent
+    serve_dir = task_root / "files"
+    standards_path = serve_dir / "api" / "workload_standards.json"
+    if not standards_path.is_file():
+        raise FileNotFoundError(f"Missing workload standards: {standards_path}")
 
-    kill_proc = await asyncio.create_subprocess_shell(
-        f"kill -9 $(lsof -ti:{PORT}) 2>/dev/null",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    server = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "http.server",
+            str(PORT),
+            "--bind",
+            "127.0.0.1",
+            "--directory",
+            str(serve_dir),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
-    await kill_proc.wait()
-    await asyncio.sleep(0.5)
 
-    await asyncio.create_subprocess_shell(
-        f"nohup python3 -m http.server {PORT} --directory {serve_dir} "
-        f"> {serve_dir}/server.log 2>&1 &"
-    )
-    await asyncio.sleep(1)
+    deadline = time.monotonic() + 5
+    url = f"http://127.0.0.1:{PORT}/api/workload_standards.json"
+    while True:
+        if server.poll() is not None:
+            raise RuntimeError("Workload standards server exited before becoming ready")
+        try:
+            with urlopen(url, timeout=0.5) as response:
+                observed = json.load(response)
+            if observed["grading_hours_per_student"] != 0.5:
+                raise RuntimeError("Workload standards server returned unexpected data")
+            break
+        except (OSError, KeyError, json.JSONDecodeError):
+            if time.monotonic() >= deadline:
+                server.terminate()
+                raise RuntimeError("Workload standards server did not become ready")
+            await asyncio.sleep(0.1)
+
     print(f"[preprocess] Mock server running at http://localhost:{PORT}")
     print("[preprocess] Done.")
 

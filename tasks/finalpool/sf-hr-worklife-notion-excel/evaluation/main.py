@@ -32,6 +32,27 @@ def load_sheet_rows(wb, sheet_name):
     return None
 
 
+def _norm_header(h):
+    return " ".join(str(h or "").strip().lower().replace("-", " ").replace("_", " ").split())
+
+
+def _header_map(rows):
+    """Map normalized header text -> 0-based column index from row 1 of a sheet."""
+    if not rows or not rows[0]:
+        return {}
+    return {_norm_header(h): i for i, h in enumerate(rows[0]) if _norm_header(h)}
+
+
+def _cell(row, idx):
+    """Safe cell access (None when idx out of range)."""
+    if row is None or idx is None:
+        return None
+    try:
+        return row[idx] if idx < len(row) else None
+    except (TypeError, IndexError):
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--agent_workspace", required=False)
@@ -69,6 +90,8 @@ def main():
         else:
             a_data = a_rows[1:] if len(a_rows) > 1 else []
             g_data = g_rows[1:] if len(g_rows) > 1 else []
+            a_col = _header_map(a_rows)
+            g_col = _header_map(g_rows)
 
             # Use GT row count (no hard-coded 7)
             expected_count = len(g_data)
@@ -89,18 +112,26 @@ def main():
                     all_errors.append(f"Missing department: {g_row[0]}")
                     continue
                 # Employee_Count
-                if not num_close(a_row[1], g_row[1], 1):
-                    all_errors.append(f"{g_row[0]} Employee_Count: {a_row[1]} vs {g_row[1]}")
+                av = _cell(a_row, a_col.get("employee count"))
+                gv = _cell(g_row, g_col.get("employee count"))
+                if not num_close(av, gv, 1):
+                    all_errors.append(f"{g_row[0]} Employee_Count: {av} vs {gv}")
                 # Avg_WLB
-                if not num_close(a_row[2], g_row[2], 0.05):
-                    all_errors.append(f"{g_row[0]} Avg_WLB: {a_row[2]} vs {g_row[2]}")
+                av = _cell(a_row, a_col.get("avg wlb"))
+                gv = _cell(g_row, g_col.get("avg wlb"))
+                if not num_close(av, gv, 0.05):
+                    all_errors.append(f"{g_row[0]} Avg_WLB: {av} vs {gv}")
                 # Avg_Job_Satisfaction
-                if not num_close(a_row[3], g_row[3], 0.05):
-                    all_errors.append(f"{g_row[0]} Avg_Job_Satisfaction: {a_row[3]} vs {g_row[3]}")
+                av = _cell(a_row, a_col.get("avg job satisfaction"))
+                gv = _cell(g_row, g_col.get("avg job satisfaction"))
+                if not num_close(av, gv, 0.05):
+                    all_errors.append(f"{g_row[0]} Avg_Job_Satisfaction: {av} vs {gv}")
                 # Combined_Score
-                if len(g_row) > 4 and len(a_row) > 4:
-                    if not num_close(a_row[4], g_row[4], 0.05):
-                        all_errors.append(f"{g_row[0]} Combined_Score: {a_row[4]} vs {g_row[4]}")
+                av = _cell(a_row, a_col.get("combined score"))
+                gv = _cell(g_row, g_col.get("combined score"))
+                if av is not None and gv is not None:
+                    if not num_close(av, gv, 0.05):
+                        all_errors.append(f"{g_row[0]} Combined_Score: {av} vs {gv}")
             print("    Done.")
 
         # Check Findings sheet
@@ -112,6 +143,8 @@ def main():
         else:
             a_data2 = a_rows2[1:] if len(a_rows2) > 1 else []
             g_data2 = g_rows2[1:] if g_rows2 and len(g_rows2) > 1 else []
+            a_col2 = _header_map(a_rows2)
+            g_col2 = _header_map(g_rows2)
             a_lookup2 = {}
             for row in a_data2:
                 if row and row[0]:
@@ -134,8 +167,8 @@ def main():
                 if a_row is None:
                     all_errors.append(f"Findings missing {g_row[0]} row")
                     continue
-                a_val = a_row[1] if len(a_row) > 1 else None
-                g_val = g_row[1] if len(g_row) > 1 else None
+                a_val = _cell(a_row, a_col2.get("value"))
+                g_val = _cell(g_row, g_col2.get("value"))
                 if metric_key == "best_wlb_department":
                     av = str(a_val).strip().lower() if a_val is not None else ""
                     if av not in ACCEPTABLE_BEST_WLB:

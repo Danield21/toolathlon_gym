@@ -1,16 +1,29 @@
 """Evaluation script for canvas-grades-gsheet-pdf-email."""
 import os
-import argparse, json, os, sys
+import argparse, json, os, sys, re
 import openpyxl
 
 def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
     return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
 
 
+def _env(*names, default):
+    """Read the first defined env var among ``names`` (supports both the
+    PGHOST/PGPORT/... dash form used by the harness runtime and the
+    PG_HOST/PG_PORT/... underscore form used by the MCP servers)."""
+    for n in names:
+        v = os.environ.get(n)
+        if v:
+            return v
+    return default
+
+
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
-    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
-    "user": "eigent", "password": "camel"
+    "host": _env("PGHOST", "PG_HOST", default="localhost"),
+    "port": int(_env("PGPORT", "PG_PORT", default="5432")),
+    "dbname": _env("PGDATABASE", "PG_DATABASE", default="toolathlon_gym"),
+    "user": _env("PGUSER", "PG_USER", default="eigent"),
+    "password": _env("PGPASSWORD", "PG_PASSWORD", default="camel"),
 }
 
 PASS_COUNT = 0
@@ -33,6 +46,60 @@ def safe_float(val, default=None):
     except (ValueError, TypeError):
         return default
 
+
+# ---------------------------------------------------------------------------
+# Course-name matching helpers.
+# LMS course names carry a semester suffix, e.g.
+#   "Environmental Economics & Ethics (Fall 2014)".
+# A model that completes the task correctly may write only the course family
+# ("Environmental Economics & Ethics") or use "&"/"and" interchangeably, both
+# in the email body and in the Department_Summary highest/lowest rows.  These
+# helpers accept the full name, the family name, and &/and spelling variants so
+# a correct model is never penalised for phrasing.
+# ---------------------------------------------------------------------------
+def _course_family(name):
+    """Return the course name with a trailing '(Fall|Spring|Summer|Winter YYYY)'
+    parenthetical removed (identity if there is none)."""
+    s = str(name or "").strip()
+    s = re.sub(r"\s*\((?:fall|spring|summer|winter)\s*20\d\d\)\s*$", "", s, flags=re.IGNORECASE)
+    return s
+
+
+def mentions_course(body_l, course_name):
+    """True if the (lowercased) email body mentions the course, allowing the
+    family name without semester suffix and '&'/'and' spelling variants."""
+    if not course_name:
+        return False
+    full = str(course_name).lower().strip()
+    fam = _course_family(course_name).lower().strip()
+    candidates = set(f for f in (full, fam) if f)
+    if any(c in body_l for c in candidates):
+        return True
+    body_and = body_l.replace("&", "and")
+    return any(c.replace("&", "and") in body_and for c in candidates)
+
+
+def course_names_match(a, b):
+    """Tolerant equality for course-name cells (highest/lowest rows): exact
+    match, family-name match, &/and variants, or one a distinctive substring of
+    the other (truncated family name)."""
+    if a is None or b is None:
+        return False
+    a, b = str(a).strip().lower(), str(b).strip().lower()
+    if a == b:
+        return True
+
+    def norm(s):
+        s = _course_family(s).lower().replace("&", "and")
+        return re.sub(r"\s+", " ", s).strip()
+
+    na, nb = norm(a), norm(b)
+    if na and nb and na == nb:
+        return True
+    if len(na) >= 5 and len(nb) >= 5 and (na in nb or nb in na):
+        return True
+    return False
+
 def get_conn():
     import psycopg2
     return psycopg2.connect(**DB_CONFIG)
@@ -51,6 +118,91 @@ def get_gt_data(groundtruth_workspace):
             headers = [str(c).strip().lower() if c else "" for c in rows[0]]
             out[sheet_name] = {"headers": headers, "rows": [tuple(r) for r in rows[1:]]}
     return out
+
+
+# ---------------------------------------------------------------------------
+# Expected-value computation from the shared DB (immutable seed).
+# Rule (mirrors docs/task.md): for each course, take every student enrollment's
+# grades.final_score as that student's overall score. Students with no recorded
+# final score are excluded. Bucket with A>=90, B 80-89, C 70-79, D 60-69, F<60.
+# ---------------------------------------------------------------------------
+def _extract_final_score(grades):
+    if grades is None:
+        return None
+    if isinstance(grades, dict):
+        fs = grades.get("final_score")
+    else:
+        try:
+            fs = json.loads(grades).get("final_score")
+        except (TypeError, ValueError):
+            return None
+    if fs is None:
+        return None
+    try:
+        return float(fs)
+    except (TypeError, ValueError):
+        return None
+
+
+def compute_expected_from_db(cur):
+    """Compute expected Grade_Distribution + Department_Summary from canvas seed.
+    Returns (expected_dict, summary_dict). expected_dict has the same shape as
+    get_gt_data() output so check_gsheet_against_gt() can consume it."""
+    cur.execute("SELECT id, name FROM canvas.courses ORDER BY name")
+    courses = cur.fetchall()
+    grade_rows = []
+    total_students = 0
+    weighted_sum = 0.0
+    pass_count_total = 0
+    course_avgs = {}
+    for cid, name in courses:
+        cur.execute("SELECT grades FROM canvas.enrollments WHERE course_id = %s", (cid,))
+        scores = []
+        for (g,) in cur.fetchall():
+            fs = _extract_final_score(g)
+            if fs is not None:
+                scores.append(fs)
+        n = len(scores)
+        a = sum(1 for s in scores if s >= 90)
+        b = sum(1 for s in scores if 80 <= s < 90)
+        c = sum(1 for s in scores if 70 <= s < 80)
+        d = sum(1 for s in scores if 60 <= s < 70)
+        f = sum(1 for s in scores if s < 60)
+        avg = sum(scores) / n if n else 0.0
+        pass_rate = round(100.0 * (a + b + c) / n, 1) if n else 0.0
+        grade_rows.append((name, a, b, c, d, f, n, pass_rate, round(avg, 1)))
+        total_students += n
+        weighted_sum += avg * n
+        pass_count_total += (a + b + c)
+        course_avgs[name] = avg
+
+    summary = {
+        "Total_Courses": len(grade_rows),
+        "Total_Students": total_students,
+        "Overall_Pass_Rate": round(100.0 * pass_count_total / total_students, 1) if total_students else 0.0,
+        "Overall_Avg_Grade": round(weighted_sum / total_students, 1) if total_students else 0.0,
+        "Highest_Avg_Course": max(course_avgs, key=course_avgs.get) if course_avgs else None,
+        "Lowest_Avg_Course": min(course_avgs, key=course_avgs.get) if course_avgs else None,
+    }
+    expected = {
+        "Grade_Distribution": {
+            "headers": ["course_name", "a_count", "b_count", "c_count", "d_count",
+                        "f_count", "total_students", "pass_rate_pct", "course_avg"],
+            "rows": grade_rows,
+        },
+        "Department_Summary": {
+            "headers": ["metric", "value"],
+            "rows": [
+                ("Total_Courses", summary["Total_Courses"]),
+                ("Total_Students", summary["Total_Students"]),
+                ("Overall_Pass_Rate", summary["Overall_Pass_Rate"]),
+                ("Overall_Avg_Grade", summary["Overall_Avg_Grade"]),
+                ("Highest_Avg_Course", summary["Highest_Avg_Course"]),
+                ("Lowest_Avg_Course", summary["Lowest_Avg_Course"]),
+            ],
+        },
+    }
+    return expected, summary
 
 
 def check_gsheet_against_gt(cur, gt_data):
@@ -157,8 +309,16 @@ def check_gsheet_against_gt(cur, gt_data):
                     gs = str(gv).strip().lower()
                     avs = str(av or "").strip().lower()
                     if gs and gs != avs:
-                        check(f"GSheet '{gt_sheet_name}' '{gt_row[0]}' {h}",
-                              False, f"expected '{gs[:50]}', got '{avs[:50]}'")
+                        # Highest_Avg_Course / Lowest_Avg_Course values are
+                        # course names; tolerate family names without the
+                        # semester suffix and &/and spelling variants.
+                        if key_lower in ("highest_avg_course", "lowest_avg_course"):
+                            match_ok = course_names_match(gs, avs)
+                        else:
+                            match_ok = False
+                        if not match_ok:
+                            check(f"GSheet '{gt_sheet_name}' '{gt_row[0]}' {h}",
+                                  False, f"expected '{gs[:50]}', got '{avs[:50]}'")
 
 
 def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_file):
@@ -186,10 +346,25 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         conn = get_conn()
         cur = conn.cursor()
 
-        # Email check - require exact subject and recipient
+        # Expected values: prefer self-computed from the immutable canvas seed
+        # (deterministic); fall back to the static GT xlsx if the canvas tables
+        # are unavailable in this database.
+        expected = None
+        db_summary = None
+        try:
+            expected, db_summary = compute_expected_from_db(cur)
+        except Exception as e:
+            print(f"  [warn] DB self-compute of expected values failed, using GT xlsx: {e}")
+        if expected is None:
+            expected = gt_data
+
+        # Email check - require exact subject and recipient.
+        # Match any Sent-like folder (seed has 'Sent', 'SENT', 'Sent Messages',
+        # 'INBOX.Sent', 'Sent Items') so the check works whichever name the
+        # emails MCP writes sent messages under.
         cur.execute(
             "SELECT subject, to_addr, body_text FROM email.messages "
-            "WHERE folder_id = (SELECT id FROM email.folders WHERE name = 'Sent' LIMIT 1)"
+            "WHERE folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%sent%')"
         )
         sent = cur.fetchall()
         target_subj = "q1 2026 grade distribution report"
@@ -206,11 +381,13 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
             body_l = (match[2] or "").lower()
             check("Email body mentions overall pass rate",
                   "pass" in body_l and ("rate" in body_l or "%" in body_l))
-            # Tightened: require the actual highest/lowest course names from GT to appear in body
-            # (not just generic words "highest"/"lowest")
+            # Highest / lowest performing courses, taken from the expected data.
             highest_name = None
             lowest_name = None
-            if gt_data and "Department_Summary" in gt_data:
+            if db_summary is not None:
+                highest_name = db_summary.get("Highest_Avg_Course")
+                lowest_name = db_summary.get("Lowest_Avg_Course")
+            elif gt_data and "Department_Summary" in gt_data:
                 for row in gt_data["Department_Summary"]["rows"]:
                     if row and len(row) >= 2:
                         label = str(row[0] or "").strip().lower()
@@ -221,20 +398,27 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                             lowest_name = val
             if highest_name:
                 check(f"Email body mentions highest course '{highest_name}'",
-                      highest_name.lower() in body_l)
+                      mentions_course(body_l, highest_name))
             else:
                 check("Email body mentions highest course (label-only fallback)",
                       "highest" in body_l)
             if lowest_name:
                 check(f"Email body mentions lowest course '{lowest_name}'",
-                      lowest_name.lower() in body_l)
+                      mentions_course(body_l, lowest_name))
             else:
                 check("Email body mentions lowest course (label-only fallback)",
                       "lowest" in body_l)
+            # Courses with pass rate below 70% require review (task requirement).
+            # Accept the common phrasings a correct model may use for "below 70%".
+            review_signal = any(k in body_l for k in
+                                ("review", "below", "under", "less", "threshold",
+                                 "attention", "flag", "investigate"))
+            check("Email flags courses below 70% pass rate for review",
+                  "70" in body_l and review_signal)
 
-        # Google Sheet check using gt_data
-        if gt_data is not None:
-            check_gsheet_against_gt(cur, gt_data)
+        # Google Sheet check using expected values
+        if expected is not None:
+            check_gsheet_against_gt(cur, expected)
         else:
             cur.execute("SELECT COUNT(*) FROM gsheet.spreadsheets")
             check("Google Sheet created", cur.fetchone()[0] >= 1)
@@ -242,7 +426,7 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         # Reverse verification: noise emails should not be forwarded
         cur.execute(
             "SELECT COUNT(*) FROM email.messages "
-            "WHERE folder_id = (SELECT id FROM email.folders WHERE name = 'Sent' LIMIT 1) "
+            "WHERE folder_id IN (SELECT id FROM email.folders WHERE LOWER(name) LIKE '%sent%') "
             "AND subject ILIKE '%newsletter%'"
         )
         noise_sent = cur.fetchone()[0]

@@ -4,4 +4,4 @@ Create an Excel file called SLA_Compliance_Report.xlsx in the workspace with two
 
 The second sheet should be named "Summary" with columns Metric and Value. Include the following rows: Total_Tickets (the grand total across all priorities), Overall_Compliance_Rate (percentage across all tickets, rounded to two decimal places), Worst_Priority (the priority with the lowest compliance rate), and Best_Priority (the priority with the highest compliance rate).
 
-After creating the report, send an email from ops-report@company.com to ops-manager@company.com with subject "SLA Compliance Report Summary" containing the overall compliance rate and the worst performing priority in the body text.
+After creating the report, send an email to ops-manager@company.com with subject "SLA Compliance Report Summary" containing the overall compliance rate and the worst performing priority in the body text.

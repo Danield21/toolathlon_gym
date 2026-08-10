@@ -12,11 +12,16 @@ import os
 
 
 def get_conn():
+    # Accept both env naming families (PGHOST/PGPORT/PGDATABASE/... and the
+    # PG_HOST/PG_PORT/PG_DATABASE/... spelling the calendar MCP bridge reads), so
+    # preprocess clears the SAME database the agent writes into.
     import psycopg2
     return psycopg2.connect(
-        host=os.environ.get("PGHOST", "localhost"), port=5432,
-        dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
-        user="eigent", password="camel",
+        host=os.environ.get("PGHOST", os.environ.get("PG_HOST", "localhost")),
+        port=int(os.environ.get("PGPORT", os.environ.get("PG_PORT", "5432"))),
+        dbname=os.environ.get("PGDATABASE", os.environ.get("PG_DATABASE", "toolathlon_gym")),
+        user=os.environ.get("PGUSER", os.environ.get("PG_USER", "eigent")),
+        password=os.environ.get("PGPASSWORD", os.environ.get("PG_PASSWORD", "camel")),
     )
 
 

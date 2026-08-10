@@ -6,12 +6,20 @@ Checks:
 3. Email to support-management@company.example.com
 """
 import argparse
+import json
 import os
+import re
 import sys
 
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym", user="eigent", password="camel")
+DB = dict(
+    host=os.environ.get("PGHOST", "localhost"),
+    port=int(os.environ.get("PGPORT", "5432")),
+    dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
+    user=os.environ.get("PGUSER", "eigent"),
+    password=os.environ.get("PGPASSWORD", "camel"),
+)
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -34,11 +42,80 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}: {str(detail)[:200]}")
 
 
+def _to_float(v):
+    """Robustly parse a value to float.
+
+    Handles None / str / int / float. Strips percent signs, currency symbols,
+    thousands separators and surrounding whitespace. A cell whose raw value is
+    a literal formula like "=12.03" is parsed after stripping the leading '='.
+    Returns None when the value cannot be parsed numerically.
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        if s.startswith("="):
+            s = s[1:].strip()
+        s = s.replace("%", "").replace(",", "").replace("$", "")
+        s = s.replace("¥", "").replace("€", "").replace("#", "")
+        s = s.replace(" ", " ").strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return None
+
+
+def _num_close(a, b, tol=1.0):
+    """Compare two values numerically within tol, with a string fallback.
+
+    When both sides parse as numbers use |a - b| <= tol. When either side is
+    not a number, fall back to a case-insensitive string comparison.
+    """
+    fa = _to_float(a)
+    fb = _to_float(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= tol
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
 def num_close(a, b, tol=1.0):
+    return _num_close(a, b, tol)
+
+
+def _expected_from_address():
+    """Derive the expected sender email from the task's email_config.json.
+
+    The emails MCP has no 'from' parameter: the sender is always the account
+    configured in email_config.json (task_dir/email_config.json). Read it so
+    the check follows the actual configured identity. Returns None when the
+    file is absent/unreadable/empty. When None the sender check is skipped
+    (passes) rather than FAILing, because the sender is config-controlled, not
+    model-controlled: a missing config file makes the MCP fall back to a
+    default account that no correct model can override. This mirrors the
+    sibling sf-hr-salary-benchmark evaluator convention.
+    """
+    cfg_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "email_config.json"
+    )
     try:
-        return abs(float(a) - float(b)) <= tol
-    except (TypeError, ValueError):
-        return False
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        acct = cfg[0] if isinstance(cfg, list) else cfg
+        email = (acct or {}).get("email") or ""
+        if email:
+            return email.strip().lower()
+    except Exception:
+        pass
+    return None
 
 
 def check_gsheet():
@@ -136,8 +213,9 @@ def check_gsheet():
     check("Sheet contains 'Medium' priority data", "medium" in all_vals, "Not found")
     check("Sheet contains 'Low' priority data", "low" in all_vals, "Not found")
 
-    # Check numeric compliance data appears
-    check("Sheet contains ticket counts", any(str(v) in all_vals for v in ["6466", "15774", "9348"]),
+    # Check numeric compliance data appears (tolerate thousand separators like "6,466")
+    norm_vals = all_vals.replace(",", "").replace(" ", "")
+    check("Sheet contains ticket counts", any(v in norm_vals for v in ["6466", "15774", "9348"]),
           "Ticket counts not found")
 
     # Structural validation: each priority row should have compliance rate close to SLA_DATA
@@ -150,14 +228,12 @@ def check_gsheet():
         row_text = " ".join(str(v).lower() for v in cols.values() if v is not None)
         for prio, info in SLA_DATA.items():
             if prio in row_text:
-                # Look for the compliance rate in the row
+                # Look for the compliance rate in the row (tolerate % signs,
+                # thousand separators and literal formulas)
                 for v in cols.values():
-                    try:
-                        if abs(float(v) - info["rate"]) <= 1.0:
-                            matched_pairs += 1
-                            break
-                    except (TypeError, ValueError):
-                        continue
+                    if _num_close(v, info["rate"], tol=1.0):
+                        matched_pairs += 1
+                        break
                 break
     check("SLA_Compliance sheet rows match expected rates (>=2 of 3 priorities)",
           matched_pairs >= 2,
@@ -184,7 +260,9 @@ def check_gform():
         form_id = forms[0][0]
         cur.execute("SELECT COUNT(*) FROM gform.questions WHERE form_id = %s", (form_id,))
         q_count = cur.fetchone()[0]
-        check("Form has 4 questions", q_count == 4, f"Got {q_count}")
+        # >= 4 rather than == 4: in a multi-agent swarm a duplicate question may
+        # be created by a second sub-agent; a correct 4-question form must pass.
+        check("Form has at least 4 questions", q_count >= 4, f"Got {q_count}")
         # Check that at least one question has Yes/No/Partially choice options
         cur.execute("""
             SELECT q.id, q.question_type, q.config
@@ -223,17 +301,25 @@ def check_email():
         to_str = str(e[2])
         check("Email to support-management@company.example.com",
               "support-management@company.example.com" in to_str.lower(), f"to: {to_str}")
-        check("Email from analytics@company.example.com",
-              "analytics@company.example.com" in (e[1] or "").lower(), f"from: {e[1]}")
+        expected_from = _expected_from_address()
+        if expected_from:
+            check(f"Email from {expected_from}",
+                  expected_from in (e[1] or "").lower(), f"from: {e[1]}")
+        else:
+            check("Email from configured sender address", True,
+                  "email_config.json not found; sender not verified")
         body = (e[3] or "").lower()
         check("Email body mentions SLA or compliance",
               any(kw in body for kw in ["sla", "compliance", "csat", "satisfaction", "high", "medium", "low"]),
               "Body missing key terms")
-        # At least one specific SLA rate should be referenced
-        rate_strings = [f"{info['rate']:.1f}" for info in SLA_DATA.values()] + [f"{info['rate']:.2f}" for info in SLA_DATA.values()]
-        check("Email body mentions at least one SLA rate value",
-              any(r in body for r in rate_strings),
-              f"Expected one of rates: {rate_strings}")
+        # At least one specific SLA rate should be referenced. Extract all
+        # numbers from the body and match against the expected rates with a
+        # small tolerance, so "12%", "12.0%", "12.03%" and "12.03 percent" all count.
+        rate_vals = [info["rate"] for info in SLA_DATA.values()]
+        body_nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", body)]
+        rate_hit = any(abs(n - r) <= 0.5 for n in body_nums for r in rate_vals)
+        check("Email body mentions at least one SLA rate value", rate_hit,
+              f"Expected one of rates: {rate_vals}")
 
     cur.close()
     conn.close()

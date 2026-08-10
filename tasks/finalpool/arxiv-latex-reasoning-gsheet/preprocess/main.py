@@ -9,12 +9,13 @@ import json
 
 import psycopg2
 
+# Env-driven DB config; must point at the same database as evaluation/main.py.
 DB_CONN = {
     "host": os.environ.get("PGHOST", "localhost"),
     "port": int(os.environ.get("PGPORT", "5432")),
-    "dbname": "toolathlon_gym",
-    "user": "eigent",
-    "password": "camel",
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 REASONING_PAPERS = [
@@ -80,10 +81,14 @@ def inject_arxiv_latex_papers(conn):
     with conn.cursor() as cur:
         cur.execute("DELETE FROM arxiv_latex.papers")
         for p in REASONING_PAPERS + NOISE_PAPERS:
+            # full_prompt is populated so the arxiv-latex MCP's get_paper_prompt
+            # returns each paper's title and abstract (the title appears as a
+            # markdown '#' heading; get_paper_abstract alone returns no title).
+            full_prompt = f"# {p['title']}\n\n{p['abstract']}"
             cur.execute("""
-                INSERT INTO arxiv_latex.papers (id, title, abstract)
-                VALUES (%s, %s, %s)
-            """, (p["id"], p["title"], p["abstract"]))
+                INSERT INTO arxiv_latex.papers (id, title, abstract, full_prompt)
+                VALUES (%s, %s, %s, %s)
+            """, (p["id"], p["title"], p["abstract"], full_prompt))
     conn.commit()
     print(f"[preprocess] Injected {len(REASONING_PAPERS)} reasoning + {len(NOISE_PAPERS)} noise papers into arxiv_latex.papers")
 

@@ -8,8 +8,8 @@ Then retrieve the current stock data for each of the five tickers (GOOGL, AMZN, 
 
 Create a Google Sheet called "Weekly_Market_Analysis" with two sheets. The first sheet called "Sector Performance" should have columns Sector, Weekly_Return, Sector_Index, YTD_Return, Volatility, Consensus, and Target_Upside, with one row for each of the five sectors. The second sheet called "Stock vs Sector" should have columns Ticker, Stock_Price, Sector, Market_Cap_B (market cap in billions, rounded to 1 decimal), PE_Ratio, Dividend_Yield_Pct, Sector_Weekly_Return, and Sector_YTD_Return. Map each stock to its corresponding sector data from the dashboard.
 
-Next, create a Word document called "Weekly_Market_Report.docx" in the workspace as an executive summary. Include a title, a market overview paragraph, a section for each sector discussing the sector index performance alongside the representative stock, and a conclusion identifying the best and worst performing sectors for the week.
+Next, create a Word document called "Weekly_Market_Report.docx" in the workspace as an executive summary. Include a title, a market overview paragraph, a section for each sector discussing the sector index performance alongside the representative stock, and a conclusion identifying the best and worst performing sectors of the week ranked by weekly return (the sector with the highest weekly return is the best; the sector with the lowest weekly return is the worst, even if it is positive).
 
-Finally, send an email from analyst@investmentfirm.com to committee@investmentfirm.com with the subject "Weekly Market Analysis Report". The body should highlight the top performing sector and any sectors with negative weekly returns.
+Finally, send an email to committee@investmentfirm.com with the subject "Weekly Market Analysis Report" (the sender address is fixed by the email environment, so just use your default account). The body should highlight the top performing sector and any sectors with negative weekly returns.
 
 Save all output files to the workspace directory.

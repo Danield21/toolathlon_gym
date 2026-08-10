@@ -298,11 +298,7 @@ def check_email():
             record("Benchmark report email exists with correct subject", True,
                    f"Subject: {subject}")
 
-            from_ok = str_contains(from_addr, "academic") or str_contains(from_addr, "university")
-            record("Email from academic address", from_ok, f"From: {from_addr}")
-            if not from_ok:
-                all_ok = False
-
+            # Sender address is fixed by the email environment and not checked
             to_str = str(to_addr).lower()
             to_ok = "dean" in to_str
             record("Email to dean", to_ok, f"To: {to_addr}")

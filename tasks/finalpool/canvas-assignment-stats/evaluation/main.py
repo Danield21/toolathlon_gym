@@ -1,6 +1,7 @@
 """Evaluation for canvas-assignment-stats."""
 import argparse
 import os
+import re
 import sys
 import openpyxl
 
@@ -141,9 +142,18 @@ def main():
                 continue
             
             if len(a_row) > 1 and len(g_row) > 1:
-                # For string-valued metrics (e.g. Course_Most_Assignments) num_close
-                # falls back to case-insensitive string compare via tol=0.
-                if not num_close(a_row[1], g_row[1], 0):
+                # Numeric metrics (Total_Assignments, Total_TMAs, Total_CMAs) must
+                # match exactly. The one string metric, Course_Most_Assignments, is a
+                # course code; accept substring containment so an agent that writes
+                # "DDD-2013B - Data-Driven Design (Fall 2013)" still passes, while a
+                # genuinely wrong course code shares no substring and fails.
+                g_str = str(g_row[1]).strip()
+                a_str = str(a_row[1]).strip()
+                if re.fullmatch(r"-?\d+(?:\.\d+)?", g_str):
+                    ok = num_close(a_row[1], g_row[1], 0)
+                else:
+                    ok = g_str.lower() in a_str.lower()
+                if not ok:
                     errors.append(f"{key}.Value: {a_row[1]} vs {g_row[1]} (exact)")
         if errors:
             all_errors.extend(errors)

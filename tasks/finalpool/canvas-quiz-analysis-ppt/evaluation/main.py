@@ -171,15 +171,33 @@ def main():
                 per_slide_text.append(txt)
             all_ppt_text = " ".join(per_slide_text)
 
-            # Each course should have a dedicated slide (exclusive or primary)
-            for course in ["creative computing", "foundations of finance", "global governance"]:
+            # Each quiz-bearing course should have a dedicated slide. Derive the
+            # set of courses dynamically from the GT Course Summary sheet (the
+            # quiz-bearing Fall 2014 courses) instead of hardcoding course names.
+            quiz_bearing_courses = []
+            try:
+                gt_excel_for_courses = os.path.join(gt_dir, "Quiz_Performance.xlsx")
+                if os.path.exists(gt_excel_for_courses):
+                    gt_wb_for_courses = openpyxl.load_workbook(gt_excel_for_courses, data_only=True)
+                    g_cs_courses = load_sheet_rows(gt_wb_for_courses, "Course Summary")
+                    if g_cs_courses and len(g_cs_courses) > 1:
+                        for g_row in g_cs_courses[1:]:
+                            if g_row and g_row[0] is not None:
+                                full = str(g_row[0]).strip()
+                                # Search key = first two words, e.g. "creative computing"
+                                key = " ".join(full.lower().split()[:2])
+                                quiz_bearing_courses.append((full, key))
+            except Exception as e:
+                print(f"  [WARN] Could not derive quiz-bearing courses from GT: {e}")
+
+            for full, course in quiz_bearing_courses:
                 if course not in all_ppt_text:
-                    all_errors.append(f"PPT missing course: {course}")
+                    all_errors.append(f"PPT missing course: {full}")
                 else:
                     # Count slides where this course is the primary subject (appears in slide's first 150 chars)
                     primary_slides = sum(1 for t in per_slide_text[1:] if course in t[:150])
                     if primary_slides == 0:
-                        all_errors.append(f"PPT missing dedicated slide for course: {course}")
+                        all_errors.append(f"PPT missing dedicated slide for course: {full}")
 
             # Dynamically derive highest/lowest course from GT Course Summary sheet
             try:

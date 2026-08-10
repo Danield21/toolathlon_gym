@@ -74,14 +74,24 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                     for h in gt_headers:
                         if h:
                             check(f"{sheet_name} has {h} column", h in headers, f"headers: {headers[:10]}")
-                    # Strict row count parity
+                    # Row count parity. Data sheets (DW_Summary/Store_Summary/
+                    # Cross_Reference) require exact parity; Audit_Notes is
+                    # open-ended ("at least 3 observations" per task.md), so an
+                    # agent that records more findings than the GT must not fail.
                     gt_rows = [r for r in gt_ws.iter_rows(min_row=2, values_only=True) if r and r[0] is not None]
                     data_rows = [r for r in ws.iter_rows(min_row=2, values_only=True) if r and r[0] is not None]
-                    check(
-                        f"{sheet_name} has exactly {len(gt_rows)} data rows",
-                        len(data_rows) == len(gt_rows),
-                        f"got {len(data_rows)}",
-                    )
+                    if sheet_name.lower() == "audit_notes":
+                        check(
+                            f"{sheet_name} has at least {len(gt_rows)} data rows",
+                            len(data_rows) >= len(gt_rows),
+                            f"got {len(data_rows)}, need >= {len(gt_rows)}",
+                        )
+                    else:
+                        check(
+                            f"{sheet_name} has exactly {len(gt_rows)} data rows",
+                            len(data_rows) == len(gt_rows),
+                            f"got {len(data_rows)}",
+                        )
 
                     header_map = {h: i for i, h in enumerate(headers)}
 

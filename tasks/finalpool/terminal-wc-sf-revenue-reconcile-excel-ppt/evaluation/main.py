@@ -119,7 +119,12 @@ def check_excel(agent_ws, gt_dir):
         try:
             conn = psycopg2.connect(**DB)
             cur = conn.cursor()
-            cur.execute("SELECT COUNT(*), COALESCE(SUM(sales), 0) FROM sf_data.orders WHERE LOWER(region) = 'europe'")
+            cur.execute("""
+                SELECT COUNT(*), COALESCE(SUM(o."TOTAL_AMOUNT"), 0)
+                FROM sf_data."SALES_DW__PUBLIC__ORDERS" o
+                JOIN sf_data."SALES_DW__PUBLIC__CUSTOMERS" c ON o."CUSTOMER_ID" = c."CUSTOMER_ID"
+                WHERE LOWER(c."REGION") = 'europe'
+            """)
             expected_eu_count, expected_eu_rev = cur.fetchone()
             cur.close(); conn.close()
         except Exception:
@@ -157,7 +162,7 @@ def check_excel(agent_ws, gt_dir):
             """)
             wc_total_orders, wc_total_rev = cur.fetchone()
             wc_aov = float(wc_total_rev) / wc_total_orders if wc_total_orders else 0
-            cur.execute("SELECT COUNT(*), COALESCE(SUM(sales), 0) FROM sf_data.orders")
+            cur.execute('SELECT COUNT(*), COALESCE(SUM("TOTAL_AMOUNT"), 0) FROM sf_data."SALES_DW__PUBLIC__ORDERS"')
             sf_total_orders, sf_total_rev = cur.fetchone()
             sf_aov = float(sf_total_rev) / sf_total_orders if sf_total_orders else 0
             cur.close(); conn.close()

@@ -1,7 +1,8 @@
 """Evaluation for sf-hr-compensation-pdf-notion.
 
-Blocking checks: Compensation_Data.xlsx (Excel data comparison).
-Non-blocking: Notion page, PDF existence.
+All checks are blocking: Compensation_Data.xlsx (Excel data comparison),
+Compensation_Report.pdf (existence + extractable text with title/subtitle/
+date/department names), and the Notion page titled 'Compensation Analysis 2026'.
 """
 import argparse
 import os
@@ -71,6 +72,20 @@ def main():
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
 
+        # Header check (order-independent): all expected columns must be present.
+        expected_headers = [
+            "Department", "Employees", "Avg_Salary", "Min_Salary",
+            "Max_Salary", "Median_Salary",
+        ]
+        actual_headers = [str(c or "").strip() for c in (a_rows[0] if a_rows else [])]
+        header_lower = [h.lower() for h in actual_headers]
+        missing_headers = [h for h in expected_headers if h.lower() not in header_lower]
+        if missing_headers:
+            all_errors.append(f"Department Summary missing headers: {missing_headers}; found {actual_headers}")
+        # Map expected columns to the agent's column indices by header name so
+        # the column order in the output does not matter.
+        a_col = {h.lower(): i for i, h in enumerate(actual_headers)}
+
         a_lookup = {}
         for row in a_data:
             if row and row[0] is not None:
@@ -79,6 +94,14 @@ def main():
         a_dept_order = [str(r[0]).strip().lower() for r in a_data if r and r[0] is not None]
         if a_dept_order != sorted(a_dept_order):
             all_errors.append(f"Department Summary not sorted alphabetically: {a_dept_order}")
+        # (hkey, label, tolerance, GT column index). GT columns are fixed (1..5).
+        COLS = [
+            ("employees", "Employees", 1, 1),
+            ("avg_salary", "Avg_Salary", 1.0, 2),
+            ("min_salary", "Min_Salary", 1, 3),
+            ("max_salary", "Max_Salary", 1, 4),
+            ("median_salary", "Median_Salary", 1.0, 5),
+        ]
         for g_row in g_data:
             if not g_row or g_row[0] is None:
                 continue
@@ -87,26 +110,13 @@ def main():
             if a_row is None:
                 all_errors.append(f"Missing department: {g_row[0]}")
                 continue
-            # Col 1: Employees count - must be exact (deterministic data)
-            if len(a_row) > 1 and len(g_row) > 1:
-                if not num_close(a_row[1], g_row[1], 1):
-                    all_errors.append(f"{key}.Employees: {a_row[1]} vs {g_row[1]} (tol=1)")
-            # Col 2: Avg_Salary - tighter tolerance (rounded to 2 decimals)
-            if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 1.0):
-                    all_errors.append(f"{key}.Avg_Salary: {a_row[2]} vs {g_row[2]} (tol=1.0)")
-            # Col 3: Min_Salary - exact match
-            if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 1):
-                    all_errors.append(f"{key}.Min_Salary: {a_row[3]} vs {g_row[3]} (tol=1)")
-            # Col 4: Max_Salary - exact match
-            if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 1):
-                    all_errors.append(f"{key}.Max_Salary: {a_row[4]} vs {g_row[4]} (tol=1)")
-            # Col 5: Median_Salary - tight tolerance (rounded)
-            if len(a_row) > 5 and len(g_row) > 5:
-                if not num_close(a_row[5], g_row[5], 1.0):
-                    all_errors.append(f"{key}.Median_Salary: {a_row[5]} vs {g_row[5]} (tol=1.0)")
+            for hkey, label, tol, gcol in COLS:
+                ai = a_col.get(hkey)
+                if ai is None:
+                    continue  # missing header already reported above
+                if ai < len(a_row) and gcol < len(g_row):
+                    if not num_close(a_row[ai], g_row[gcol], tol):
+                        all_errors.append(f"{key}.{label}: {a_row[ai]} vs {g_row[gcol]} (tol={tol})")
         if not all_errors:
             print("    PASS")
 
@@ -123,11 +133,32 @@ def main():
         a_data = a_rows[1:] if len(a_rows) > 1 else []
         g_data = g_rows[1:] if len(g_rows) > 1 else []
 
+        # Header check (order-independent): all expected columns must be present.
+        expected_headers = [
+            "Department", "Education_Level", "Count", "Avg_Salary",
+            "Min_Salary", "Max_Salary",
+        ]
+        actual_headers = [str(c or "").strip() for c in (a_rows[0] if a_rows else [])]
+        header_lower = [h.lower() for h in actual_headers]
+        missing_headers = [h for h in expected_headers if h.lower() not in header_lower]
+        if missing_headers:
+            all_errors.append(f"Education Breakdown missing headers: {missing_headers}; found {actual_headers}")
+        # Map expected columns to the agent's column indices by header name so
+        # the column order in the output does not matter.
+        a_col = {h.lower(): i for i, h in enumerate(actual_headers)}
+
         a_lookup = {}
         for row in a_data:
             if row and row[0] is not None and row[1] is not None:
                 key = (str(row[0]).strip().lower(), str(row[1]).strip().lower())
                 a_lookup[key] = row
+        # (hkey, label, tolerance, GT column index). GT columns are fixed (2..5).
+        COLS = [
+            ("count", "Count", 1, 2),
+            ("avg_salary", "Avg_Salary", 1.0, 3),
+            ("min_salary", "Min_Salary", 1, 4),
+            ("max_salary", "Max_Salary", 1, 5),
+        ]
         for g_row in g_data:
             if not g_row or g_row[0] is None:
                 continue
@@ -136,22 +167,13 @@ def main():
             if a_row is None:
                 all_errors.append(f"Missing edu row: {g_row[0]} / {g_row[1]}")
                 continue
-            # Col 2: Count - exact (deterministic)
-            if len(a_row) > 2 and len(g_row) > 2:
-                if not num_close(a_row[2], g_row[2], 1):
-                    all_errors.append(f"{key}.Count: {a_row[2]} vs {g_row[2]} (tol=1)")
-            # Col 3: Avg_Salary - tight (rounded to 2 decimals)
-            if len(a_row) > 3 and len(g_row) > 3:
-                if not num_close(a_row[3], g_row[3], 1.0):
-                    all_errors.append(f"{key}.Avg_Salary: {a_row[3]} vs {g_row[3]} (tol=1.0)")
-            # Col 4: Min_Salary
-            if len(a_row) > 4 and len(g_row) > 4:
-                if not num_close(a_row[4], g_row[4], 1):
-                    all_errors.append(f"{key}.Min_Salary: {a_row[4]} vs {g_row[4]} (tol=1)")
-            # Col 5: Max_Salary
-            if len(a_row) > 5 and len(g_row) > 5:
-                if not num_close(a_row[5], g_row[5], 1):
-                    all_errors.append(f"{key}.Max_Salary: {a_row[5]} vs {g_row[5]} (tol=1)")
+            for hkey, label, tol, gcol in COLS:
+                ai = a_col.get(hkey)
+                if ai is None:
+                    continue  # missing header already reported above
+                if ai < len(a_row) and gcol < len(g_row):
+                    if not num_close(a_row[ai], g_row[gcol], tol):
+                        all_errors.append(f"{key[0]} / {key[1]}.{label}: {a_row[ai]} vs {g_row[gcol]} (tol={tol})")
 
         new_errors = len(all_errors) - prev_errors
         if new_errors == 0:

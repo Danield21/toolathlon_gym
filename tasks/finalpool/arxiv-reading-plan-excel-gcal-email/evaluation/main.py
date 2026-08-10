@@ -46,87 +46,104 @@ def str_match(a, b):
     return str(a).strip().lower() == str(b).strip().lower()
 
 
-def regenerate_gt_from_pg(gt_dir, launch_time=None):
-    """Regenerate groundtruth Reading_Plan.xlsx from PG so the GT mirrors the
-    exact data the agent receives through the arxiv MCP (single source of
-    truth). Idempotent: overwrite the GT file every eval run.
+# --- Fuzzy / normalized comparison helpers -----------------------------------
+# The task leaves some fields intentionally flexible (authors separator, the
+# "abbreviated title or topic area", and exact 100-char truncation of the
+# abstract). These helpers make the groundtruth comparison robust to the
+# legitimate variations a correct agent may produce, while still catching
+# genuinely wrong output. Published_Date and Category are also tolerant:
+# the date accepts the same year-month (published vs updated ambiguity) and
+# the category accepts any valid category string for the paper (primary vs
+# secondary), because the repository does not expose a direct-by-ID lookup.
 
-    This fixes the "hand-written simplified GT vs PG full data" mismatch that
-    caused 8 false-positive failures: the prior GT truncated authors, titles
-    and abstracts, so any agent that faithfully copied the MCP output was
-    penalised by strict ``str_match`` comparison.
+def _date_norm(v):
+    """Normalize a value to its date portion if it looks like a date."""
+    s = str(v).strip()
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    return s
+
+
+def _date_loose(agent_val, gt_val):
+    """Tolerant date check for retrieval-dependent dates.
+
+    Accepts an exact YYYY-MM-DD match OR the same year-month. This tolerates
+    legitimate published-vs-updated or off-by-days confusion that a correct
+    agent may produce when the repository only exposes one of the two dates,
+    while still rejecting a genuinely wrong date (wrong year or wrong month).
     """
-    conn = psycopg2.connect(**DB)
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, title, authors, summary, categories, published "
-        "FROM arxiv.papers ORDER BY id"
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
+    if agent_val is None:
+        return False
+    a = _date_norm(agent_val)
+    g = _date_norm(gt_val)
+    if a == g:
+        return True
+    return len(a) >= 7 and len(g) >= 7 and a[:7] == g[:7]
 
-    paper_map = {}
-    for r in rows:
-        pid = r[0]
-        authors = r[2] if isinstance(r[2], list) else json.loads(r[2] or "[]")
-        categories = r[4] if isinstance(r[4], list) else json.loads(r[4] or "[]")
-        paper_map[pid] = {
-            "id": pid,
-            "title": r[1] or "",
-            "authors": [str(a) for a in authors],
-            "summary": r[3] or "",
-            "categories": [str(c) for c in categories],
-            "published": r[5],
-        }
 
-    wb = openpyxl.Workbook()
+def _category_ok(agent_val, gt_val):
+    """Tolerant arXiv-category check.
 
-    # Sheet 1: Papers (matches existing GT header order)
-    ws1 = wb.active
-    ws1.title = "Papers"
-    ws1.append([
-        "ArXiv_ID", "Title", "Authors", "Published_Date",
-        "Category", "Abstract_Summary", "Assigned_Session",
-    ])
-    for i, pid in enumerate(ARXIV_IDS, 1):
-        p = paper_map.get(pid)
-        if not p:
-            continue
-        published = p["published"]
-        if hasattr(published, "strftime"):
-            published_str = published.strftime("%Y-%m-%d")
-        else:
-            published_str = str(published)[:10]
-        ws1.append([
-            pid,
-            p["title"],
-            "; ".join(p["authors"]),
-            published_str,
-            ", ".join(p["categories"]),
-            p["summary"][:100],
-            i,
-        ])
+    The task asks for the paper's primary category, but the repository returns
+    the full category list, so a correct agent may report a secondary category
+    or append a human-readable label. Accept an exact match, or one string
+    containing the other (e.g. "cs.CL", "cs.CL (Computation and Language)",
+    or "cs.CL, cs.AI"). A genuinely wrong category shares no substring and
+    still fails.
+    """
+    if not agent_val or not gt_val:
+        return False
+    a = str(agent_val).strip().lower()
+    g = str(gt_val).strip().lower()
+    return a == g or g in a or a in g
 
-    # Sheet 2: Schedule (weekly sessions starting the Monday of launch week)
-    ws2 = wb.create_sheet("Schedule")
-    ws2.append(["Session_Number", "Session_Date", "Paper_Count", "Topics_Covered"])
-    from datetime import datetime as _dt, timedelta as _td
-    try:
-        ref = _dt.strptime(launch_time, "%Y-%m-%d") if launch_time else _dt(2026, 3, 9)
-    except (TypeError, ValueError):
-        ref = _dt(2026, 3, 9)
-    monday = ref - _td(days=ref.weekday())
-    for i, pid in enumerate(ARXIV_IDS):
-        p = paper_map.get(pid)
-        title = p["title"] if p else pid
-        abbreviated = title[:40] + ("..." if len(title) > 40 else "")
-        ws2.append([i + 1, (monday + _td(weeks=i)).strftime("%Y-%m-%d"), 1, abbreviated])
 
-    gt_path = os.path.join(gt_dir, "Reading_Plan.xlsx")
-    wb.save(gt_path)
-    print(f"[GT] Regenerated from PG: {gt_path}")
-    return gt_path
+def _norm(v):
+    return str(v).strip().lower() if v is not None else None
+
+
+def _authors_ok(agent_val, gt_val):
+    """Every groundtruth author must appear in the agent value.
+
+    Order- and separator-insensitive, so ", " / "; " / newline joins all pass.
+    """
+    if not agent_val or not gt_val:
+        return False
+    a = str(agent_val).lower()
+    parts = [p.strip().lower() for p in str(gt_val).replace(";", ",").split(",") if p.strip()]
+    return all(p in a for p in parts)
+
+
+def _abstract_ok(agent_val, gt_val):
+    """Abstract_Summary must be substantive and agree on the first 60 chars."""
+    if not agent_val or not gt_val:
+        return False
+    a = str(agent_val).strip().lower()
+    g = str(gt_val).strip().lower()
+    if len(a) < 40:
+        return False
+    return a[:60] == g[:60] or a in g or g in a
+
+
+_STOPWORDS = {"the", "of", "and", "a", "an", "for", "to", "with", "via", "in",
+              "on", "by", "is", "are", "from", "its", "their", "that", "this",
+              "models", "model", "using", "use"}
+
+
+def _topics_ok(agent_val, paper_title):
+    """Topics_Covered must share >=1 significant word token with the paper title.
+
+    A single distinctive token is enough because an "abbreviated title" may be
+    as short as the paper's short name (e.g. "Toolformer"), while a genuinely
+    wrong topic label (e.g. "quantum computing" for a Toolformer session) shares
+    zero significant tokens and fails.
+    """
+    import re
+    if not agent_val or not paper_title:
+        return False
+    sig = lambda s: {w for w in re.findall(r"[a-zA-Z0-9]+", s.lower())
+                     if len(w) >= 4 and w not in _STOPWORDS}
+    return len(sig(str(agent_val)) & sig(str(paper_title))) >= 1
 
 
 def check_excel(agent_ws, groundtruth_ws="."):
@@ -194,6 +211,43 @@ def check_excel(agent_ws, groundtruth_ws="."):
         return
 
     gt_wb = openpyxl.load_workbook(gt_path, data_only=True)
+
+    # Paper titles in order (from the GT Papers sheet); used for the fuzzy
+    # Topics_Covered check on the Schedule sheet.
+    gt_paper_titles = []
+    papers_gt = None
+    for sn in gt_wb.sheetnames:
+        if "paper" in sn.lower():
+            papers_gt = gt_wb[sn]
+            break
+    if papers_gt is not None:
+        gt_paper_titles = [str(r[1]) for r in papers_gt.iter_rows(min_row=2, values_only=True)
+                           if r and len(r) > 1 and r[1] is not None]
+
+    def cell_ok(is_papers, col_idx, gt_val, a_val, row_idx):
+        """Column-aware comparison for a single cell."""
+        if gt_val is None:
+            return True, "skip"
+        if is_papers:
+            if col_idx == 2:      # Authors (flexible separator)
+                return _authors_ok(a_val, gt_val), "authors"
+            if col_idx == 3:      # Published_Date (year-month tolerant)
+                return _date_loose(a_val, gt_val), "date"
+            if col_idx == 4:      # Category (primary vs secondary category, tolerant)
+                return _category_ok(a_val, gt_val), "category"
+            if col_idx == 5:      # Abstract_Summary (first 100 chars, fuzzy)
+                return _abstract_ok(a_val, gt_val), "abstract"
+        else:                     # Schedule
+            if col_idx == 1:      # Session_Date (normalized YYYY-MM-DD)
+                return (a_val is not None and _date_norm(a_val) == _date_norm(gt_val)), "date"
+            if col_idx == 3:      # Topics_Covered (fuzzy vs paper title)
+                title = gt_paper_titles[row_idx] if row_idx < len(gt_paper_titles) else ""
+                return _topics_ok(a_val, title), "topics"
+        # Deterministic columns: exact (numeric or string) match.
+        if isinstance(gt_val, (int, float)):
+            return num_close(a_val, gt_val, max(abs(gt_val) * 0.1, 1.0)), "value"
+        return str_match(a_val, gt_val), "value"
+
     for gt_sheet_name in gt_wb.sheetnames:
         gt_ws_sheet = gt_wb[gt_sheet_name]
         agent_ws_sheet = None
@@ -211,6 +265,7 @@ def check_excel(agent_ws, groundtruth_ws="."):
         check(f"GT '{gt_sheet_name}' row count", len(agent_rows) == len(gt_rows),
               f"Expected {len(gt_rows)}, got {len(agent_rows)}")
 
+        is_papers = "paper" in gt_sheet_name.lower()
         check_indices_list = list(range(min(3, len(gt_rows))))
         if len(gt_rows) > 3:
             check_indices_list.append(len(gt_rows) - 1)
@@ -224,12 +279,9 @@ def check_excel(agent_ws, groundtruth_ws="."):
                     a_val = a_row[col_idx]
                     if gt_val is None:
                         continue
-                    if isinstance(gt_val, (int, float)):
-                        ok = num_close(a_val, gt_val, max(abs(gt_val) * 0.1, 1.0))
-                    else:
-                        ok = str_match(a_val, gt_val)
+                    ok, rule = cell_ok(is_papers, col_idx, gt_val, a_val, idx)
                     if not ok:
-                        check(f"GT '{gt_sheet_name}' row {idx+1} col {col_idx+1}",
+                        check(f"GT '{gt_sheet_name}' row {idx+1} col {col_idx+1} ({rule})",
                               False, f"Expected {gt_val}, got {a_val}")
                         row_ok = False
                         break
@@ -316,13 +368,6 @@ def main():
     args = parser.parse_args()
 
     print("=== Evaluation: arxiv-reading-plan-excel-gcal-email ===")
-
-    # Regenerate GT from PG so the ground truth mirrors the data the agent sees
-    # via the arxiv MCP — eliminates the hand-written GT / PG drift.
-    try:
-        regenerate_gt_from_pg(args.groundtruth_workspace, args.launch_time)
-    except Exception as e:
-        print(f"[GT] WARNING: regenerate failed ({e}); using committed GT file")
 
     check_excel(args.agent_workspace, args.groundtruth_workspace)
     excel_failures = FAIL_COUNT  # capture failures so far (Excel only)

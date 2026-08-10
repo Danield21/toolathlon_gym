@@ -174,13 +174,15 @@ def check_pptx(workspace, departments, summary):
 
     # Check summary values appear somewhere (total_employees, top_performers, avg_salary, avg_rating)
     summary_slides_text = "\n".join(all_text[-3:])
+    # Strip thousand-separator commas so values like "58,396" still match "58396"
+    summary_slides_text_nc = summary_slides_text.replace(",", "")
     total_emp_str = str(summary[0])
     top_str = str(summary[2])
     avg_sal_int = str(int(summary[3]))
     summary_matches = sum([
-        total_emp_str in summary_slides_text,
-        top_str in summary_slides_text,
-        avg_sal_int in summary_slides_text,
+        total_emp_str in summary_slides_text_nc,
+        top_str in summary_slides_text_nc,
+        avg_sal_int in summary_slides_text_nc,
     ])
     if summary_matches < 2:
         return False, f"Summary slides missing values: total={total_emp_str}, top={top_str}, avg_sal={avg_sal_int}"
@@ -194,8 +196,10 @@ def check_pptx(workspace, departments, summary):
         if not dept_slide_texts:
             missing_per_dept.append(f"{dept}: no slide mentions department")
             continue
-        combined = " ".join(dept_slide_texts)
-        combined_lower = combined.lower()
+        # Strip thousand-separator commas so values like "7,096" / "58,991"
+        # still match the plain integer "7096" / "58991" (consistent with the
+        # summary-slide check above, which already strips commas).
+        combined = " ".join(dept_slide_texts).replace(",", "")
         # Check all four metrics appear on the slide containing this dept
         rating_str = f"{rating:.2f}"
         salary_int_str = str(int(avg_sal))

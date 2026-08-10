@@ -47,8 +47,12 @@ def _db_monthly_fetch():
     """Fetch live monthly revenue data from DB as cross-reference. Returns None if DB unavailable."""
     try:
         import psycopg2
-        conn = psycopg2.connect(host='localhost', port=5432,
-                                dbname='toolathlon_gym', user='eigent', password='camel')
+        conn = psycopg2.connect(
+            host=os.environ.get('PGHOST', 'localhost'),
+            port=int(os.environ.get('PGPORT', '5432')),
+            dbname=os.environ.get('PGDATABASE', 'toolathlon_gym'),
+            user=os.environ.get('PGUSER', 'eigent'),
+            password=os.environ.get('PGPASSWORD', 'camel'))
         cur = conn.cursor()
         cur.execute('SELECT * FROM sf_data."SALES_DW__ANALYTICS__MONTHLY_REVENUE" ORDER BY "MONTH_KEY"')
         rows = cur.fetchall()

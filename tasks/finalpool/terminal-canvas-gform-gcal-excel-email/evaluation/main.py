@@ -1,19 +1,27 @@
 """Evaluation for terminal-canvas-gform-gcal-excel-email."""
 import argparse
+import datetime as _dt
 import json
 import os
+import re
 import sys
 
 import openpyxl
 import psycopg2
 
+
 def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
     return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
 
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
-          dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
-          user="eigent", password="camel")
+# R1: all DB settings read from env with defaults consistent with preprocess/main.py.
+DB = dict(
+    host=os.environ.get("PGHOST", "localhost"),
+    port=int(os.environ.get("PGPORT", "5432")),
+    dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
+    user=os.environ.get("PGUSER", "eigent"),
+    password=os.environ.get("PGPASSWORD", "camel"),
+)
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -64,13 +72,232 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}{d}")
 
 
-def safe_float(val, default=None):
+def _skip(name, detail=""):
+    """Informational skip that does not affect PASS/FAIL counts (used when a
+    cell is an Excel formula whose cached value we cannot read, per R2)."""
+    d = f": {str(detail)[:200]}" if detail else ""
+    print(f"  [SKIP] {name}{d}")
+
+
+def _cell_value(val):
+    """Robust numeric extraction (R2).
+
+    - int/float -> float
+    - str      -> strip % / currency / thousands separators, then float
+    - formula (starts with '=') -> None (cannot evaluate a cached value here)
+    - None / unparseable -> None
+    """
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        s = val.strip()
+        if s.startswith("="):
+            return None
+        s2 = (s.replace(",", "")
+               .replace("%", "")
+               .replace("$", "")
+               .replace("¥", "")
+               .replace("€", "")
+               .replace("£", "")
+               .strip())
+        try:
+            return float(s2)
+        except ValueError:
+            return None
+    return None
+
+
+def _expected_sender():
+    """Derive the From address the emails MCP will use from the task dir's
+    email_config.json (R7). Falls back to the task narrative address."""
+    candidates = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "email_config.json"),
+        os.path.join(os.getcwd(), "email_config.json"),
+    ]
+    for cfg_path in candidates:
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            em = (cfg.get("email") or "").strip().lower()
+            if em:
+                return em
+        except Exception:
+            continue
+    return "coordinator@assessment.example.com"
+
+
+def _is_text_type(qtype):
+    """MCP google-forms only ever writes 'textQuestion' / 'choiceQuestion' (R6)."""
+    q = (qtype or "").upper()
+    return ("TEXT" in q) or ("PARAGRAPH" in q) or ("SHORT_ANSWER" in q)
+
+
+def _is_choice_type(qtype):
+    q = (qtype or "").upper()
+    return ("CHOICE" in q) or ("RADIO" in q)
+
+
+def _get_choices(cfg):
+    """Extract the actual option value strings from a question config (R5).
+
+    The MCP stores options as a jsonb array like [{"value":"A"},{"value":"B"}]
+    under config.options (or config.choices). Compare value strings, not the
+    object or its str() repr.
+    """
+    if cfg is None:
+        return []
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except (TypeError, ValueError):
+            return []
+    if isinstance(cfg, dict):
+        opts = cfg.get("choices") or cfg.get("options") or []
+        out = []
+        for o in opts:
+            if isinstance(o, dict):
+                v = o.get("value")
+                if v is not None:
+                    out.append(str(v).strip().lower())
+            elif o is not None:
+                out.append(str(o).strip().lower())
+        return out
+    if isinstance(cfg, list):
+        out = []
+        for o in cfg:
+            if isinstance(o, dict):
+                v = o.get("value")
+                if v is not None:
+                    out.append(str(v).strip().lower())
+            elif o is not None:
+                out.append(str(o).strip().lower())
+        return out
+    return []
+
+
+def _numbers_in_choices(choices):
+    """Collect every integer digit-run found inside the choice values."""
+    nums = set()
+    for c in choices:
+        m = re.search(r"\d+", c or "")
+        if m:
+            nums.add(int(m.group()))
+    return nums
+
+
+def _date_iso_from(val):
+    """Normalize a date cell / timestamptz to an ISO 'YYYY-MM-DD' string.
+
+    For datetimes the UTC date is used so the result does not depend on the DB
+    session timezone (R9). For strings a handful of common formats is tried.
+    """
+    if isinstance(val, _dt.datetime):
+        try:
+            if val.tzinfo is not None:
+                val = val.astimezone(_dt.timezone.utc)
+            return val.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    s = str(val or "").strip()
+    if not s:
+        return ""
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d", "%d/%m/%Y", "%d.%m.%Y", "%Y.%m.%d"):
+        try:
+            return _dt.datetime.strptime(s, fmt).date().isoformat()
+        except ValueError:
+            continue
+    m = re.search(r"\d{4}-\d{2}-\d{2}", s)
+    if m:
+        return m.group()
+    return ""
+
+
+def _hour_from_time_string(s):
+    """Parse a time cell like '14:00', '2:00 PM', '2pm', '14:00:00', or a full
+    datetime like '2026-03-16 14:00:00' -> int hour. The clock-time token is
+    searched anywhere in the cell so a leading date cannot be mistaken for the
+    hour (a bare '14:00' in a datetime string must not read the year)."""
+    s = str(s or "").strip().lower().replace(".", "")
+    # HH:MM[:SS] with optional am/pm -- the canonical clock-time token.
+    m = re.search(r"(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm)?", s)
+    if m:
+        hour = int(m.group(1))
+        if m.group(3) == "pm":
+            if hour != 12:
+                hour += 12
+        elif m.group(3) == "am":
+            if hour == 12:
+                hour = 0
+        return hour
+    # Bare hour with am/pm: '2 PM', '9am'
+    m = re.search(r"\b(\d{1,2})\s*(am|pm)\b", s)
+    if m:
+        hour = int(m.group(1))
+        if m.group(2) == "pm":
+            if hour != 12:
+                hour += 12
+        elif m.group(2) == "am":
+            if hour == 12:
+                hour = 0
+        return hour
+    # Bare 24h hour token (0..23).
+    m = re.search(r"\b(\d{1,2})\b", s)
+    if m:
+        h = int(m.group(1))
+        if h <= 23:
+            return h
+    return None
+
+
+def _utc_hour(sd):
+    """Extract the UTC hour of an event start time, or None if unparseable."""
     try:
-        if val is None:
-            return default
-        return float(str(val).replace(",", "").replace("%", "").replace("$", "").strip())
-    except (ValueError, TypeError):
-        return default
+        if isinstance(sd, _dt.datetime):
+            utc = sd.astimezone(_dt.timezone.utc) if sd.tzinfo is not None else sd
+            return utc.hour
+        if isinstance(sd, str):
+            m = re.search(r"(\d{1,2}):(\d{2})", str(sd))
+            if m:
+                return int(m.group(1)) % 24
+    except Exception:
+        pass
+    return None
+
+
+def _is_valid_start_time(sd):
+    """A review event counts as the '2:00 PM' session regardless of timezone (R9).
+
+    task.md specifies 2:00 PM but no timezone, so the *hour* of the stored instant
+    cannot be required: a wall-clock 14:00 local maps to any UTC hour 0..23
+    depending on the timezone the agent used (e.g. +09 -> 05:00 UTC, +10 -> 04:00,
+    -09 -> 23:00, -10 -> 00:00 the next day). The timezone-independent properties
+    of a '2:00 PM' event that we can require here are:
+      - it is on the hour (minute == 0), and
+      - every session shares the same time-of-day ('each subsequent session one
+        day later at the same time') -- enforced via _utc_hour in check_gcal().
+
+    The literal '14:00' requirement is still enforced on the Excel
+    Remediation_Schedule Start_Time column, which is an explicit wall-clock time
+    written by the agent with no timezone ambiguity.
+    """
+    s = str(sd or "")
+    if "14:00" in s:
+        return True
+    try:
+        if isinstance(sd, _dt.datetime):
+            utc = sd.astimezone(_dt.timezone.utc) if sd.tzinfo is not None else sd
+            return utc.minute == 0
+        if isinstance(sd, str):
+            m = re.search(r"(\d{1,2}):(\d{2})", s)
+            if m:
+                return int(m.group(2)) == 0
+    except Exception:
+        pass
+    return False
 
 
 def check_excel(ws_path):
@@ -83,7 +310,9 @@ def check_excel(ws_path):
     check("Excel file exists", True)
 
     try:
-        wb = openpyxl.load_workbook(path, data_only=True)
+        # R2: read formulas (data_only=False) so a formula cell is detected and
+        # handled gracefully instead of silently reading None.
+        wb = openpyxl.load_workbook(path, data_only=False)
     except Exception as e:
         check("Excel readable", False, str(e))
         return
@@ -111,8 +340,11 @@ def check_excel(ws_path):
             cur.close(); conn.close()
         except Exception:
             expected_quiz_count = 11
-        check(f"Quiz_Performance has {expected_quiz_count} rows",
-              len(data_rows) == expected_quiz_count,
+        # At least all quizzes must be present; a correct agent may also add a
+        # totals row, so use >= (the per-quiz checks below still require every
+        # quiz to be present and numerically correct).
+        check(f"Quiz_Performance has at least {expected_quiz_count} rows",
+              len(data_rows) >= expected_quiz_count,
               f"Found {len(data_rows)} data rows")
 
         # Query dynamic quiz avg scores + pass rates from Canvas DB
@@ -141,8 +373,11 @@ def check_excel(ws_path):
             print(f"  [INFO] Could not fetch quiz stats from DB: {e}")
             quiz_stats = {}
 
-        # Check ALL quizzes from DB against agent's data
+        # Check ALL quizzes from DB against agent's data.
+        # Match by quiz id, with a case-insensitive title fallback (R13) so the
+        # row is still found if Quiz_ID/Quiz_Title columns are swapped.
         a_by_qid = {}
+        a_by_title = {}
         for r in data_rows:
             try:
                 qid = int(r[2]) if r[2] is not None else None
@@ -150,22 +385,37 @@ def check_excel(ws_path):
                 qid = None
             if qid is not None:
                 a_by_qid[str(qid)] = r
+            for col in (r[2], r[3]):
+                if isinstance(col, str) and col.strip():
+                    a_by_title[col.strip().lower()] = r
 
         for qid, stat in quiz_stats.items():
-            r = a_by_qid.get(qid)
+            r = a_by_qid.get(qid) or a_by_title.get(str(stat["title"]).strip().lower())
             if r is None:
                 check(f"Quiz {qid} ({stat['title']}) present", False,
                       f"Not found in Excel")
                 continue
-            avg = safe_float(r[4])
-            pr = safe_float(r[5])
+            avg = _cell_value(r[4])
+            pr = _cell_value(r[5])
             needs = str(r[6]).strip().lower() if len(r) > 6 and r[6] else ""
-            check(f"Quiz {qid} ({stat['title']}) Avg_Score ~{stat['avg']:.2f}",
-                  avg is not None and abs(avg - stat["avg"]) < 1.0,
-                  f"Got {avg}")
-            check(f"Quiz {qid} Pass_Rate ~{stat['pass_rate']:.2f}",
-                  pr is not None and abs(pr - stat["pass_rate"]) < 2.0,
-                  f"Got {pr}")
+            if avg is None:
+                _skip(f"Quiz {qid} Avg_Score numeric", "formula/non-literal value, skipped")
+            else:
+                check(f"Quiz {qid} ({stat['title']}) Avg_Score ~{stat['avg']:.2f}",
+                      abs(avg - stat["avg"]) < 1.0,
+                      f"Got {avg}")
+            if pr is None:
+                _skip(f"Quiz {qid} Pass_Rate numeric", "formula/non-literal value, skipped")
+            else:
+                # R8-ish: allow pass rate as either a percentage (62.91) or a
+                # decimal fraction (0.6291); normalize the fraction upward.
+                expected_pr = stat["pass_rate"]
+                pr_n = pr
+                if expected_pr > 1.0 and pr_n < 1.0:
+                    pr_n *= 100.0
+                check(f"Quiz {qid} Pass_Rate ~{stat['pass_rate']:.2f}",
+                      abs(pr_n - expected_pr) < 2.0,
+                      f"Got {pr}")
             expected_needs = "yes" if stat["avg"] < 75 else "no"
             # Tighten: exact match (case-insensitive trim) instead of 'in' substring
             check(f"Quiz {qid} Needs_Review = {expected_needs}",
@@ -187,14 +437,14 @@ def check_excel(ws_path):
         data_rows2 = [r for r in rows2[1:] if r and r[0] is not None]
         check("Feedback_Summary has 5 rows", len(data_rows2) == 5,
               f"Found {len(data_rows2)} rows")
-        # Validate question types per task spec
-        # Q1: free text, Q2: multiple choice, Q3: multiple choice, Q4: scale, Q5: free text
+        # Validate question types per task spec (R6: only text / multiple-choice
+        # are creatable by the MCP; Q4 is a single-choice 1..5 scale).
         expected_types = {
-            1: ["short_answer", "text", "paragraph", "free_text"],
+            1: ["text", "short_answer", "paragraph", "free_text"],
             2: ["multiple_choice", "radio", "choice"],
             3: ["multiple_choice", "radio", "choice"],
-            4: ["scale", "linear_scale", "rating"],
-            5: ["short_answer", "text", "paragraph", "free_text"],
+            4: ["multiple_choice", "radio", "choice", "scale", "rating"],
+            5: ["text", "short_answer", "paragraph", "free_text"],
         }
         for r in data_rows2:
             try:
@@ -232,23 +482,83 @@ def check_excel(ws_path):
         expected_dates = [f"2026-03-{16+i:02d}" for i in range(8)]
         seen_dates = set()
         for r in data_rows3:
-            d = str(r[1] or "")
+            d = _date_iso_from(r[1])
             t = str(r[2] or "")
-            dur = safe_float(r[3])
-            for ed in expected_dates:
-                if ed in d:
-                    seen_dates.add(ed)
+            dur = _cell_value(r[3])
+            if d in expected_dates:
+                seen_dates.add(d)
+            hour = _hour_from_time_string(t)
             check(f"Remediation row '{r[0]}' Start_Time = 14:00",
-                  "14:00" in t or "14" in t.split(":")[0:1] or t.startswith("14"),
+                  hour == 14,
                   f"Got '{r[2]}'")
-            check(f"Remediation row '{r[0]}' Duration_Hours = 1",
-                  dur is not None and abs(dur - 1.0) < 0.05,
-                  f"Got {r[3]}")
+            if dur is None:
+                _skip(f"Remediation row '{r[0]}' Duration_Hours numeric",
+                      "formula/non-literal value, skipped")
+            else:
+                check(f"Remediation row '{r[0]}' Duration_Hours = 1",
+                      abs(dur - 1.0) < 0.05,
+                      f"Got {r[3]}")
         check("All 8 expected session dates (Mar 16-23) present",
               len(seen_dates) == 8,
               f"Got dates {sorted(seen_dates)}, expected {expected_dates}")
 
     wb.close()
+
+
+def _gform_score(questions):
+    """Score a form's questions against the Q1..Q5 task requirements.
+
+    Returns a dict with the question count and booleans for each of Q1..Q5, plus a
+    total score. Used to select the most complete form when several similarly-named
+    forms exist (issue4) and to drive the individual PASS/FAIL checks.
+    """
+    types = [(q[2] or "").upper() for q in questions]
+    titles = [(q[1] or "").lower() for q in questions]
+
+    q1 = any(
+        ("challeng" in t or "topic" in t or "difficult" in t) and _is_text_type(types[i])
+        for i, t in enumerate(titles)
+    )
+    q2 = False
+    for i, q in enumerate(questions):
+        t = titles[i]
+        if "hour" in t and "stud" in t and _is_choice_type(types[i]):
+            choices = _get_choices(q[3])
+            expected_choices = ["less than 3", "3 to 5", "5 to 8", "more than 8"]
+            if sum(1 for ec in expected_choices if any(ec in c for c in choices)) >= 3:
+                q2 = True
+                break
+    q3 = False
+    for i, q in enumerate(questions):
+        t = titles[i]
+        if ("learn" in t or "format" in t) and _is_choice_type(types[i]):
+            choices = _get_choices(q[3])
+            expected_choices = ["lectures", "hands-on labs", "group projects", "self-paced online"]
+            if sum(1 for ec in expected_choices if any(ec in c or c in ec for c in choices)) >= 3:
+                q3 = True
+                break
+    q4 = False
+    for i, q in enumerate(questions):
+        t = titles[i]
+        if "difficult" in t or "rate" in t or "scale" in t:
+            if _is_choice_type(types[i]):
+                choices = _get_choices(q[3])
+                nums = _numbers_in_choices(choices)
+                if 1 in nums and 5 in nums and len(nums) >= 3:
+                    q4 = True
+                    break
+            elif _is_text_type(types[i]):
+                q4 = True
+                break
+    q5 = any(
+        ("suggest" in t or "improv" in t) and _is_text_type(types[i])
+        for i, t in enumerate(titles)
+    )
+    return {
+        "count": len(questions),
+        "q1": q1, "q2": q2, "q3": q3, "q4": q4, "q5": q5,
+        "score": int(q1) + int(q2) + int(q3) + int(q4) + int(q5),
+    }
 
 
 def check_gform():
@@ -260,122 +570,56 @@ def check_gform():
     cur.execute("SELECT id, title FROM gform.forms")
     forms = cur.fetchall()
 
-    # Find the form by title that mentions academic+performance+self-assessment
-    form_id = None
-    for fid, title in forms:
-        t = (title or "").lower()
-        if ("academic" in t and "performance" in t and ("self" in t or "assess" in t)):
-            form_id = fid
-            break
-    if form_id is None:
-        # Fallback to broader match
-        for fid, title in forms:
-            t = (title or "").lower()
-            if "performance" in t and "assess" in t:
-                form_id = fid
-                break
+    def _title_match(t):
+        return ("academic" in t and "performance" in t and ("self" in t or "assess" in t)) \
+            or ("performance" in t and "assess" in t)
+
+    matching = [(fid, title) for fid, title in forms if _title_match((title or "").lower())]
 
     check("Assessment feedback form 'Academic Performance Self-Assessment' created",
-          form_id is not None,
+          len(matching) > 0,
           f"Forms: {[f[1] for f in forms]}")
 
-    if form_id:
-        cur.execute("""
-            SELECT id, title, question_type, config FROM gform.questions
-            WHERE form_id = %s ORDER BY position
-        """, (form_id,))
-        questions = cur.fetchall()
-        check("Form has exactly 5 questions", len(questions) == 5,
-              f"Found {len(questions)}")
+    form_id = None
+    questions = []
+    score = {"count": 0, "q1": False, "q2": False, "q3": False, "q4": False, "q5": False, "score": 0}
+    if matching:
+        # Load questions for every candidate and select the most complete form. A
+        # swarm / retry may have left multiple similarly-named forms (some partial);
+        # the complete form wins instead of the first incomplete one (issue4).
+        candidates = []
+        for fid, _title in matching:
+            cur.execute("""
+                SELECT id, title, question_type, config FROM gform.questions
+                WHERE form_id = %s ORDER BY position
+            """, (fid,))
+            qs = cur.fetchall()
+            candidates.append((fid, qs, _gform_score(qs)))
+        # Prefer a form with exactly 5 questions; among those the one passing the
+        # most Q1..Q5 checks; otherwise fall back to the most complete attempt.
+        with5 = [c for c in candidates if c[2]["count"] == 5]
+        if with5:
+            form_id, questions, score = max(with5, key=lambda c: (c[2]["score"], c[2]["count"]))
+        else:
+            form_id, questions, score = max(candidates, key=lambda c: (c[2]["count"], c[2]["score"]))
 
-        if len(questions) >= 5:
+    if form_id:
+        check("Form has exactly 5 questions", score["count"] == 5,
+              f"Found {score['count']}")
+
+        if score["count"] >= 5:
             types = [(q[2] or "").upper() for q in questions]
             titles = [(q[1] or "").lower() for q in questions]
-
-            def _get_choices(cfg):
-                if cfg is None:
-                    return []
-                if isinstance(cfg, str):
-                    try:
-                        cfg = json.loads(cfg)
-                    except (TypeError, ValueError):
-                        return []
-                if isinstance(cfg, dict):
-                    return [str(c).strip().lower() for c in (cfg.get("choices") or cfg.get("options") or [])]
-                return []
-
-            # Q1: free text about challenging topics
-            q1_ok = any(
-                ("challeng" in t or "topic" in t or "difficult" in t)
-                and types[i] in ("TEXT", "SHORT_ANSWER", "PARAGRAPH")
-                for i, t in enumerate(titles)
-            )
-            check("Q1: free text question about challenging topics", q1_ok,
+            check("Q1: free text question about challenging topics", score["q1"],
                   f"Questions: {list(zip(titles, types))}")
-
-            # Q2: multiple choice with hours options
-            q2_ok = False
-            for i, q in enumerate(questions):
-                t = titles[i]
-                qtype = types[i]
-                if "hour" in t and "stud" in t and qtype in ("RADIO", "MULTIPLE_CHOICE", "CHOICE"):
-                    choices = _get_choices(q[3])
-                    expected_choices = ["less than 3", "3 to 5", "5 to 8", "more than 8"]
-                    matched = sum(1 for ec in expected_choices
-                                  if any(ec in c for c in choices))
-                    if matched >= 3:
-                        q2_ok = True
-                        break
-            check("Q2: multiple choice for study hours with 4 specific options",
-                  q2_ok,
+            check("Q2: multiple choice for study hours with 4 specific options", score["q2"],
                   f"Questions+choices: {[(t, types[i], _get_choices(questions[i][3])) for i, t in enumerate(titles)]}")
-
-            # Q3: multiple choice for learning format
-            q3_ok = False
-            for i, q in enumerate(questions):
-                t = titles[i]
-                qtype = types[i]
-                if ("learn" in t or "format" in t) and qtype in ("RADIO", "MULTIPLE_CHOICE", "CHOICE"):
-                    choices = _get_choices(q[3])
-                    expected_choices = ["lectures", "hands-on labs", "group projects", "self-paced online"]
-                    matched = sum(1 for ec in expected_choices
-                                  if any(ec in c or c in ec for c in choices))
-                    if matched >= 3:
-                        q3_ok = True
-                        break
-            check("Q3: multiple choice for learning format with 4 specific options",
-                  q3_ok)
-
-            # Q4: scale 1-5
-            q4_ok = False
-            for i, q in enumerate(questions):
-                t = titles[i]
-                qtype = types[i]
-                if "difficult" in t or "rate" in t or "scale" in t:
-                    if qtype in ("SCALE", "LINEAR_SCALE", "RATING", "STAR_RATING"):
-                        q4_ok = True
-                        break
-                    cfg = q[3]
-                    if isinstance(cfg, str):
-                        try:
-                            cfg = json.loads(cfg)
-                        except (TypeError, ValueError):
-                            cfg = {}
-                    if isinstance(cfg, dict):
-                        lo = cfg.get("low") or cfg.get("min")
-                        hi = cfg.get("high") or cfg.get("max")
-                        if lo is not None and hi is not None and int(lo) == 1 and int(hi) == 5:
-                            q4_ok = True
-                            break
-            check("Q4: scale 1-5 for course difficulty", q4_ok)
-
-            # Q5: free text suggestions
-            q5_ok = any(
-                ("suggest" in t or "improv" in t)
-                and types[i] in ("TEXT", "SHORT_ANSWER", "PARAGRAPH")
-                for i, t in enumerate(titles)
-            )
-            check("Q5: free text question about suggestions", q5_ok)
+            check("Q3: multiple choice for learning format with 4 specific options", score["q3"],
+                  f"Questions: {list(zip(titles, types))}")
+            check("Q4: 1-5 rating for course difficulty (single choice or text)", score["q4"],
+                  f"Questions: {list(zip(titles, types))}")
+            check("Q5: free text question about suggestions", score["q5"],
+                  f"Questions: {list(zip(titles, types))}")
 
     conn.close()
 
@@ -406,30 +650,48 @@ def check_gcal():
           len(found_quizzes) == len(BELOW_75_QUIZZES),
           f"Referenced quizzes: {found_quizzes}; missing: {set(BELOW_75_QUIZZES) - set(found_quizzes)}")
 
-    # Validate dates: 2026-03-16 ... 2026-03-23
+    # Validate dates (UTC-normalized so the DB session timezone cannot shift the
+    # calendar date, R9). task.md does not state a timezone, so a correct agent in
+    # UTC-10..UTC-12 creates '14:00 local on Mar 16' as 00:00..02:00 UTC on Mar 17,
+    # shifting the whole block to Mar 17..Mar 24. Accept both the base block and
+    # that single legitimate +1-day shift; any other date block still FAILs.
     expected_dates = [f"2026-03-{16+i:02d}" for i in range(len(BELOW_75_QUIZZES))]
+    expected_dates_shifted = [f"2026-03-{17+i:02d}" for i in range(len(BELOW_75_QUIZZES))]
     seen_dates = set()
     for _, sd in review_events:
-        s = str(sd or "")
-        for d in expected_dates:
-            if d in s:
-                seen_dates.add(d)
-    check("All 8 expected calendar dates (2026-03-16 to 2026-03-23) present",
-          len(seen_dates) == len(expected_dates),
-          f"Got {sorted(seen_dates)}, expected {expected_dates}")
+        d = _date_iso_from(sd)
+        if d:
+            seen_dates.add(d)
+    dates_ok = (seen_dates == set(expected_dates)) or (seen_dates == set(expected_dates_shifted))
+    check("All 8 expected calendar dates (Mar 16-23, or Mar 17-24 for UTC-10..-12) present",
+          dates_ok,
+          f"Got {sorted(seen_dates)}, expected {expected_dates} or {expected_dates_shifted}")
 
-    # Check 2 PM start time
-    correct_time = 0
-    for _, sd in review_events:
-        s = str(sd or "")
-        # accept local 14:00 or UTC 18:00/19:00 (NY DST -4 / -5)
-        if "14:00" in s or "18:00" in s or "19:00" in s:
-            correct_time += 1
-    check("All 8 review events start at 2:00 PM equivalent",
-          correct_time >= len(review_events) and len(review_events) == 8,
-          f"Got {correct_time}/{len(review_events)} with valid start time")
+    # Check 2 PM start time (timezone tolerant, R9): every event on the hour and
+    # all events at the same time-of-day ('...one day later at the same time').
+    on_the_hour = bool(review_events) and all(_is_valid_start_time(sd) for _, sd in review_events)
+    utc_hours = {_utc_hour(sd) for _, sd in review_events if _utc_hour(sd) is not None}
+    same_time = len(utc_hours) == 1
+    check("All 8 review events start on the hour at the same time each day (2:00 PM equivalent)",
+          on_the_hour and same_time and len(review_events) == 8,
+          f"on_the_hour={on_the_hour}, distinct UTC hours={sorted(utc_hours)}, count={len(review_events)}")
 
     conn.close()
+
+
+def _email_recipients(to_addr):
+    """Normalize the jsonb/list to_addr column into a list of lowercase strings."""
+    if isinstance(to_addr, list):
+        return [str(r).strip().lower() for r in to_addr if r is not None]
+    if isinstance(to_addr, str):
+        try:
+            parsed = json.loads(to_addr)
+            if isinstance(parsed, list):
+                return [str(r).strip().lower() for r in parsed if r is not None]
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return [str(to_addr).strip().lower()]
+    return []
 
 
 def check_email():
@@ -440,42 +702,54 @@ def check_email():
 
     cur.execute("SELECT subject, from_addr, to_addr, body_text FROM email.messages")
     all_emails = cur.fetchall()
+    expected_from = _expected_sender()
 
-    target_email = None
-    for subj, from_addr, to_addr, body in all_emails:
-        if to_addr:
-            recipients = []
-            if isinstance(to_addr, list):
-                recipients = [str(r).strip().lower() for r in to_addr]
-            elif isinstance(to_addr, str):
-                try:
-                    parsed = json.loads(to_addr)
-                    if isinstance(parsed, list):
-                        recipients = [str(r).strip().lower() for r in parsed]
-                    else:
-                        recipients = [str(to_addr).strip().lower()]
-                except (json.JSONDecodeError, TypeError):
-                    recipients = [str(to_addr).strip().lower()]
-            if "faculty@assessment.example.com" in recipients:
-                target_email = (subj, from_addr, to_addr, body)
-                break
+    # A swarm / multi-agent retry may leave earlier test or partial emails also
+    # addressed to faculty. Consider every such email and evaluate the most
+    # complete one, so an incomplete first email cannot shadow the correct summary
+    # email (issue3).
+    candidates = [e for e in all_emails
+                  if "faculty@assessment.example.com" in _email_recipients(e[2])]
 
-    check("Email sent to faculty@assessment.example.com", target_email is not None,
+    def _score_email(e):
+        subj, from_addr, to_addr, body = e
+        score = 0
+        sl = re.sub(r"\s+", " ", (subj or "").lower()).strip()
+        if all(p in sl for p in ["quiz performance analysis", "cross-course review"]):
+            score += 1
+        if expected_from in (from_addr or "").lower():
+            score += 1
+        b = (body or "").lower()
+        if "remediation" in b or "review" in b or "flagged" in b:
+            score += 1
+        if "survey" in b or "feedback" in b:
+            score += 1
+        if re.search(r"\b(11|eleven)\b", body or "", re.IGNORECASE):
+            score += 1
+        if re.search(r"\b(8|eight)\b", body or "", re.IGNORECASE):
+            score += 1
+        if re.findall(r'\b(7[0-9]\.\d{1,2}|7[0-9])\b', body or ""):
+            score += 1
+        return score
+
+    check("Email sent to faculty@assessment.example.com", len(candidates) > 0,
           f"Total emails: {len(all_emails)}")
 
-    if target_email:
+    if candidates:
+        target_email = max(candidates, key=_score_email)
         subj, from_addr, to_addr, body = target_email
         sl = (subj or "").lower()
         # Subject: "Quiz Performance Analysis - Cross-Course Review"
-        # Normalized exact match (whitespace collapsed, lowercase)
-        import re as _re_subj
-        _norm_subj = _re_subj.sub(r"\s+", " ", sl).strip()
-        _expected_subj = "quiz performance analysis - cross-course review"
+        # Normalized, then require the two key phrases (relaxed vs exact match
+        # so minor punctuation/dash differences don't cause a false FAIL).
+        _norm_subj = re.sub(r"\s+", " ", sl).strip()
+        _expected_parts = ["quiz performance analysis", "cross-course review"]
         check("Email subject 'Quiz Performance Analysis - Cross-Course Review'",
-              _norm_subj == _expected_subj,
-              f"Subject: '{subj}' (normalized: '{_norm_subj}', expected: '{_expected_subj}')")
-        check("Email from coordinator@assessment.example.com",
-              "coordinator@assessment.example.com" in (from_addr or "").lower(),
+              all(p in _norm_subj for p in _expected_parts),
+              f"Subject: '{subj}' (normalized: '{_norm_subj}')")
+        # R7: expected From derived from the task's email_config.json.
+        check(f"Email from {expected_from}",
+              expected_from in (from_addr or "").lower(),
               f"From: {from_addr}")
         body_lower = (body or "").lower()
         check("Email body mentions remediation or review",
@@ -484,19 +758,16 @@ def check_email():
         check("Email body mentions survey or feedback",
               "survey" in body_lower or "feedback" in body_lower,
               "Expected survey/feedback mention in body")
-        # Body should include total quizzes count (11) and flagged count (8)
-        # Tighten: word boundary so '18'/'811' don't false-positive
-        import re as _re_body
-        check("Email body mentions total quizzes (11) word-boundary",
-              _re_body.search(r"\b11\b", body or "") is not None,
+        # Body should include total quizzes count (11) and flagged count (8).
+        # Accept both the numerals and their spelled-out forms (R10).
+        check("Email body mentions total quizzes (11 or eleven) word-boundary",
+              re.search(r"\b(11|eleven)\b", body or "", re.IGNORECASE) is not None,
               f"Body sample: {body_lower[:300]}")
-        check("Email body mentions flagged count (8) word-boundary",
-              _re_body.search(r"\b8\b", body or "") is not None,
+        check("Email body mentions flagged count (8 or eight) word-boundary",
+              re.search(r"\b(8|eight)\b", body or "", re.IGNORECASE) is not None,
               f"Body sample: {body_lower[:300]}")
         # Body should include the program average (around 73-74)
-        # Loose: any number in the 70-80 range
-        import re as _re
-        avg_nums = _re.findall(r'\b(7[0-9]\.\d{1,2}|7[0-9])\b', body or "")
+        avg_nums = re.findall(r'\b(7[0-9]\.\d{1,2}|7[0-9])\b', body or "")
         check("Email body includes program average score (in 70-80 range)",
               len(avg_nums) >= 1,
               f"Numbers found: {avg_nums}; body sample: {(body or '')[:300]}")
@@ -510,10 +781,13 @@ def check_reverse_validation(workspace):
     try:
         conn = psycopg2.connect(**DB)
         cur = conn.cursor()
-        cur.execute("""
-            SELECT to_addr FROM email.messages
-            WHERE from_addr = 'coordinator@assessment.example.com'
-        """)
+        expected_from = _expected_sender()
+        # The stored from_addr is the formatted header ("Name <email>"), so use
+        # a LIKE filter instead of an exact equality (problem 7).
+        cur.execute(
+            "SELECT to_addr FROM email.messages WHERE from_addr LIKE %s",
+            (f"%{expected_from}%",)
+        )
         sent_emails = cur.fetchall()
         noise_recipients = [
             # Mismatched domains

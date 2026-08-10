@@ -3,10 +3,24 @@ import os
 import argparse, json, os, sys, shutil, subprocess, time
 from datetime import datetime, timedelta
 
+
+def _env(*names, default):
+    """Read the first defined env var among ``names`` (supports both the
+    PGHOST/PGPORT/... dash form used by the harness runtime and the
+    PG_HOST/PG_PORT/... underscore form used by the MCP servers)."""
+    for n in names:
+        v = os.environ.get(n)
+        if v:
+            return v
+    return default
+
+
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
-    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
-    "user": "eigent", "password": "camel"
+    "host": _env("PGHOST", "PG_HOST", default="localhost"),
+    "port": int(_env("PGPORT", "PG_PORT", default="5432")),
+    "dbname": _env("PGDATABASE", "PG_DATABASE", default="toolathlon_gym"),
+    "user": _env("PGUSER", "PG_USER", default="eigent"),
+    "password": _env("PGPASSWORD", "PG_PASSWORD", default="camel"),
 }
 
 TASK_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -4,6 +4,8 @@ Calculate SLA compliance and customer satisfaction metrics per ticket priority. 
 
 For each priority level compute the total ticket count, the number of SLA-compliant tickets, the compliance rate as a percentage rounded to 2 decimal places, and the average customer satisfaction score rounded to 2 decimal places.
 
+All numeric values (ticket counts, compliance rates, CSAT scores) must be written as plain numbers without percent signs, currency symbols, thousand separators, or spreadsheet formulas. For example, write the compliance rate as 12.03 (meaning 12.03%), not as "12.03%", "12.03 %", "12", or "=COUNT(...)/...".
+
 Create a Google Sheet titled Support Center Performance Dashboard with two sheets:
 
 Sheet named SLA_Compliance with columns: Priority, Total_Tickets, SLA_Compliant, Compliance_Rate, Avg_CSAT. Include one row per priority (High, Medium, Low).

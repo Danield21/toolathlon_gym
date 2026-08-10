@@ -7,17 +7,25 @@ import shutil
 import psycopg2
 
 PORT = 30227
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym", user="eigent", password="camel")
+DB = dict(
+    host=os.environ.get("PGHOST", "localhost"),
+    port=int(os.environ.get("PGPORT", "5432")),
+    dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
+    user=os.environ.get("PGUSER", "eigent"),
+    password=os.environ.get("PGPASSWORD", "camel"),
+)
 
 
 def clear_gcal():
     conn = psycopg2.connect(**DB)
     conn.autocommit = True
     cur = conn.cursor()
-    cur.execute("DELETE FROM gcal.events")
+    # Scope the cleanup to this task's events so concurrent preprocess runs
+    # do not wipe events created by other tasks.
+    cur.execute("DELETE FROM gcal.events WHERE summary ILIKE '%options expiry%'")
     cur.close()
     conn.close()
-    print("[preprocess] Cleared gcal events.")
+    print("[preprocess] Cleared this task's gcal events.")
 
 
 async def run_command(cmd):

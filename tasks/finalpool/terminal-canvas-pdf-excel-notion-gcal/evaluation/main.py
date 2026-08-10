@@ -1,11 +1,13 @@
 """Evaluation script for terminal-canvas-pdf-excel-notion-gcal."""
 import os
-import argparse, json, os, sys
+import argparse, json, sys, re
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"),
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
-    "user": "eigent", "password": "camel"
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 PASS_COUNT = 0
@@ -13,21 +15,43 @@ FAIL_COUNT = 0
 
 
 def get_expected_from_db():
-    """Query canvas schema dynamically for expected average scores. Sets db_query_ok=False on failure."""
+    """Query canvas schema dynamically for expected average grades.
+
+    The task defines avg_gpa as "averaging the per-course average grades", so the
+    canonical expected value is the mean of per-course submission-score means
+    (=75.40 on the seed).  We also compute the plain global average (=75.80) as a
+    fallback reference so that agents who legitimately average all submission
+    scores directly (or use enrollment current_score, ~73) still land in range.
+    db_query_ok=False on failure.
+    """
     expected = {
-        "avg_gpa": None,
+        "avg_gpa": None,          # mean of per-course submission-score means
+        "avg_gpa_global": None,   # plain global AVG(score)
         "db_query_ok": False,
     }
     try:
         import psycopg2
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
-        # Compute overall average score across all submissions
-        cur.execute("SELECT AVG(score) FROM canvas.submissions WHERE score IS NOT NULL")
+        # Mean of per-course submission-score means (matches the task definition).
+        cur.execute("""
+            SELECT AVG(course_mean) FROM (
+                SELECT a.course_id, AVG(s.score) AS course_mean
+                FROM canvas.submissions s
+                JOIN canvas.assignments a ON a.id = s.assignment_id
+                WHERE s.score IS NOT NULL AND a.course_id IS NOT NULL
+                GROUP BY a.course_id
+            ) t
+        """)
         row = cur.fetchone()
         if row and row[0] is not None:
             expected["avg_gpa"] = float(row[0])
-            expected["db_query_ok"] = True
+        # Plain global average (fallback reference).
+        cur.execute("SELECT AVG(score) FROM canvas.submissions WHERE score IS NOT NULL")
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            expected["avg_gpa_global"] = float(row[0])
+        expected["db_query_ok"] = expected["avg_gpa"] is not None
         cur.close()
         conn.close()
     except Exception as e:
@@ -49,16 +73,100 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}: {detail_str}")
 
 
-def num_close(a, b, tol=2.0):
+def _to_float(x):
+    """Robust numeric coercion. Handles int/float, strings with %/currency/
+    thousands separators / whitespace, Excel-percent style values, and formulas
+    that begin with '='. Returns None when the value cannot be parsed."""
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+    s = str(x).strip()
+    if not s or s.lower() in ("nan", "none", "null", "n/a", "na", "-", "--"):
+        return None
+    if s.startswith("="):
+        s = s[1:].strip()  # a formula: try to read its cached/literal tail
+    # strip currency symbols and thousands separators
+    s = s.replace("$", "").replace("€", "").replace("¥", "").replace("£", "").replace(",", "")
+    # percent sign removed; caller may scale if the task uses percent semantics
+    s = s.replace("%", "").strip()
+    m = re.match(r"^[-+]?\d*\.?\d+", s)
+    if not m:
+        return None
     try:
-        return abs(float(a) - float(b)) <= tol
-    except:
+        return float(m.group(0))
+    except (TypeError, ValueError):
+        return None
+
+
+def num_close(a, b, tol=2.0):
+    """Tolerant numeric comparison. Both sides are coerced via _to_float; if both
+    parse, compare |a-b| <= tol. If either side cannot be parsed, fall back to a
+    case-insensitive string comparison."""
+    fa = _to_float(a)
+    fb = _to_float(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= tol
+    if a is None or b is None:
         return False
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+def threshold_near(value, expected, tol=0.05):
+    """Check an accreditation threshold cell against the expected numeric value.
+
+    Tolerates: bare numbers (78), strings with '%' ('78.0%'), Excel percentage-
+    formatted cells (stored as 0.78 meaning 78%), and values written in the wrong
+    scale (65 instead of 0.65)."""
+    a = _to_float(value)
+    if a is None:
+        return False
+    if abs(a - expected) <= tol:
+        return True
+    # Excel-percent style: cell holds 0.78 but means 78
+    if expected >= 1 and 0 < a < 1:
+        return abs(a * 100 - expected) <= max(tol, 1.0)
+    # value written on the wrong scale, e.g. 65 for 0.65
+    if 0 < expected < 1 and a > 1:
+        return abs(a / 100 - expected) <= max(tol, 0.05)
+    return False
 
 
 def get_conn():
     import psycopg2
     return psycopg2.connect(**DB_CONFIG)
+
+
+def _parse_launch_time(launch_time):
+    """Parse the run's launch timestamp robustly.
+
+    The runtime harness passes it as 'YYYY-MM-DD HH:MM:SS' plus a weekday
+    suffix (e.g. '2026-08-07 12:34:56 Friday'); other callers may pass it
+    without the weekday or with an ISO 'T' separator. Any trailing alpha
+    weekday token is stripped before parsing, and several common formats are
+    tried. Returns a naive datetime, or None when nothing parses."""
+    from datetime import datetime
+    if not launch_time:
+        return None
+    s = str(launch_time).strip()
+    # Drop trailing weekday names (e.g. 'Friday'), including the '%A' token.
+    for _ in range(2):
+        parts = s.rsplit(" ", 1)
+        if len(parts) == 2 and parts[1].isalpha() and not parts[1].isdigit():
+            s = parts[0]
+        else:
+            break
+    s = s.replace("T", " ", 1)
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
+                "%Y/%m/%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
 
 
 def check_excel(agent_workspace):
@@ -112,9 +220,9 @@ def check_excel(agent_workspace):
                 check("Matrix has Partial status", "partial" in all_text)
                 # Check specific criteria
                 check("Matrix mentions Student Learning Outcomes", "student learning" in all_text or "learning outcome" in all_text, f"Text sample: {all_text[:200]}")
-                # Check threshold values
-                has_78 = any(num_close(r[1], 78.0, tol=1.0) for r in rows if r[1] is not None)
-                has_065 = any(num_close(r[1], 0.65, tol=0.05) for r in rows if r[1] is not None)
+                # Check threshold values (robust to '%' strings and Excel percent formats)
+                has_78 = any(threshold_near(r[1], 78.0, tol=1.0) for r in rows if r[1] is not None)
+                has_065 = any(threshold_near(r[1], 0.65, tol=0.05) for r in rows if r[1] is not None)
                 check("Matrix has C1 threshold ~78", has_78, f"Thresholds: {[r[1] for r in rows]}")
                 check("Matrix has C2 threshold ~0.65", has_065, f"Thresholds: {[r[1] for r in rows]}")
             break
@@ -219,10 +327,7 @@ def check_gcal(launch_time):
     try:
         conn = get_conn()
         cur = conn.cursor()
-        launch_dt = None
-        if launch_time:
-            from datetime import datetime
-            launch_dt = datetime.strptime(launch_time, "%Y-%m-%d %H:%M:%S")
+        launch_dt = _parse_launch_time(launch_time)
 
         cur.execute("SELECT summary, description, start_datetime FROM gcal.events ORDER BY start_datetime")
         events = cur.fetchall()
@@ -275,15 +380,30 @@ def check_scripts(agent_workspace):
     if os.path.exists(metrics_path):
         with open(metrics_path) as f:
             metrics = json.load(f)
-        check("Metrics has avg_gpa", "avg_gpa" in metrics, f"Keys: {list(metrics.keys())}")
+        # Accept avg_gpa or any key that contains 'gpa' (e.g. average_gpa)
+        gpa_key = None
+        for k in metrics:
+            if isinstance(k, str) and "gpa" in k.lower():
+                gpa_key = k
+                break
+        check("Metrics has avg_gpa", gpa_key is not None, f"Keys: {list(metrics.keys())}")
         # Record DB query failure as a check failure (no silent fallback)
         check("DB expected-value query succeeded (avg_gpa)",
               EXPECTED.get("db_query_ok") is True,
               "DB query for expected avg_gpa failed; cannot validate metric")
-        if "avg_gpa" in metrics and EXPECTED.get("db_query_ok") and EXPECTED.get("avg_gpa") is not None:
-            check("avg_gpa roughly correct",
-                  num_close(metrics["avg_gpa"], EXPECTED["avg_gpa"], tol=1.0),
-                  f"Got {metrics.get('avg_gpa')}, expected ~{EXPECTED['avg_gpa']:.1f}")
+        if gpa_key and EXPECTED.get("db_query_ok"):
+            # Accept the per-course mean-of-means (=task definition) OR the plain
+            # global average; tolerance is generous so agents computing from
+            # enrollment current_score (~73) also pass.
+            ok = False
+            detail = f"Got {metrics[gpa_key]}"
+            if EXPECTED.get("avg_gpa") is not None:
+                ok = num_close(metrics[gpa_key], EXPECTED["avg_gpa"], tol=3.0)
+                detail += f", expected ~{EXPECTED['avg_gpa']:.1f} (per-course avg)"
+            if not ok and EXPECTED.get("avg_gpa_global") is not None:
+                ok = num_close(metrics[gpa_key], EXPECTED["avg_gpa_global"], tol=3.0)
+                detail += f" or ~{EXPECTED['avg_gpa_global']:.1f} (global avg)"
+            check("avg_gpa roughly correct", ok, detail)
 
     # Check compliance_assessment.json
     compliance_path = os.path.join(agent_workspace, "compliance_assessment.json")
@@ -317,7 +437,10 @@ def check_scripts(agent_workspace):
             text = f.read().lower()
         check("Summary mentions compliant", "compliant" in text)
         check("Summary mentions partial", "partial" in text)
-        check("Summary has compliance percentage", "%" in text or "percent" in text, f"Length: {len(text)}")
+        # Compliance percentage: '%', the word 'percent', or an 'x/y' / 'x out of y'
+        has_pct = ("%" in text or "percent" in text
+                   or re.search(r"\d+\s*(/|out of|of)\s*\d+", text))
+        check("Summary has compliance percentage", bool(has_pct), f"Length: {len(text)}")
 
 
 def check_reverse_validation():

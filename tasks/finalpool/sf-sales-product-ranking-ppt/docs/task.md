@@ -6,7 +6,7 @@ First, query the product and order data to determine which products generated th
 
 Create an Excel file called "Product_Rankings.xlsx" in your workspace with two sheets:
 
-The first sheet should be named "Top Products" and contain columns: Rank, Product_Name, Category, Total_Revenue, Units_Sold, Avg_Order_Value. Include the top 20 products ranked by total revenue in descending order. The Rank column should be numbered 1 through 20.
+The first sheet should be named "Top Products" and contain columns: Rank, Product_Name, Category, Total_Revenue, Units_Sold, Avg_Order_Value. Include the top 20 products ranked by total revenue in descending order. The Rank column should be numbered 1 through 20. For Product_Name, use the product base name as it appears in the data source; promotional or offer suffixes (such as "with No Cost EMI ...") are not required.
 
 The second sheet should be named "Category Summary" and contain columns: Category, Product_Count, Total_Revenue, Avg_Revenue_Per_Product. This sheet should group products by category and show aggregate statistics.
 

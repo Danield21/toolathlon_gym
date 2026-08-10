@@ -11,10 +11,13 @@ Checks:
 import argparse
 import json
 import os
+import re
 import sys
 
 import openpyxl
 import psycopg2
+
+EXPECTED_PAGE_TITLE = "Service Monitoring Dashboard - March 2026"
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
@@ -50,6 +53,39 @@ def str_contains(haystack, needle):
     if haystack is None or needle is None:
         return False
     return needle.lower() in str(haystack).lower()
+
+
+def _normalize_title(s):
+    """Lowercase, replace punctuation with spaces, collapse whitespace."""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(s).lower()).split())
+
+
+def _levenshtein(a, b):
+    """Small-scale DP edit distance between two strings."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def titles_match(expected, actual):
+    """Exact Notion title match (task.md prescribes the exact title). After
+    normalization the titles must be identical — no fuzzy/edit-distance
+    tolerance, so the model must follow the title given in task.md."""
+    e = _normalize_title(expected)
+    a = _normalize_title(actual)
+    if not e or not a:
+        return False
+    return e == a
 
 
 def check_excel(agent_workspace):
@@ -261,12 +297,9 @@ def check_notion():
             noise_present_count += 1
             continue
 
-        # Match pages with monitoring, dashboard, or service in title
-        if (
-            "monitoring" in page_title_lower
-            or "dashboard" in page_title_lower
-            or "service" in page_title_lower
-        ):
+        # Exact match against the page title prescribed in task.md
+        # ("Service Monitoring Dashboard - March 2026"). No keyword fallback.
+        if titles_match(EXPECTED_PAGE_TITLE, page_title):
             found_page = True
             record("Notion monitoring page exists", True)
 
@@ -296,7 +329,8 @@ def check_notion():
         record(
             "Notion monitoring page exists",
             False,
-            f"Found {len(pages)} pages but none with monitoring/dashboard/service in title",
+            f"Found {len(pages)} pages but none matching expected title "
+            f"'{EXPECTED_PAGE_TITLE}' (fuzzy) or with monitoring/dashboard/service in title",
         )
         all_ok = False
 

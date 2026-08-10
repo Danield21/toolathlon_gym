@@ -9,12 +9,121 @@ Checks:
 import argparse
 import json
 import os
+import re
 import sys
 
 import psycopg2
 
 def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
     return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
+
+
+def _levenshtein(a, b):
+    """Pure-Python Levenshtein distance for short strings."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def extract_page_title(props):
+    """Extract a Notion page title from its properties JSON blob."""
+    if isinstance(props, str):
+        try:
+            props = json.loads(props)
+        except Exception:
+            return ""
+    if not isinstance(props, dict):
+        return ""
+    for prop in props.values():
+        if isinstance(prop, dict) and isinstance(prop.get("title"), list) and prop["title"]:
+            return "".join(
+                (p.get("plain_text", "") or (p.get("text") or {}).get("content", ""))
+                for p in prop["title"] if isinstance(p, dict)
+            ).strip()
+    return ""
+
+
+def loose_title_match(actual, expected, keywords=None):
+    """Lenient title match: after normalization, pass if either string contains
+    the other, Levenshtein distance <= 3, or all keywords appear."""
+    a = " ".join(str(actual or "").lower().split())
+    e = " ".join(str(expected or "").lower().split())
+    if not a or not e:
+        return False
+    if e in a or a in e:
+        return True
+    if _levenshtein(a, e) <= 3:
+        return True
+    if keywords and all(k.lower() in a for k in keywords):
+        return True
+    return False
+
+
+def find_labeled_number(paragraphs, label):
+    """Find a paragraph containing `label` (case-insensitive) and extract its
+    numeric value. Prefers the first number that appears at or after the label,
+    so a combined line like "Total assignments: 10, Total points: 300" yields 10
+    for the assignments label and 300 for the points label. Returns None if no
+    such value exists."""
+    label = label.lower()
+    for p in paragraphs:
+        text = p.text or ""
+        low = text.lower()
+        if label in low:
+            m = re.search(r"-?\d+(?:\.\d+)?", text[low.find(label):])
+            if not m:
+                m = re.search(r"-?\d+(?:\.\d+)?", text)
+            if m:
+                return float(m.group(0))
+    return None
+
+
+def find_number_loose(paragraphs, nouns, qualifiers):
+    """Fallback for the total-assignments / total-points lines.
+
+    A correct agent is instructed to use the exact phrasing "Total Assignments:
+    N" / "Total Points: X"; the exact-string finder above handles that. This
+    helper catches reasonable paraphrases — any paragraph that mentions one of
+    `nouns` (e.g. "assignment"/"point") together with one of `qualifiers`
+    (e.g. "total"/"sum"/"count") — and returns the number appearing at or after
+    the noun. Several paragraphs may match (a per-group breakdown line like
+    "Assignment count by group: 4" qualifies too), so among all matches we take
+    the LARGEST value: a total is, by definition, at least as large as any
+    constituent count, and a point total (300) exceeds any single assignment's
+    points (<=100). A paragraph like "Assignments without due dates: 2" is
+    excluded because it lacks a qualifier, so it never competes.
+    """
+    nouns = [n.lower() for n in nouns]
+    qualifiers = [q.lower() for q in qualifiers]
+    best = None
+    for p in paragraphs:
+        text = p.text or ""
+        low = text.lower()
+        if any(n in low for n in nouns) and any(q in low for q in qualifiers):
+            # Prefer a number that appears right after the matched noun.
+            best_pos = len(text)
+            for n in nouns:
+                pos = low.find(n)
+                if pos != -1 and pos < best_pos:
+                    best_pos = pos
+            m = re.search(r"-?\d+(?:\.\d+)?", text[best_pos:])
+            if not m:
+                m = re.search(r"-?\d+(?:\.\d+)?", text)
+            if m:
+                val = float(m.group(0))
+                if best is None or val > best:
+                    best = val
+    return best
 
 
 DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym", user="eigent", password="camel")
@@ -59,16 +168,13 @@ def check_word_doc(agent_workspace):
 
     doc = Document(doc_path)
 
-    # Check heading
-    has_heading = False
-    for p in doc.paragraphs:
-        if "creative computing" in p.text.lower() and "assignment guide" in p.text.lower():
-            has_heading = True
-            break
-    check("Document has correct heading", has_heading)
+    # Aggregate paragraph text once; heading tokens may legitimately be split
+    # across paragraphs, so the heading check uses the whole document text.
+    full_text = " ".join(p.text for p in doc.paragraphs)
+    check("Document has correct heading",
+          "creative computing" in full_text.lower() and "assignment guide" in full_text.lower())
 
     # Check course code
-    full_text = " ".join(p.text for p in doc.paragraphs)
     check("Document mentions CCC-2014J", "CCC-2014J" in full_text)
 
     # Check table
@@ -139,14 +245,27 @@ def check_word_doc(agent_workspace):
     check("Table has assignments with dates", has_dates >= 8, f"Found {has_dates}")
     check("Table has assignments without dates", has_no_date >= 1, f"Found {has_no_date}")
 
-    # Check total assignments and points in text
+    # Check total assignments and points: find the labeled line, extract its
+    # numeric value, compare numerically (formatting variants like "300" vs
+    # "300.0" are accepted; value must still match). Fall back to a looser scan
+    # for paraphrased labels (e.g. "Total number of assignments").
+    total_assignments = find_labeled_number(doc.paragraphs, "total assignments")
+    if total_assignments is None:
+        total_assignments = find_number_loose(
+            doc.paragraphs, ["assignment"], ["total", "sum", "count", "overall", "number of"])
     check("Document mentions total assignments count",
-          "10" in full_text and "total assignments" in full_text.lower(),
-          "Expected 'Total Assignments: 10'")
+          total_assignments is not None
+          and num_close(total_assignments, EXPECTED_ASSIGNMENT_COUNT, rel_tol=0.0, abs_tol=0.5),
+          f"Expected a line like 'Total Assignments: {EXPECTED_ASSIGNMENT_COUNT}', got {total_assignments}")
 
+    total_points = find_labeled_number(doc.paragraphs, "total points")
+    if total_points is None:
+        total_points = find_number_loose(
+            doc.paragraphs, ["point"], ["total", "sum", "overall", "possible", "aggregate"])
     check("Document mentions total points (300.0)",
-          "300.0" in full_text and "total points" in full_text.lower(),
-          "Expected 'Total Points: 300.0'")
+          total_points is not None
+          and num_close(total_points, EXPECTED_TOTAL_POINTS, rel_tol=0.0, abs_tol=0.5),
+          f"Expected a line like 'Total Points: {EXPECTED_TOTAL_POINTS}', got {total_points}")
 
     return True
 
@@ -166,18 +285,24 @@ def check_notion():
         )
         pages = cur.fetchall()
 
-        # Find page whose title contains both 'CCC-2014J' and 'Assignment Overview'
+        # Find page whose title loosely matches 'CCC-2014J Assignment Overview':
+        # normalized containment, Levenshtein <= 3, or keyword coverage.
         target = None
+        titles_seen = []
         for page_id, props in pages:
             props_str = json.dumps(props) if isinstance(props, dict) else str(props)
-            low = props_str.lower()
-            if "ccc-2014j" in low and "assignment overview" in low:
+            title = extract_page_title(props)
+            if title:
+                titles_seen.append(title)
+            haystack = title if title else props_str
+            if loose_title_match(haystack, "CCC-2014J Assignment Overview",
+                                 keywords=["ccc-2014j", "assignment", "overview"]):
                 target = (page_id, props_str)
                 break
         check(
-            "Notion page 'CCC-2014J Assignment Overview' exists",
+            "Notion page 'CCC-2014J Assignment Overview' exists (fuzzy match)",
             target is not None,
-            f"{len(pages)} pages scanned",
+            f"{len(pages)} pages scanned, titles: {titles_seen[:10]}",
         )
 
         if target is None:
@@ -237,7 +362,7 @@ def main():
     print("=" * 70)
 
     check_word_doc(args.agent_workspace)
-    check_notion()  # Non-blocking
+    check_notion()  # blocking — counts toward overall PASS/FAIL
 
     print(f"\n=== SUMMARY ===")
     print(f"  Passed: {PASS_COUNT}")

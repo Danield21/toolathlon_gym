@@ -160,34 +160,47 @@ def main():
     runtime_errors = []
     try:
         import psycopg2
-        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
+        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
+        # Derive the expected Engineering headcount from the live DB rather than
+        # hardcoding 7096, so the check survives any data reseed.
+        cur.execute('''
+            SELECT COUNT(*) FROM sf_data."HR_ANALYTICS__PUBLIC__EMPLOYEES"
+            WHERE "DEPARTMENT" = 'Engineering'
+        ''')
+        eng_headcount = int(cur.fetchone()[0])
+        eng_candidates = [str(eng_headcount), f"{eng_headcount:,}"]
         cur.execute("SELECT id, title FROM gsheet.spreadsheets WHERE LOWER(title) LIKE '%compensation%' OR LOWER(title) LIKE '%workforce%'")
         sheets = cur.fetchall()
         if not sheets:
             runtime_errors.append("No Google Sheet with 'Compensation' or 'Workforce' in title found")
         else:
             sid = sheets[0][0]
-            # Get sheet title
-            cur.execute("SELECT id, title FROM gsheet.sheets WHERE spreadsheet_id=%s ORDER BY index LIMIT 1", (sid,))
-            sheet_row = cur.fetchone()
-            if sheet_row:
-                cur.execute("SELECT COUNT(*) FROM gsheet.cells WHERE spreadsheet_id=%s AND sheet_id=%s", (sid, sheet_row[0]))
-                cell_count = cur.fetchone()[0]
-                # Need at least 7 depts * 6 cols + header = 48 cells
-                if cell_count < 40:
-                    runtime_errors.append(f"Google Sheet has too few cells: {cell_count} (expected ~48)")
-                else:
-                    # Check Engineering headcount 7096 appears
-                    cur.execute("SELECT value FROM gsheet.cells WHERE spreadsheet_id=%s AND sheet_id=%s", (sid, sheet_row[0]))
-                    all_cells = [str(r[0]) for r in cur.fetchall() if r[0] is not None]
-                    if "7096" not in all_cells:
-                        runtime_errors.append("Google Sheet missing Engineering headcount 7096")
-                    else:
-                        print("    PASS")
-            else:
+            # Scan ALL sheets of the spreadsheet (the create_spreadsheet MCP seeds
+            # a default "Sheet1" at index 0; the agent may write the data either to
+            # the requested "Overview" sheet or to the default first sheet). Accept
+            # any sheet that has enough cells and contains the Engineering headcount.
+            cur.execute("SELECT id FROM gsheet.sheets WHERE spreadsheet_id=%s ORDER BY index", (sid,))
+            sheet_ids = [r[0] for r in cur.fetchall()]
+            if not sheet_ids:
                 runtime_errors.append("Google Sheet has no sheets")
+            else:
+                good_sheet = False
+                for sheet_id in sheet_ids:
+                    cur.execute("SELECT COUNT(*) FROM gsheet.cells WHERE spreadsheet_id=%s AND sheet_id=%s", (sid, sheet_id))
+                    cell_count = cur.fetchone()[0]
+                    if cell_count < 40:
+                        continue
+                    cur.execute("SELECT value FROM gsheet.cells WHERE spreadsheet_id=%s AND sheet_id=%s", (sid, sheet_id))
+                    all_cells = [str(r[0]) for r in cur.fetchall() if r[0] is not None]
+                    if any(c in all_cells for c in eng_candidates):
+                        good_sheet = True
+                        break
+                if not good_sheet:
+                    runtime_errors.append(f"No sheet in the Google Sheet has enough cells and the Engineering headcount ({eng_headcount})")
+                else:
+                    print("    PASS")
         cur.close()
         conn.close()
     except Exception as e:

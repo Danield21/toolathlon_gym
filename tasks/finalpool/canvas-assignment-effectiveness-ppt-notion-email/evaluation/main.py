@@ -6,6 +6,31 @@ Checks:
 2. PowerPoint Curriculum_Review.pptx with 6+ slides
 3. Notion database "Assignment Improvement Tracker" with revision entries
 4. Email to curriculum_committee@university.edu
+
+Robustness notes (see NewBenchmark audit T3__canvas-assignment-effectiveness-ppt-notion-email):
+- DB connection reads PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD (per-case worker DBs supported).
+- Excel is read with data_only=False so formula cells are not silently read as None; a robust
+  _to_float handles numbers, strings (currency/thousands/percent/space stripping) and treats
+  formula cells as unparseable.
+- Numeric columns (Points_Possible, Submission_Count, Completion_Rate, Mean_Score,
+  Score_Std_Dev, Discrimination_Index) are compared against the groundtruth per-row with
+  per-column tolerances. A blank/formula/unparseable cell counts as a MISMATCH (never a
+  silent skip), and each comparison requires a minimum number of matched rows before it runs
+  (else it FAILs) -- so a model cannot bypass the core metric computation by leaving cells
+  empty or writing Excel formulas. These values are all reproducible from the db seed, so a
+  model that follows the documented methodology matches within tolerance.
+- The DI comparison uses a tolerant hybrid tolerance (absolute floor + relative) that absorbs
+  the small methodological deviations a correct-but-differently-rounded agent can produce
+  (observed <= 0.007 for the documented method), while NOT absorbing the much larger errors
+  from using the wrong denominator (e.g. the enrollments table count instead of distinct
+  graded submitters), so the task still discriminates.
+- Effectiveness labels are verified per-row against the classification rule applied to the
+  agent's own Discrimination Index (Good if > 0.3, Acceptable if 0.15..0.3, Poor if < 0.15),
+  so labeling every assignment "Good" is caught.
+- Row-count checks are lenient (>= thresholds) and GT comparison is content-based (keyed by
+  course+assignment, with assignment-name fallback), so multi-agent duplicate writes or extra
+  assignments with zero submissions cannot cause false FAILs. Columns are anchored by header
+  keywords (with a positional fallback to the documented column layout).
 """
 import argparse
 import json
@@ -16,14 +41,56 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
-    "dbname": "toolathlon_gym",
-    "user": "eigent",
-    "password": "camel",
+    "port": int(os.environ.get("PGPORT", "5432")),
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
+
+# Tolerances / thresholds for the GT comparison. The GT (51 assignments, 7 courses, 17
+# revision-needed) is fully reproducible from the db seed with the documented methodology
+# (raw percentage scores, enrolled = unique students with >=1 graded non-null submission,
+# 27% group size = floor(0.27*N), tie-break by user id, population std dev). The DI tolerance
+# absorbs the small deviations a correct-but-differently-rounded agent can produce (<= 0.007
+# for the documented method), while leaving the larger errors of a wrong denominator intact.
+DI_TOL_ABS = 0.05        # absolute floor for DI tolerance
+DI_TOL_REL = 0.05        # relative tolerance (fraction of the GT value)
+REQUIRED_GT_PRESENT = 48  # of the 51 GT assignments that must appear in the agent sheet
+MIN_COMPARE_ROWS = 40    # min matched GT rows before a numeric comparison runs (else FAIL)
+MATCH_RATIO = 0.85       # fraction of matched rows that must be within tolerance
+MIN_REVISION_NAMES = 14  # of the 17 GT revision-needed assignments that must appear
+MIN_REV_COMPARE = 10     # min matched revision assignments before revision numeric checks run
+MIN_SUMMARY_COMPARE = 5  # min matched courses before summary numeric checks run
+
+# Per-column absolute tolerances for the Assignment Metrics sheet (a correct model reproduces
+# these exactly; tolerances absorb rounding-method differences, e.g. a model rounding the
+# 1-decimal columns to whole numbers, while still catching fabricated values by a wide margin).
+COL_TOL = {
+    "Points_Possible": 0.05,
+    "Submission_Count": 1.0,
+    "Completion_Rate": 0.5,
+    "Mean_Score": 0.5,
+    "Score_Std_Dev": 0.5,
+}
+SUM_COUNT_TOL = 2.0      # Course Summary count columns (Total/Good/Acceptable/Poor)
+SUM_COMP_TOL = 0.5       # Course Summary Avg_Completion_Rate
+SUM_DI_TOL = 0.1         # Course Summary Avg_DI (wider than DI_TOL so an averaged value
+                         #   produced by per-assignment DIs at the tolerance edge still passes)
+REV_COMP_TOL = 0.5       # Revision Needed Completion_Rate
+
+# Assignment Metrics numeric columns: (name, GT column index, header keyword groups).
+# Keyword groups are tried in order; within a group ALL substrings must appear in a header.
+METRIC_NUMERIC_COLS = [
+    ("Points_Possible", 2, (("points",),)),
+    ("Submission_Count", 3, (("submission",),)),
+    ("Completion_Rate", 4, (("completion",),)),
+    ("Mean_Score", 5, (("mean",),)),
+    ("Score_Std_Dev", 6, (("std",), ("deviation",))),
+    ("Discrimination_Index", 7, (("discrimination",), ("di",))),
+]
 
 
 def check(name, condition, detail=""):
@@ -37,18 +104,126 @@ def check(name, condition, detail=""):
         print(f"  [FAIL] {name}{msg}")
 
 
+def _to_float(v):
+    """Robustly coerce a cell value to float.
+
+    Supports int/float/str (strips thousands separators, currency symbols, '%' and spaces).
+    Returns None for None, booleans, formula strings and any other unparseable value.
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if s.startswith("="):
+            return None  # Excel formula cell -> value not stored as literal
+        for ch in (",", "$", "€", "¥", "%", " "):
+            s = s.replace(ch, "")
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return None
+
+
 def num_close(a, b, tol=1.0):
-    try:
-        return abs(float(a) - float(b)) <= tol
-    except (TypeError, ValueError):
+    """Numeric close with fallback to case-insensitive string equality for unparseable values."""
+    fa, fb = _to_float(a), _to_float(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= tol
+    if a is None or b is None:
         return False
+    return str(a).strip().lower() == str(b).strip().lower()
 
 
-def di_close(a, b, tol=0.05):
-    try:
-        return abs(float(a) - float(b)) <= tol
-    except (TypeError, ValueError):
+def di_close(a, b):
+    """Tolerant DI comparison: hybrid absolute + relative tolerance."""
+    fa, fb = _to_float(a), _to_float(b)
+    if fa is not None and fb is not None:
+        return abs(fa - fb) <= max(DI_TOL_ABS, DI_TOL_REL * abs(fb))
+    if a is None or b is None:
         return False
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+def _classify(di):
+    """Effectiveness classification from a DI value per task.md / guide.md."""
+    if di > 0.3:
+        return "good"
+    if di >= 0.15:
+        return "acceptable"
+    return "poor"
+
+
+def _non_empty_rows(ws):
+    """Return rows that have a non-empty first cell (skips blank trailing rows)."""
+    return [r for r in ws.iter_rows(values_only=True)
+            if r and r[0] is not None and str(r[0]).strip() != ""]
+
+
+def _find_sheet(wb, *substrings):
+    for s in wb.sheetnames:
+        if all(sub in s.lower() for sub in substrings):
+            return wb[s]
+    return None
+
+
+def _build_header_map(ws, min_cells=3):
+    """Return {lowercased_header: column_index} from the first row that looks like a header.
+
+    Skips single-cell (e.g. merged-title) rows so a stray title row does not confuse the map.
+    """
+    for row in ws.iter_rows(values_only=True):
+        vals = [c for c in row if c is not None and str(c).strip() != ""]
+        if len(vals) < min_cells:
+            continue
+        hmap = {}
+        for j, h in enumerate(row):
+            if h is not None:
+                s = str(h).strip().lower()
+                if s and s not in hmap:
+                    hmap[s] = j
+        return hmap
+    return {}
+
+
+def _agent_col(hmap, default, keyword_groups):
+    """Find an agent column index by header keywords; fall back to `default` (GT layout)."""
+    for group in keyword_groups:
+        for key, idx in hmap.items():
+            if all(k in key for k in group):
+                return idx
+    return default
+
+
+def _compare_column(name, gt_idx, agent_idx, tol, gt_row, agent_row, stats, use_di=False):
+    """Compare one cell. A blank/formula/unparseable agent cell counts as a MISMATCH."""
+    gt_v = gt_row[gt_idx] if len(gt_row) > gt_idx else None
+    ag_v = agent_row[agent_idx] if agent_idx is not None and len(agent_row) > agent_idx else None
+    stats[name]["checked"] += 1
+    if use_di:
+        if di_close(ag_v, gt_v):
+            stats[name]["matched"] += 1
+    else:
+        if num_close(ag_v, gt_v, tol):
+            stats[name]["matched"] += 1
+
+
+def _emit_numeric_checks(label, stats, min_checked, missing):
+    """Emit PASS/FAIL per numeric column. Never silently passes on too few matched rows."""
+    for name, s in stats.items():
+        if s["checked"] < min_checked:
+            check(f"{label} {name} matches groundtruth",
+                  False,
+                  f"only {s['checked']} matched rows with values; expected literal numbers")
+        else:
+            ratio = s["matched"] / s["checked"] if s["checked"] else 0.0
+            check(f"{label} {name} matches groundtruth",
+                  ratio >= MATCH_RATIO,
+                  f"{s['matched']}/{s['checked']} within tolerance; missing rows: {missing[:3]}")
 
 
 # ============================================================
@@ -65,10 +240,9 @@ def check_excel(agent_workspace, gt_workspace):
 
     try:
         import openpyxl
-        wb = openpyxl.load_workbook(xlsx_path, data_only=True)
+        wb = openpyxl.load_workbook(xlsx_path, data_only=False)
         sheet_names = wb.sheetnames
 
-        # Check sheets exist
         check("Sheet 'Assignment Metrics' exists",
               any("assignment" in s.lower() and "metric" in s.lower() for s in sheet_names),
               f"Sheets: {sheet_names}")
@@ -79,106 +253,233 @@ def check_excel(agent_workspace, gt_workspace):
               any("revision" in s.lower() for s in sheet_names),
               f"Sheets: {sheet_names}")
 
-        # Check Assignment Metrics sheet
-        metrics_ws = None
-        for s in sheet_names:
-            if "assignment" in s.lower() and "metric" in s.lower():
-                metrics_ws = wb[s]
-                break
-        if not metrics_ws:
-            metrics_ws = wb[sheet_names[0]]
+        metrics_ws = _find_sheet(wb, "assignment", "metric") or wb[sheet_names[0]]
+        rows = _non_empty_rows(metrics_ws)
+        check("Assignment Metrics has header + at least 51 data rows",
+              len(rows) >= 51,
+              f"Found {len(rows)} non-empty rows")
 
-        rows = list(metrics_ws.iter_rows(values_only=True))
-        check("Assignment Metrics has header + data rows (== 52)",
-              len(rows) == 52,
-              f"Found {len(rows)} rows (expected 52)")
-
-        # Check data content
         if len(rows) > 1:
             all_text = " ".join(str(c) for row in rows for c in row if c).lower()
             check("Contains Fall 2014 course names",
-                  "applied analytics" in all_text or "biochemistry" in all_text,
-                  f"Sample: {all_text[:200]}")
-            check("Contains effectiveness labels",
-                  "good" in all_text or "acceptable" in all_text,
+                  "applied analytics" in all_text or "biochemistry" in all_text
+                  or "foundations of finance" in all_text or "creative computing" in all_text,
                   f"Sample: {all_text[:200]}")
 
-        # Compare with groundtruth if available
+        # Compare with groundtruth (content-based, tolerant, per-column numeric)
         gt_xlsx = os.path.join(gt_workspace, "Assessment_Effectiveness.xlsx")
         if os.path.isfile(gt_xlsx):
-            gt_wb = openpyxl.load_workbook(gt_xlsx, data_only=True)
-            gt_metrics = None
-            for s in gt_wb.sheetnames:
-                if "assignment" in s.lower() and "metric" in s.lower():
-                    gt_metrics = gt_wb[s]
-                    break
-            if not gt_metrics:
-                gt_metrics = gt_wb[gt_wb.sheetnames[0]]
+            gt_wb = openpyxl.load_workbook(gt_xlsx, data_only=False)
+            gt_metrics = _find_sheet(gt_wb, "assignment", "metric") or gt_wb[gt_wb.sheetnames[0]]
+            gt_rows = _non_empty_rows(gt_metrics)
 
-            gt_rows = list(gt_metrics.iter_rows(values_only=True))
-            agent_rows = rows
-
-            # Check row count matches GT exactly.
-            check("Assignment count matches groundtruth exactly",
-                  len(agent_rows) == len(gt_rows),
-                  f"Agent: {len(agent_rows)}, GT: {len(gt_rows)}")
-
-            # Spot-check a few DI values
-            gt_data = {}
+            gt_by_key = {}
             for row in gt_rows[1:]:
-                if row[0] and row[1]:
-                    key = (str(row[0]).strip(), str(row[1]).strip())
-                    gt_data[key] = row
+                if len(row) >= 2 and row[0] and row[1]:
+                    gt_by_key[(str(row[0]).strip(), str(row[1]).strip())] = row
 
-            matches = 0
-            total_checked = 0
-            mismatches = []
-            for row in agent_rows[1:]:
-                if row[0] and row[1]:
-                    key = (str(row[0]).strip(), str(row[1]).strip())
-                    if key in gt_data:
-                        total_checked += 1
-                        gt_row = gt_data[key]
-                        # Check DI (col 7, 0-indexed). Tighten tolerance to 0.02.
-                        if len(row) > 7 and len(gt_row) > 7:
-                            if di_close(row[7], gt_row[7], tol=0.02):
-                                matches += 1
-                            else:
-                                mismatches.append((key, gt_row[7], row[7]))
-            # Require ALL DIs to match (FAIL_COUNT==0 spirit). Allow up to 1 drift
-            # to tolerate one possible numerical-rounding edge case.
-            if total_checked > 0:
-                check(
-                    "DI values match groundtruth exactly (within 0.02)",
-                    (total_checked - matches) == 0,
-                    f"{matches}/{total_checked}; first mismatches: {mismatches[:3]}",
-                )
+            agent_hmap = _build_header_map(metrics_ws)
+            agent_course_idx = _agent_col(agent_hmap, 0, (("course",),))
+            agent_assign_idx = _agent_col(agent_hmap, 1, (("assignment",),))
+
+            agent_rows = rows[1:]
+            agent_by_key = {}
+            agent_by_assign = {}
+            for row in agent_rows:
+                ac = row[agent_course_idx] if agent_course_idx is not None and len(row) > agent_course_idx else None
+                aa = row[agent_assign_idx] if agent_assign_idx is not None and len(row) > agent_assign_idx else None
+                if ac and aa:
+                    agent_by_key[(str(ac).strip(), str(aa).strip())] = row
+                if aa is not None:
+                    agent_by_assign.setdefault(str(aa).strip(), row)
+
+            # Agent numeric column indices (header-anchored with GT-layout fallback)
+            agent_idx_of = {}
+            for name, gt_idx, kwgroups in METRIC_NUMERIC_COLS:
+                agent_idx_of[name] = _agent_col(agent_hmap, gt_idx, kwgroups)
+            eff_idx = _agent_col(agent_hmap, 8, (("effectiveness",), ("effect",)))
+            di_agent_idx = agent_idx_of["Discrimination_Index"]
+
+            stats = {name: {"checked": 0, "matched": 0} for name, _, _ in METRIC_NUMERIC_COLS}
+            eff_checked = 0
+            eff_matched = 0
+            missing = []
+            checked = 0
+            for key, gt_row in gt_by_key.items():
+                agent_row = agent_by_key.get(key) or agent_by_assign.get(str(key[1]).strip())
+                if agent_row is None:
+                    missing.append(key)
+                    continue
+                checked += 1
+                for name, gt_idx, kwgroups in METRIC_NUMERIC_COLS:
+                    use_di = (name == "Discrimination_Index")
+                    tol = 0.0 if use_di else COL_TOL[name]
+                    _compare_column(name, gt_idx, agent_idx_of[name], tol,
+                                    gt_row, agent_row, stats, use_di=use_di)
+
+                # Effectiveness label: consistent with the classification rule applied to the
+                # agent's own DI (or, as a fallback, to the GT DI) -- catches all-'Good' etc.
+                ag_di_v = agent_row[di_agent_idx] if di_agent_idx is not None and len(agent_row) > di_agent_idx else None
+                fa = _to_float(ag_di_v)
+                if fa is not None:
+                    ag_label = agent_row[eff_idx] if eff_idx is not None and len(agent_row) > eff_idx else None
+                    label = str(ag_label).strip().lower() if ag_label is not None else ""
+                    ok = _classify(fa) in label
+                    if not ok:
+                        gt_di_v = gt_row[7] if len(gt_row) > 7 else None
+                        fb = _to_float(gt_di_v)
+                        if fb is not None:
+                            ok = _classify(fb) in label
+                    eff_checked += 1
+                    if ok:
+                        eff_matched += 1
+
+            check("Most GT assignments present in agent sheet",
+                  checked >= REQUIRED_GT_PRESENT,
+                  f"{checked}/{len(gt_by_key)}; missing: {missing[:5]}")
+
+            # Per-column numeric comparison (blank/formula cells are mismatches, never a pass)
+            _emit_numeric_checks("Assignment Metrics", stats, MIN_COMPARE_ROWS, missing)
+
+            if eff_checked < MIN_COMPARE_ROWS:
+                check("Effectiveness labels match Discrimination Index classification",
+                      False,
+                      f"only {eff_checked} rows with parseable DI; cannot verify labels")
             else:
-                check("DI spot-check feasible", False, "No matching rows found")
+                ratio = eff_matched / eff_checked
+                check("Effectiveness labels match Discrimination Index classification",
+                      ratio >= MATCH_RATIO,
+                      f"{eff_matched}/{eff_checked} labels consistent with DI values")
 
         # Check Course Summary sheet
-        summary_ws = None
-        for s in sheet_names:
-            if "course" in s.lower() and "summary" in s.lower():
-                summary_ws = wb[s]
-                break
+        summary_ws = _find_sheet(wb, "course", "summary")
         if summary_ws:
-            summary_rows = list(summary_ws.iter_rows(values_only=True))
-            check("Course Summary has 8 rows (header + 7 courses)",
-                  len(summary_rows) == 8,
+            summary_rows = _non_empty_rows(summary_ws)
+            check("Course Summary has header + at least 7 course rows",
+                  len(summary_rows) >= 8,
                   f"Found {len(summary_rows)} rows")
 
+            # Presence of the majority of the 7 Fall 2014 courses (partial names, tolerant
+            # of course-name formatting differences such as a missing term suffix).
+            gt_course_hints = [
+                "applied analytics",
+                "biochemistry",
+                "creative computing",
+                "data-driven design",
+                "environmental economics",
+                "foundations of finance",
+                "global governance",
+            ]
+            if len(summary_rows) > 1:
+                summary_text = " ".join(str(c) for row in summary_rows for c in row if c).lower()
+                present = sum(1 for hint in gt_course_hints if hint in summary_text)
+                check("Course Summary lists most Fall 2014 courses",
+                      present >= 5,
+                      f"{present}/7 course names found")
+
+            # Numeric comparison of the summary values vs GT
+            if os.path.isfile(gt_xlsx):
+                gt_wb3 = openpyxl.load_workbook(gt_xlsx, data_only=False)
+                gt_sum_ws = _find_sheet(gt_wb3, "course", "summary")
+                if gt_sum_ws and len(summary_rows) > 1:
+                    gt_sum_rows = _non_empty_rows(gt_sum_ws)[1:]
+                    sum_hmap = _build_header_map(summary_ws)
+                    s_total_idx = _agent_col(sum_hmap, 1, (("total",),))
+                    s_good_idx = _agent_col(sum_hmap, 2, (("good",),))
+                    s_acc_idx = _agent_col(sum_hmap, 3, (("acceptable",), ("accept",)))
+                    s_poor_idx = _agent_col(sum_hmap, 4, (("poor",),))
+                    s_avgcomp_idx = _agent_col(sum_hmap, 5, (("avg", "completion"), ("completion",)))
+                    s_avgdi_idx = _agent_col(sum_hmap, 6, (("avg", "di"), ("di",)))
+
+                    agent_sum_rows = summary_rows[1:]
+                    sum_stats = {
+                        "Total_Assignments": {"checked": 0, "matched": 0},
+                        "Good_Count": {"checked": 0, "matched": 0},
+                        "Acceptable_Count": {"checked": 0, "matched": 0},
+                        "Poor_Count": {"checked": 0, "matched": 0},
+                        "Avg_Completion_Rate": {"checked": 0, "matched": 0},
+                        "Avg_DI": {"checked": 0, "matched": 0},
+                    }
+                    for gs in gt_sum_rows:
+                        gname = str(gs[0]).strip().lower()
+                        hint = next((h for h in gt_course_hints if h in gname), None)
+                        if hint is None:
+                            continue
+                        best = None
+                        for ar in agent_sum_rows:
+                            if hint in " ".join(str(c) for c in ar if c).lower():
+                                best = ar
+                                break
+                        if best is None:
+                            continue
+                        _compare_column("Total_Assignments", 1, s_total_idx, 1.0, gs, best, sum_stats)
+                        _compare_column("Good_Count", 2, s_good_idx, SUM_COUNT_TOL, gs, best, sum_stats)
+                        _compare_column("Acceptable_Count", 3, s_acc_idx, SUM_COUNT_TOL, gs, best, sum_stats)
+                        _compare_column("Poor_Count", 4, s_poor_idx, SUM_COUNT_TOL, gs, best, sum_stats)
+                        _compare_column("Avg_Completion_Rate", 5, s_avgcomp_idx, SUM_COMP_TOL, gs, best, sum_stats)
+                        _compare_column("Avg_DI", 6, s_avgdi_idx, SUM_DI_TOL, gs, best, sum_stats)
+
+                    _emit_numeric_checks("Course Summary", sum_stats, MIN_SUMMARY_COMPARE, missing)
+
         # Check Revision Needed sheet
-        revision_ws = None
-        for s in sheet_names:
-            if "revision" in s.lower():
-                revision_ws = wb[s]
-                break
+        revision_ws = _find_sheet(wb, "revision")
         if revision_ws:
-            revision_rows = list(revision_ws.iter_rows(values_only=True))
-            check("Revision Needed has 18 rows (header + 17 entries)",
-                  len(revision_rows) == 18,
-                  f"Found {len(revision_rows)} rows (expected 18)")
+            revision_rows = _non_empty_rows(revision_ws)
+            check("Revision Needed has header + at least 14 entries",
+                  len(revision_rows) >= 15,
+                  f"Found {len(revision_rows)} rows")
+
+            rev_hmap = _build_header_map(revision_ws)
+            rev_course_idx = _agent_col(rev_hmap, 0, (("course",),))
+            rev_assign_idx = _agent_col(rev_hmap, 1, (("assignment",),))
+            rev_di_idx = _agent_col(rev_hmap, 2, (("current", "di"), ("di",)))
+            rev_comp_idx = _agent_col(rev_hmap, 3, (("completion",),))
+
+            agent_rev_map = {}
+            for r in revision_rows[1:]:
+                aa = r[rev_assign_idx] if rev_assign_idx is not None and len(r) > rev_assign_idx else None
+                if aa is not None:
+                    agent_rev_map.setdefault(str(aa).strip(), r)
+
+            # Presence of the majority of the GT revision-needed assignment names
+            gt_rev_names = set()
+            gt_rev_rows = []
+            if os.path.isfile(gt_xlsx):
+                gt_wb2 = openpyxl.load_workbook(gt_xlsx, data_only=False)
+                gt_rev_ws = _find_sheet(gt_wb2, "revision")
+                if gt_rev_ws:
+                    gt_rev_rows = _non_empty_rows(gt_rev_ws)[1:]
+                    for row in gt_rev_rows:
+                        if len(row) >= 2 and row[1] is not None:
+                            gt_rev_names.add(str(row[1]).strip())
+            if gt_rev_names and len(revision_rows) > 1:
+                present = len(gt_rev_names & set(agent_rev_map.keys()))
+                check("Revision Needed contains most flagged assignments",
+                      present >= MIN_REVISION_NAMES,
+                      f"{present}/{len(gt_rev_names)} flagged assignments present")
+
+            # Numeric comparison of Current_DI / Completion_Rate for the matched assignments
+            if gt_rev_names and os.path.isfile(gt_xlsx):
+                rev_stats = {
+                    "Current_DI": {"checked": 0, "matched": 0},
+                    "Completion_Rate": {"checked": 0, "matched": 0},
+                }
+                rev_matched = 0
+                for gr in gt_rev_rows:
+                    gname = str(gr[1]).strip()
+                    ar = agent_rev_map.get(gname)
+                    if ar is None:
+                        continue
+                    rev_matched += 1
+                    _compare_column("Current_DI", 2, rev_di_idx, 0.0, gr, ar, rev_stats, use_di=True)
+                    _compare_column("Completion_Rate", 3, rev_comp_idx, REV_COMP_TOL, gr, ar, rev_stats)
+
+                if rev_matched >= MIN_REV_COMPARE:
+                    _emit_numeric_checks("Revision Needed", rev_stats, MIN_REV_COMPARE, [])
+                else:
+                    check("Revision Needed numeric values match groundtruth",
+                          False,
+                          f"only {rev_matched} matched revision assignments")
 
     except ImportError:
         check("openpyxl available", False, "Cannot parse Excel without openpyxl")
@@ -243,7 +544,6 @@ def check_notion():
         conn = psycopg2.connect(**DB_CONFIG)
         cur = conn.cursor()
 
-        # Check for database
         cur.execute("""
             SELECT id, title, properties FROM notion.databases
             WHERE title::text ILIKE '%%improvement%%tracker%%'
@@ -255,15 +555,20 @@ def check_notion():
               f"Found {len(dbs)} matching databases")
 
         if dbs:
-            db_id = dbs[0][0]
             props_raw = dbs[0][2]
             if isinstance(props_raw, str):
-                props = json.loads(props_raw)
-            else:
+                try:
+                    props = json.loads(props_raw)
+                except Exception:
+                    props = {}
+            elif isinstance(props_raw, dict):
                 props = props_raw
+            else:
+                props = {}
+            if not isinstance(props, dict):
+                props = {}
 
-            # Check properties
-            prop_names = [k.lower() for k in props.keys()] if props else []
+            prop_names = [k.lower() for k in props.keys()]
             check("Database has 'Assignment' property",
                   any("assignment" in p for p in prop_names),
                   f"Properties: {prop_names}")
@@ -274,19 +579,25 @@ def check_notion():
                   any("status" in p for p in prop_names),
                   f"Properties: {prop_names}")
 
-            # Check pages in this database
-            cur.execute("""
-                SELECT id, properties FROM notion.pages
-                WHERE parent::text LIKE %s
-                  AND (archived IS NULL OR archived = false)
-                  AND (in_trash IS NULL OR in_trash = false)
-            """, (f'%{db_id}%',))
-            pages = cur.fetchall()
-            check("Notion has entries for all revision-needed assignments (== 17)",
-                  len(pages) == 17,
-                  f"Found {len(pages)} pages (expected 17)")
+            # Collect pages across all matching databases (multi-agent may create several).
+            db_ids = [d[0] for d in dbs]
+            seen = set()
+            pages = []
+            for db_id in db_ids:
+                cur.execute("""
+                    SELECT id, properties FROM notion.pages
+                    WHERE parent::text LIKE %s
+                      AND (archived IS NULL OR archived = false)
+                      AND (in_trash IS NULL OR in_trash = false)
+                """, (f'%{db_id}%',))
+                for pid, propval in cur.fetchall():
+                    if pid not in seen:
+                        seen.add(pid)
+                        pages.append((pid, propval))
+            check("Notion has entries for all revision-needed assignments (>= 17)",
+                  len(pages) >= 17,
+                  f"Found {len(pages)} pages")
 
-            # Check some page content
             if pages:
                 all_props_text = " ".join(
                     json.dumps(p[1]) if isinstance(p[1], dict) else str(p[1])

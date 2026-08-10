@@ -82,10 +82,10 @@ def inject_emails(conn, folder_id):
             "body": (
                 "Dear Buyer,\n\n"
                 "Thank you for being a valued customer. We have noticed your recent orders and "
-                "would love to discuss a long-term supply agreement. Our team is available "
-                "for an in-person meeting at our Shanghai facility any day next week. "
+                "would love to discuss a long-term supply agreement. Our Asia Tech Trading team "
+                "is available for an in-person meeting at our Shanghai facility any day next week. "
                 "Please let us know your preferred date and time.\n\n"
-                "Best regards,\nTechWorld Electronics - Shanghai Office"
+                "Best regards,\nAsia Tech Trading - Shanghai Office"
             ),
         },
         {
@@ -96,8 +96,9 @@ def inject_emails(conn, folder_id):
                 "Hello,\n\n"
                 "We are a Guangzhou-based electronics components supplier and we came across "
                 "your store through a trade directory. We believe our product range matches "
-                "several of your high-volume categories. We would be happy to arrange a visit "
-                "at our Guangzhou warehouse to show you our full catalog and discuss pricing.\n\n"
+                "several of your high-volume categories. Our Digital Dreams Supply team would be "
+                "happy to arrange a visit at our Guangzhou warehouse to show you our full catalog "
+                "and discuss pricing.\n\n"
                 "Please contact us to schedule a meeting.\n\n"
                 "Best,\ngz_supplier@supplier.com"
             ),
