@@ -33,6 +33,9 @@ RUN uv venv /opt/venv && uv pip install --python /opt/venv/bin/python \
     "openpyxl" \
     "python-docx" \
     "python-pptx" \
+    "pypdf" \
+    "PyPDF2" \
+    "pdfplumber" \
     "termcolor" \
     "aiofiles" \
     "psutil" \

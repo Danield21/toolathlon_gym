@@ -367,16 +367,50 @@ export class CanvasClient {
   // ---------------------
   // SUBMISSIONS (Enhanced for Students)
   // ---------------------
-  async getSubmissions(courseId: number, assignmentId: number): Promise<CanvasSubmission[]> {
+  async getSubmissions(
+    courseId: number,
+    assignmentId: number,
+    page = 1,
+    perPage = 100
+  ): Promise<any> {
+    const limitedPage = Math.max(1, Math.floor(page || 1));
+    const limitedPerPage = Math.min(100, Math.max(1, Math.floor(perPage || 100)));
     const response = await this.client.get(
       `/courses/${courseId}/assignments/${assignmentId}/submissions`,
       {
         params: {
-          include: ['submission_comments', 'rubric_assessment', 'assignment']
+          include: ['submission_comments', 'rubric_assessment', 'assignment'],
+          page: limitedPage,
+          per_page: limitedPerPage
         }
       }
     );
-    return response.data;
+    const data = response.data;
+    if (!Array.isArray(data)) {
+      return data;
+    }
+    const scored = data.filter((s: CanvasSubmission) => typeof s.score === 'number');
+    const avgScore = scored.length
+      ? scored.reduce((sum: number, s: CanvasSubmission) => sum + Number(s.score), 0) / scored.length
+      : null;
+    return {
+      submissions: data,
+      pagination: {
+        page: limitedPage,
+        per_page: limitedPerPage,
+        total_count: data.length,
+        total_pages: 1,
+        has_more: false
+      },
+      summary: {
+        total_count: data.length,
+        submitted_count: data.filter((s: CanvasSubmission) => s.workflow_state === 'submitted' || s.submitted_at).length,
+        graded_count: scored.length,
+        avg_score: avgScore,
+        late_count: data.filter((s: CanvasSubmission) => s.late).length,
+        missing_count: data.filter((s: CanvasSubmission) => s.missing).length
+      }
+    };
   }
 
   async getSubmission(courseId: number, assignmentId: number, userId: number | 'self' = 'self'): Promise<CanvasSubmission> {

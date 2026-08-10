@@ -48,7 +48,9 @@ async def main():
 
     # Start mock HTTP server
     task_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    serve_dir = os.path.join(task_root, "files", "mock_pages")
+    serve_dir = os.path.join(task_root, "tmp", "mock_pages")
+    if not os.path.isdir(serve_dir):
+        raise FileNotFoundError(f"mock_pages directory not found: {serve_dir}")
 
     kill_proc = await asyncio.create_subprocess_shell(
         f"kill -9 $(lsof -ti:{PORT}) 2>/dev/null",

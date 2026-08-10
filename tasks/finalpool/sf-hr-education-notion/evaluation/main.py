@@ -12,10 +12,10 @@ EXPECTED_PAGE_TITLE = "Workforce Education Analysis"
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
-    "dbname": "toolathlon_gym",
-    "user": "eigent",
-    "password": "camel",
+    "port": int(os.environ.get("PGPORT", "5432")),
+    "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
+    "user": os.environ.get("PGUSER", "eigent"),
+    "password": os.environ.get("PGPASSWORD", "camel"),
 }
 
 PASS_COUNT = 0
@@ -77,6 +77,56 @@ def titles_match(expected, actual):
     if not e or not a:
         return False
     return e == a
+
+
+def _rich_text_to_str(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(_rich_text_to_str(item) for item in value)
+    if isinstance(value, dict):
+        plain = value.get("plain_text")
+        if isinstance(plain, str):
+            return plain
+        text = value.get("text")
+        if isinstance(text, dict) and isinstance(text.get("content"), str):
+            return text["content"]
+        if isinstance(text, str):
+            return text
+        content = value.get("content")
+        if isinstance(content, str):
+            return content
+        for key in ("title", "rich_text"):
+            if key in value:
+                rendered = _rich_text_to_str(value[key])
+                if rendered:
+                    return rendered
+    return ""
+
+
+def _page_title_from_properties(props):
+    if isinstance(props, str):
+        try:
+            props = json.loads(props)
+        except Exception:
+            return ""
+    if isinstance(props, dict) and isinstance(props.get("properties"), dict):
+        props = props["properties"]
+    if not isinstance(props, dict):
+        return ""
+    for key in ("title", "Name", "name", "Title"):
+        if key in props:
+            rendered = _rich_text_to_str(props[key])
+            if rendered:
+                return rendered
+    for value in props.values():
+        if isinstance(value, dict) and value.get("type") == "title":
+            rendered = _rich_text_to_str(value)
+            if rendered:
+                return rendered
+    return ""
 
 
 def get_sheet(wb, target):
@@ -242,16 +292,7 @@ def check_notion():
     found_page = False
     page_id = None
     for page in pages:
-        props = page[1] if isinstance(page[1], dict) else json.loads(page[1]) if page[1] else {}
-        title_text = ""
-        if "title" in props:
-            t = props["title"]
-            if isinstance(t, dict) and "title" in t:
-                for item in t["title"]:
-                    if isinstance(item, dict) and "text" in item:
-                        title_text += item["text"].get("content", "")
-                    elif isinstance(item, dict) and "plain_text" in item:
-                        title_text += item["plain_text"]
+        title_text = _page_title_from_properties(page[1])
         # Exact title match (task.md prescribes the exact page title)
         if titles_match(EXPECTED_PAGE_TITLE, title_text):
             found_page = True

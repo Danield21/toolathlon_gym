@@ -295,11 +295,47 @@ export class PgCanvasRouter {
     // GET /courses/:id/assignments/:aid/submissions
     m = path.match(/^courses\/(\d+)\/assignments\/(\d+)\/submissions$/);
     if (m) {
-      const res = await this.pool.query(
-        'SELECT * FROM canvas.submissions WHERE assignment_id = $1',
+      const page = Math.max(1, parseInt(params.page, 10) || 1);
+      const perPage = Math.min(100, Math.max(1, parseInt(params.per_page, 10) || 100));
+      const offset = (page - 1) * perPage;
+      const countRes = await this.pool.query(
+        'SELECT COUNT(*)::int AS total_count FROM canvas.submissions WHERE assignment_id = $1',
         [m[2]]
       );
-      return res.rows;
+      const summaryRes = await this.pool.query(`
+        SELECT
+          COUNT(*)::int AS total_count,
+          COUNT(*) FILTER (WHERE submitted_at IS NOT NULL OR workflow_state = 'submitted')::int AS submitted_count,
+          COUNT(score)::int AS graded_count,
+          AVG(score) AS avg_score,
+          COUNT(*) FILTER (WHERE late IS TRUE)::int AS late_count,
+          COUNT(*) FILTER (WHERE missing IS TRUE)::int AS missing_count
+        FROM canvas.submissions
+        WHERE assignment_id = $1
+      `, [m[2]]);
+      const res = await this.pool.query(
+        'SELECT * FROM canvas.submissions WHERE assignment_id = $1 ORDER BY user_id, id LIMIT $2 OFFSET $3',
+        [m[2], perPage, offset]
+      );
+      const totalCount = countRes.rows[0]?.total_count || 0;
+      return {
+        submissions: res.rows,
+        pagination: {
+          page,
+          per_page: perPage,
+          total_count: totalCount,
+          total_pages: Math.max(1, Math.ceil(totalCount / perPage)),
+          has_more: page * perPage < totalCount
+        },
+        summary: summaryRes.rows[0] || {
+          total_count: totalCount,
+          submitted_count: 0,
+          graded_count: 0,
+          avg_score: null,
+          late_count: 0,
+          missing_count: 0
+        }
+      };
     }
 
     // GET /courses/:id/assignments/:aid
