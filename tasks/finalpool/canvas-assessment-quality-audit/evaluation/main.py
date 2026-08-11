@@ -281,7 +281,10 @@ def check_excel(agent_workspace):
         check("Sheet 'Summary' exists", False, f"Available: {wb_val.sheetnames}")
     else:
         check("Sheet 'Summary' exists", True)
-        data_rows = sum_rows[1:] if len(sum_rows) > 1 else []
+        # The task asks for "rows for Total_Quizzes, ..." and does not require
+        # a header row. Accept both a headered two-column table and a plain
+        # key/value list starting at A1.
+        data_rows = sum_rows
         lookup = {}
         for row in data_rows:
             if row and row[0]:
