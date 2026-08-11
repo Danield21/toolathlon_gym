@@ -126,6 +126,11 @@ need_bins() {
       echo "[error] Canvas MCP build is stale; rebuild local_servers/mcp-canvas-lms before running." >&2
       exit 1
     }
+  grep -q "Using PgCanvasRouter" \
+    "${PROJECT_ROOT}/local_servers/mcp-canvas-lms/build/client.js" || {
+      echo "[error] Canvas MCP client build is stale; rebuild local_servers/mcp-canvas-lms before running." >&2
+      exit 1
+    }
   local shm_path shm_free_kb template_kb reserve_kb need_kb
   shm_path="$ENROOT_DATA_PATH"
   [[ -d "$shm_path" ]] || shm_path="/dev/shm"
