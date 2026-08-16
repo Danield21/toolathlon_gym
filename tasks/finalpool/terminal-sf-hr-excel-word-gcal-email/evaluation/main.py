@@ -15,9 +15,24 @@ import sys
 import openpyxl
 import psycopg2
 from docx import Document
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# task.md (SF company) schedules review meetings in Pacific Time: line 15
+# "Meetings should be at 2:00 PM" and line 21 "two meetings on Friday (one at
+# 2 PM and one at 4 PM)". gcal.events.start_datetime is a TIMESTAMPTZ UTC
+# instant; never use bare sd.strftime('%Y-%m-%d') / sd.hour on rows read from
+# gcal.events — psycopg2 returns them in the PG session TimeZone (case-study:
+# compute node default was Asia/Shanghai, shifting the day/hour). Use
+# utils.evaluation.gcal_helpers instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+EXPECTED_TIMEZONE = ZoneInfo("America/Los_Angeles")
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel",
 }
@@ -354,20 +369,30 @@ def check_gcal():
                   d.lower() in summaries,
                   f"Looking for {d} in {summaries[:300]}")
 
-        # Dates fall within March 9-13, 2026
+        # Dates fall within March 9-13, 2026 (session-tz-independent via
+        # get_zone_components; bare e[2].strftime('%Y-%m-%d') would shift the
+        # day in a non-UTC PG session).
+        from datetime import date as _date
+        range_dates = {_date(2026, 3, d) for d in range(9, 14)}
         in_range = [e for e in review_events
-                    if e[2] is not None and e[2].strftime("%Y-%m-%d") in
-                       ("2026-03-09", "2026-03-10", "2026-03-11", "2026-03-12", "2026-03-13")]
+                    if e[2] is not None and
+                       get_zone_components(e[2], EXPECTED_TIMEZONE)[0] in range_dates]
         check("All 7 events within 2026-03-09..13", len(in_range) >= 7,
               f"Got {len(in_range)} in date range out of {len(review_events)}")
 
         # Friday (2026-03-13) has 2 meetings
+        friday_date = _date(2026, 3, 13)
         friday_events = [e for e in review_events
-                         if e[2] is not None and e[2].strftime("%Y-%m-%d") == "2026-03-13"]
+                         if e[2] is not None and
+                            get_zone_components(e[2], EXPECTED_TIMEZONE)[0] == friday_date]
         check("Two meetings on Friday 2026-03-13", len(friday_events) == 2,
               f"Got {len(friday_events)} on Friday")
         if friday_events:
-            hours = sorted(e[2].hour for e in friday_events)
+            # task.md: 2 PM and 4 PM PT (DST-aware via ZoneInfo).
+            hours = sorted(
+                get_zone_components(e[2], EXPECTED_TIMEZONE)[1]
+                for e in friday_events
+            )
             check("Friday meetings at 14:00 and 16:00",
                   hours == [14, 16],
                   f"Got {hours}")

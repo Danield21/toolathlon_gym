@@ -14,10 +14,30 @@ from argparse import ArgumentParser
 
 import openpyxl
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `sd.hour` / `sd.date()` / `strftime("%Y-%m-%d")` on rows
+# read from `gcal.events`: psycopg2 returns them in the PG session
+# `TimeZone` (case-study: compute node default was Asia/Shanghai, so a UTC
+# 01:00 came back as 09:00+08 and an evaluator's bare `sdt.hour in {9, 18}`
+# silently compared against the wrong wall-clock). Use
+# `utils.evaluation.gcal_helpers` instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 1: "Technology Innovation Forum 2026 ... in Qufu"; line 11:
+# "2026-03-12 from 09:00 to 18:00" (Conference Day 1). Qufu is in China
+# (Asia/Shanghai). Times are Beijing local time.
+EXPECTED_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -338,16 +358,26 @@ def check_gcal():
         for exp_title, exp_date, sh, eh in expected:
             match = None
             for s, sdt, edt in events:
-                if (s or "").strip().lower() == exp_title.lower() and sdt and sdt.strftime("%Y-%m-%d") == exp_date:
-                    match = (s, sdt, edt)
-                    break
+                if (s or "").strip().lower() == exp_title.lower() and sdt:
+                    # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant).
+                    # Extract the date in EXPECTED_TIMEZONE (Asia/Shanghai per
+                    # task.md) — bare sdt.strftime("%Y-%m-%d") silently
+                    # follows the PG session tz (case-study 2026-08-13).
+                    ev_date, _, _ = get_zone_components(sdt, EXPECTED_TIMEZONE)
+                    if ev_date is not None and ev_date.isoformat() == exp_date:
+                        match = (s, sdt, edt)
+                        break
             record(f"GCal '{exp_title}' on {exp_date}", match is not None,
                    f"events: {[e[0] for e in events]}")
             if match:
                 _, sdt, edt = match
+                # Hour comparison in EXPECTED_TIMEZONE per task.md (Beijing
+                # local time, DST is N/A in Asia/Shanghai).
+                _, s_hour, s_min = get_zone_components(sdt, EXPECTED_TIMEZONE)
+                _, e_hour, _ = get_zone_components(edt, EXPECTED_TIMEZONE) if edt else (None, None, None)
                 record(f"'{exp_title}' time {sh:02d}:00-{eh:02d}:00",
-                       sdt.hour == sh and (edt is not None and edt.hour == eh),
-                       f"start={sdt}, end={edt}")
+                       s_hour == sh and e_hour == eh,
+                       f"start_hour={s_hour}, end_hour={e_hour}")
     except Exception as e:
         record("GCal check error", False, str(e))
     finally:

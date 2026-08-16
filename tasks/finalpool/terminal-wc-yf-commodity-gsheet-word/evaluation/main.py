@@ -6,7 +6,7 @@ import sys
 
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
+DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")),
           dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
           user="eigent", password="camel")
 
@@ -114,16 +114,29 @@ def check_gsheet():
             check("Gold_Price_Trend has exactly 20 data rows", row_count == 20,
                   f"Found {row_count} rows")
 
-            # Validate dates are sorted (monotonic ascending)
+            # Validate dates are sorted (monotonic ascending).
+            # Find the Date column from the header row (agent may reorder).
+            cur.execute("""
+                SELECT col_index, value FROM gsheet.cells
+                WHERE spreadsheet_id = %s AND sheet_id = %s AND row_index = 1
+            """, (target_ss, gp_sheet))
+            header_map = {r[0]: (r[1] or "").strip().lower() for r in cur.fetchall()}
+            date_col = None
+            for ci, hv in header_map.items():
+                if "date" in hv:
+                    date_col = ci
+                    break
+            if date_col is None:
+                date_col = 1  # fallback to col 1
             cur.execute("""
                 SELECT row_index, value FROM gsheet.cells
-                WHERE spreadsheet_id = %s AND sheet_id = %s AND row_index >= 2 AND col_index = 1
+                WHERE spreadsheet_id = %s AND sheet_id = %s AND row_index >= 2 AND col_index = %s
                 ORDER BY row_index
-            """, (target_ss, gp_sheet))
+            """, (target_ss, gp_sheet, date_col))
             dates = [r[1] for r in cur.fetchall() if r[1]]
             sorted_ok = dates == sorted(dates)
             check("Gold_Price_Trend dates ascending order", sorted_ok,
-                  f"Dates: {dates[:5]}...")
+                  f"Dates (col {date_col}): {dates[:5]}...")
 
             # Validate Trend column = 'Up' if close > MA else 'Down' for each
             # row. Locate Gold_Close (col 2), Moving_Avg_20d (col 3), Trend (col 4).

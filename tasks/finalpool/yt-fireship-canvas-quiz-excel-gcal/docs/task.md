@@ -9,3 +9,5 @@ Create a spreadsheet file named TypeScript_Course_Tracker.xlsx with three sheets
 Check the shared calendar for any events already scheduled on or around March 25 and March 26, 2026. Create a calendar event on March 25, 2026 titled "TypeScript Quiz Deadline" with an all-day description noting that the quiz closes at 23:59. Create a second calendar event on March 26, 2026 from 14:00 to 15:00 titled "TypeScript Quiz Review Session" for the in-class review of quiz answers.
 
 Send an email to students@webdev.edu with subject "TypeScript Essentials Quiz Now Available". The email body should announce that the quiz has been posted in the course, state the deadline of March 25 at 23:59, mention that a review session is scheduled for March 26 from 14:00 to 15:00, and encourage students to review the linked TypeScript tutorial videos before attempting the quiz.
+Note: Use the America/New_York timezone for all calendar events in this task.
+

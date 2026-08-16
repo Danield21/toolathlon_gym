@@ -8,7 +8,7 @@ def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
 
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -159,11 +159,16 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                                 check(f"GSheet '{matched_tab}' {gt_key}.{gt_h} ~{gf:.2f}",
                                       abs(gf - af) <= tol, f"got {af}")
                             elif gv is not None and av is not None:
+                                import re as _re
                                 gs = str(gv).strip().lower()
                                 avs = str(av).strip().lower()
+                                # Normalize punctuation for company-name comparison
+                                # (e.g. "amazon.com, inc." vs "amazon.com inc.")
+                                gs_norm = _re.sub(r'[.,;:!?]', '', gs)
+                                avs_norm = _re.sub(r'[.,;:!?]', '', avs)
                                 if gs:
                                     check(f"GSheet '{matched_tab}' {gt_key}.{gt_h} text",
-                                          gs == avs or gs in avs or avs in gs,
+                                          gs_norm == avs_norm or gs_norm in avs_norm or avs_norm in gs_norm,
                                           f"expected {gs[:50]}, got {avs[:50]}")
         # Reverse verification: noise emails should not be in Sent folder
         cur.execute("SELECT COUNT(*) FROM email.messages WHERE folder_id = (SELECT id FROM email.folders WHERE name = 'Sent' LIMIT 1) AND subject ILIKE '%newsletter%'")

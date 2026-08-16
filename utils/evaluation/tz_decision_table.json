@@ -1,0 +1,310 @@
+{
+  "_meta": {
+    "doc": "EXPECTED_TIMEZONE 决策表 (gcal tz root-fix v3, case-study 2026-08-13). 48 FATAL + 1 reference (case #1).",
+    "rule": {
+      "explicit": "task.md 明文写 'America/New_York' / 'ET' / 'Asia/Shanghai' / 'UTC' / 'PST' / 'PT' → 直接采用",
+      "implicit_sf": "sf-* / fetch-sf-* / terminal-sf-* → 公司在 San Francisco → America/Los_Angeles (PT)",
+      "implicit_yf": "yf-* / financ* → 金融标准时段 → America/New_York (ET, NYSE market hours)",
+      "implicit_canvas": "canvas-* / canvas-quiz-* / canvas-*2013J → 大学 Open University 课程 → America/New_York (ET)",
+      "implicit_howtocook": "howtocook-* / train-howtocook-* / terminal-howtocook-* → 中文食谱 (菜谱来自亚洲语境) → Asia/Shanghai 根据 12306 系列案例 (China rail 实地北京/曲阜出发). 注意: 少数 howtocook task.md 显式 'America/New_York' 则按显式.",
+      "implicit_wcterminal": "wc-* / terminal-wc-* → 全球电商公司, 通常 ET (HQ NY) 但每个 case 看 task.md. 沿用历史一致: 默认 ET",
+      "implicit_utc": "task.md 显式 'UTC' / 'pass times without timezone parameter' / 'Use the UTC timezone' → UTC",
+      "implicit_yt_scholarly": "yt-veritasium*, yt-fireship*, yt-transcript* → 多数无明文; 用 ET (默认 business)",
+      "implicit_playwright": "playwright-* → wc/ecommerce, 默认 ET",
+      "fallback": "无法分类 → UTC (DB instants 直接读, 比对 hour 安全)"
+    },
+    "preferred_helper": "若 task.md 显式写 IANA zone (如 'America/New_York') → get_zone_components; 若 task.md 写 '14:00 UTC' / 'do not set a timezone' → get_utc_components (DB instant 不做 wall-clock 转换)"
+  },
+  "canvas-assignment-deadline-word-gcal": {
+    "explicit": "America/New_York",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 7: '8:00 AM Eastern Time (ET) ... Use the America/New_York timezone'",
+    "preferred_helper": "get_zone_components",
+    "FIXED": true
+  },
+  "canvas-exam-calendar-report": {
+    "explicit": "America/New_York",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 7: '3:00 PM to 5:00 PM in the America/New_York timezone' '10:00 AM to 12:00 PM in the same timezone'",
+    "preferred_helper": "get_zone_components"
+  },
+  "canvas-quiz-remediation-gform-gcal": {
+    "implicit": "canvas course (Open University FFF2013J); 未显式时区但属于 ET",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 7: 'Each session should start at 3:00 PM' (no zone but canvas 2013J)",
+    "preferred_helper": "get_zone_components",
+    "NOTE": "task.md 没显式时区; 加注推荐"
+  },
+  "canvas-risk-intervention-excel-word-gcal-email": {
+    "explicit": "UTC",
+    "EXPECTED_TIMEZONE": "UTC",
+    "TZ_SOURCE": "line 9: 'from 3:00 PM to 4:30 PM UTC'",
+    "preferred_helper": "get_utc_components",
+    "NOTE": "task.md 写 UTC; 15:00 UTC = helper hour=15 in UTC"
+  },
+  "canvas-late-submission-word-gcal": {
+    "implicit": "未显式时区; canvas/workplace",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 5: 'Schedule them at 10:00, 11:00, and 14:00 respectively, each lasting one hour'",
+    "preferred_helper": "get_zone_components",
+    "NOTE": "task.md 未显式时区; 按默认 ET"
+  },
+  "canvas-submission-timeline-gcal": {
+    "implicit": "course Fall 2013J 但仅用 due date (day-only)",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 9: 'Schedule each event on the assignment due date' (day-only)",
+    "preferred_helper": "get_zone_components",
+    "NOTE": "仅比对 date (full day); tz-agnostic for day 但跨日仍需 helper"
+  },
+  "arxiv-team-reading-gform-gcal": {
+    "implicit": "未显式时区; 学术 reading group",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 7: 'from 14:00 to 15:30 each day'",
+    "preferred_helper": "get_zone_components"
+  },
+  "fetch-sf-hr-training-notion-gcal-excel": {
+    "explicit": "未显式 (SF 公司)",
+    "EXPECTED_TIMEZONE": "America/Los_Angeles",
+    "TZ_SOURCE": "无 gcal 明文 (检查 task.md 是否真要走 gcal 校验; 若有则 PT)",
+    "preferred_helper": "get_zone_components"
+  },
+  "fetch-sf-sales-forecast-ppt-gcal": {
+    "implicit": "sf 公司",
+    "EXPECTED_TIMEZONE": "America/Los_Angeles",
+    "TZ_SOURCE": "task.md line 7: 'April 16 from 14:00 to 15:30 (PST)' (推断)",
+    "preferred_helper": "get_zone_components"
+  },
+  "fetch-sf-sales-territory-ppt-email-gcal": {
+    "implicit": "sf 公司",
+    "EXPECTED_TIMEZONE": "America/Los_Angeles",
+    "TZ_SOURCE": "line 19: 'March 28, 2026 from 09:00 to 10:30'",
+    "preferred_helper": "get_zone_components"
+  },
+  "gcal-canvas-office-hours": {
+    "explicit": "America/New_York",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 9: 'Use the timezone America/New_York'",
+    "preferred_helper": "get_zone_components"
+  },
+  "gcal-snowflake-deadline-tracker": {
+    "implicit": "未显式时区; 企业 SLA",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "无显式 (date% 等)", 
+    "preferred_helper": "get_zone_components"
+  },
+  "howtocook-meal-plan-calendar": {
+    "explicit": "America/New_York",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 5: '12:00 to 13:00 in the America/New_York timezone'",
+    "preferred_helper": "get_zone_components"
+  },
+  "howtocook-meal-plan-gcal": {
+    "explicit": "America/New_York",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 7: 'Set the timezone to America/New_York'",
+    "preferred_helper": "get_zone_components"
+  },
+  "howtocook-weekly-plan-gsheet-gcal": {
+    "implicit": "未显式时区; howtocook",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 7: 'from 6pm to 7pm' 'from 7am to 7:30am' (无 zone)",
+    "preferred_helper": "get_zone_components",
+    "NOTE": "推 ET (跟 howtocook-meal-plan-calendar 一致)"
+  },
+  "notion-gform-gcal-onboarding": {
+    "implicit": "未显式时区; 公司 onboarding",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 5: '9:00 AM to 12:00 PM' '12:00 PM to 1:00 PM'",
+    "preferred_helper": "get_zone_components"
+  },
+  "playwright-wc-competitor-pricing-excel-gcal": {
+    "implicit": "未显式时区",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "未显式 (待改 task.md 加注)",
+    "preferred_helper": "get_zone_components"
+  },
+  "sf-customer-health-dashboard": {
+    "implicit": "sf 公司",
+    "EXPECTED_TIMEZONE": "America/Los_Angeles",
+    "TZ_SOURCE": "无明确 gcal 时间 (Date mostly), 但跨日仍影响",
+    "preferred_helper": "get_zone_components"
+  },
+  "sf-deal-pipeline-review": {
+    "explicit": "UTC",
+    "EXPECTED_TIMEZONE": "UTC",
+    "TZ_SOURCE": "line 7: '9 AM UTC on consecutive business days'",
+    "preferred_helper": "get_utc_components"
+  },
+  "sf-hr-salary-review-gcal": {
+    "explicit": "America/New_York",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 7: '10:00 AM to 11:00 AM in the America/New_York timezone'",
+    "preferred_helper": "get_zone_components"
+  },
+  "sf-sales-region-forecast-gcal-excel": {
+    "explicit": "UTC (no tz parameter)",
+    "EXPECTED_TIMEZONE": "UTC",
+    "TZ_SOURCE": "line 11: 'the calendar stores times in UTC, so pass the start and end times without a time zone parameter'",
+    "preferred_helper": "get_utc_components"
+  },
+  "sf-support-sla-coaching-word-gcal": {
+    "implicit": "未显式; 企业 support",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 5: '10:00 AM to 11:00 AM'",
+    "preferred_helper": "get_zone_components"
+  },
+  "terminal-canvas-gsheet-word-notion-gcal": {
+    "implicit": "未显式; 大学校园 ( advising_analyzer.py)",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 9: '9 AM, 11 AM, and 2 PM'",
+    "preferred_helper": "get_zone_components"
+  },
+  "terminal-canvas-notion-study-gcal-excel": {
+    "implicit": "未显式; 大学学业辅导",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "无 cons 显式",
+    "preferred_helper": "get_zone_components"
+  },
+  "terminal-fetch-sf-hr-gcal-excel-email": {
+    "implicit": "sf 公司 + 但 可能 ET",
+    "EXPECTED_TIMEZONE": "America/Los_Angeles",
+    "TZ_SOURCE": "line 11: 'two per day starting at 10 AM and 2 PM'",
+    "preferred_helper": "get_zone_components",
+    "NOTE": "sf 系列优先 PT"
+  },
+  "terminal-howtocook-pdf-excel-word-gcal": {
+    "implicit": "未显式; howtocook + 5-day festival",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "无 gcal 明文 时间",
+    "preferred_helper": "get_zone_components",
+    "NOTE": "和 howtocook-meal-plan-calendar 一致 ET"
+  },
+  "terminal-sf-hr-excel-word-gcal-email": {
+    "implicit": "sf 公司",
+    "EXPECTED_TIMEZONE": "America/Los_Angeles",
+    "TZ_SOURCE": "line 7: 无明确 gcal 时间",
+    "preferred_helper": "get_zone_components"
+  },
+  "terminal-sf-wc-support-email-gcal-excel": {
+    "implicit": "sf 公司 mixed west coast",
+    "EXPECTED_TIMEZONE": "America/Los_Angeles",
+    "TZ_SOURCE": "无明确 gcal time",
+    "preferred_helper": "get_zone_components"
+  },
+  "terminal-wc-excel-gsheet-gcal-email": {
+    "implicit": "未显式电商",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "无明确 gcal time",
+    "preferred_helper": "get_zone_components"
+  },
+  "terminal-wc-pw-pricing-excel-word-gcal": {
+    "implicit": "未显式电商",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 13: 'each lasting one hour starting at 2:00 PM'",
+    "preferred_helper": "get_zone_components"
+  },
+  "terminal-yf-canvas-excel-gcal-email": {
+    "implicit": "yf + canvas mixed",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 7: 'three workshops, each 90 minutes long, at 2:00 PM'",
+    "preferred_helper": "get_zone_components"
+  },
+  "terminal-yf-sf-gsheet-word-gcal": {
+    "implicit": "yf + sf mixed",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 9: 该 task.md 按 sf 企业点赞以 ET 为文化默认",
+    "preferred_helper": "get_zone_components",
+    "NOTE": "yf 金融 default ET"
+  },
+  "train-howtocook-gcal-word": {
+    "explicit": "Asian (Beijing/Qufu)",
+    "EXPECTED_TIMEZONE": "Asia/Shanghai",
+    "TZ_SOURCE": "line 1: 'Qufu, the birthplace of Confucius'; line 9 train times from Beijing/Qufu railway",
+    "preferred_helper": "get_zone_components"
+  },
+  "wc-coupon-campaign-gcal-gform": {
+    "implicit": "未显式电商",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 9: '9:00 to 18:00'",
+    "preferred_helper": "get_zone_components"
+  },
+  "wc-fetch-supply-chain-excel-word-gcal": {
+    "explicit": "UTC",
+    "EXPECTED_TIMEZONE": "UTC",
+    "TZ_SOURCE": "line 11: '9:00 AM to 10:30 AM UTC'",
+    "preferred_helper": "get_utc_components"
+  },
+  "wc-inventory-alert-gcal": {
+    "explicit": "America/New_York",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 3: '9:00 AM to 10:00 AM in the America/New_York timezone'",
+    "preferred_helper": "get_zone_components"
+  },
+  "wc-product-bundle-excel-ppt-gcal": {
+    "implicit": "未显式电商",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 11: 'starting at 10:00 AM'",
+    "preferred_helper": "get_zone_components"
+  },
+  "yf-portfolio-allocation-excel-gcal": {
+    "implicit": "yf 金融",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 7 etc 涉及 gcal 校验 但 task.md 看看",
+    "preferred_helper": "get_zone_components"
+  },
+  "yf-portfolio-ppt-gcal": {
+    "implicit": "yf 金融",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "无明确显式",
+    "preferred_helper": "get_zone_components"
+  },
+  "yf-stock-comparison-word-gcal": {
+    "implicit": "yf 金融 default ET",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 7: 'April 10, 2026 from 14:00 to 15:30'",
+    "preferred_helper": "get_zone_components",
+    "NOTE": "14:00 默认 ET NY 市场时段"
+  },
+  "yt-fireship-canvas-quiz-excel-gcal": {
+    "implicit": "大学教学",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 7 等",
+    "preferred_helper": "get_zone_components"
+  },
+  "yt-fireship-ppt-gcal-email": {
+    "explicit": "未显式 但 task.md 给了 有 09:00 clocks",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 7: '2025-01-07 from 09:00 to 09:30'",
+    "preferred_helper": "get_zone_components"
+  },
+  "yt-fireship-tech-report-excel-notion": {
+    "explicit": "UTC",
+    "EXPECTED_TIMEZONE": "UTC",
+    "TZ_SOURCE": "line 11: 'Monday March 9 2026 from 14:00 to 15:00. Use the UTC timezone'",
+    "preferred_helper": "get_utc_components"
+  },
+  "yt-train-conference-planning-notion-gcal-excel": {
+    "implicit": "中国山东曲阜 北京/上海",
+    "EXPECTED_TIMEZONE": "Asia/Shanghai",
+    "TZ_SOURCE": "line 5: 'Beijing' 'Shanghai to Qufu'",
+    "preferred_helper": "get_zone_components"
+  },
+  "yt-transcript-notion-song-report-gcal-email": {
+    "implicit": "未显式; music blog",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 9: '10:00 to 11:00'",
+    "preferred_helper": "get_zone_components"
+  },
+  "yt-veritasium-arxiv-survey-word-gcal-email": {
+    "implicit": "未显式; scientific",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 11: '14:00 to 16:00' '10:00 to 11:00'",
+    "preferred_helper": "get_zone_components"
+  },
+  "yt-veritasium-science-quiz-word-gcal": {
+    "implicit": "未显式;周六学习组",
+    "EXPECTED_TIMEZONE": "America/New_York",
+    "TZ_SOURCE": "line 11: 'Saturdays at 10:00 to 12:00'",
+    "preferred_helper": "get_zone_components"
+  }
+}

@@ -15,3 +15,5 @@ The third sheet Quality_Action_Plan should have columns Issue, Severity (High, M
 Send two emails. First, send an email to quality-team@company.com with subject "Product Quality Analysis Report Ready" summarizing the key findings including total ticket count, highest volume priority level, and defect rate. Second, send an email to operations@company.com with subject "Quality Review Meeting Required" describing the top issues that need immediate attention.
 
 Schedule two events on the shared calendar. First, a "Quality Review Meeting" on March 19, 2026 from 10:00 to 11:30 with description mentioning the key findings. Second, a "Quality Improvement Planning" session on March 21, 2026 from 14:00 to 16:00 with description listing the action items from the Quality_Action_Plan.
+Note: Use the America/Los_Angeles timezone for all calendar events in this task.
+

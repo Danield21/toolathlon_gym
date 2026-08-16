@@ -19,7 +19,7 @@ import openpyxl
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -236,22 +236,36 @@ def check_excel(agent_workspace):
 
 
 def _extract_notion_title(properties):
-    """Extract plain-text title from Notion page properties dict."""
+    """Extract plain-text title from Notion page properties dict.
+
+    Bug C variant (c4 case-study 2026-08-15): agent-generated properties often
+    omit the "type":"title" discriminator (only seed data carries it), so the
+    old ptype=="title" gate returned "" for valid pages. Accept a property as
+    the title when it either declares type=="title" OR carries a "title" array
+    (the shape agents send); recurse into nested rich_text lists for safety.
+    """
     if not isinstance(properties, dict):
         return ""
-    for pname, pval in properties.items():
-        if not isinstance(pval, dict):
-            continue
-        ptype = pval.get("type")
-        if ptype == "title":
-            parts = []
-            for item in pval.get("title", []) or []:
+
+    def _rt_text(value):
+        parts = []
+        if isinstance(value, list):
+            for item in value:
                 if isinstance(item, dict):
                     t = item.get("plain_text") or (item.get("text") or {}).get("content") or ""
                     parts.append(t)
                 elif isinstance(item, str):
                     parts.append(item)
-            return "".join(parts).strip()
+        return "".join(parts)
+
+    for pname, pval in properties.items():
+        if not isinstance(pval, dict):
+            continue
+        ptype = pval.get("type")
+        if ptype == "title" or (ptype is None and "title" in pval):
+            text = _rt_text(pval.get("title") or [])
+            if text.strip():
+                return text.strip()
     return ""
 
 
@@ -291,13 +305,28 @@ def check_notion():
             return
 
         page_id = pages[0][0]
-        # Pull page content (blocks)
-        cur.execute("""
-            SELECT type, content FROM notion.blocks
-            WHERE parent_id = %s
-        """, (page_id,))
+        # notion.blocks stores the payload in block_data (JSONB); there
+        # is no `content` column (same bug as yt-fireship-tech-report).
+        cur.execute(
+            "SELECT block_data FROM notion.blocks WHERE parent_id = %s",
+            (page_id,))
         blocks = cur.fetchall()
-        body_text = " ".join(str(b[1]) for b in blocks if b[1]).lower()
+
+        def _block_text(bd):
+            if not isinstance(bd, dict):
+                return ""
+            parts = []
+            for v in bd.values():
+                if isinstance(v, list):
+                    for item in v:
+                        if isinstance(item, dict) and "text" in item:
+                            t = item["text"]
+                            parts.append(t.get("content", "") if isinstance(t, dict) else str(t))
+                        elif isinstance(item, dict) and "plain_text" in item:
+                            parts.append(item.get("plain_text", ""))
+            return " ".join(p for p in parts if p)
+
+        body_text = " ".join(_block_text(b[0]) for b in blocks).lower()
 
         # Compute expected
         total_videos = sum(v[0] for v in EXPECTED_STATS.values())

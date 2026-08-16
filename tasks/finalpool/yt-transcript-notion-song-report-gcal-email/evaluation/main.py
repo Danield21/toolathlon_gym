@@ -16,6 +16,25 @@ from argparse import ArgumentParser
 
 import psycopg2
 import openpyxl
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `sd.date()` / `strftime("%Y-%m-%d")` on rows read from
+# `gcal.events`: psycopg2 returns them in the PG session `TimeZone`
+# (case-study: compute node default was Asia/Shanghai, masking 10 AM ET as
+# 22:00+08 and shifting the event date). Use `utils.evaluation.gcal_helpers`
+# instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 9: "...on March 15, 2026, from 10:00 to 11:00" (music blog
+# AfroBeats Today, Eastern Time). EXPECTED_TIMEZONE anchors wall-clock
+# comparisons to America/New_York.
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
@@ -196,6 +215,21 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
                f"statuses: {stats if ci_stat>=0 else 'no col'}")
 
 
+def _parent_type(parent):
+    """Notion parent type with Bug-C tolerance: prefer the explicit "type"
+    field, else infer from whichever key is present (agents often omit it;
+    the mock server normalizes on write but evaluator stays robust anyway)."""
+    if not isinstance(parent, dict):
+        return ""
+    t = parent.get("type")
+    if isinstance(t, str) and t:
+        return t
+    for key in ("database_id", "page_id", "block_id", "workspace"):
+        if parent.get(key) is not None:
+            return key
+    return ""
+
+
 def check_notion():
     print("\n=== Check 2: Notion Pages and Database ===")
     try:
@@ -215,11 +249,13 @@ def check_notion():
     found_page = False
     for page_id, parent, props in pages:
         try:
-            parent_type = parent.get("type", "") if isinstance(parent, dict) else ""
+            parent_type = _parent_type(parent)
             if parent_type in ("workspace", "page_id"):
                 title_items = []
                 for key, val in props.items():
-                    if isinstance(val, dict) and val.get("type") == "title":
+                    if isinstance(val, dict) and (
+                        val.get("type") == "title" or "title" in val
+                    ):
                         title_items = val.get("title", [])
                         break
                 title_text = " ".join(
@@ -235,7 +271,10 @@ def check_notion():
     record("Notion analysis page with required tokens", found_page,
            f"Total pages: {len(pages)}")
 
-    db_entries = [p for p in pages if isinstance(p[1], dict) and p[1].get("type") == "database_id"]
+    # Bug C variant (c4 2026-08-15): agent pages may carry {"database_id": X}
+    # without the "type" discriminator; the mock server now normalizes parent
+    # on write, but stay robust to pre-existing rows by key presence too.
+    db_entries = [p for p in pages if _parent_type(p[1]) == "database_id"]
     record("Notion song database has >= 10 entries", len(db_entries) >= 10,
            f"Found {len(db_entries)} database-parented pages")
 
@@ -247,7 +286,7 @@ def check_gcal():
         cur = conn.cursor()
         cur.execute("""
             SELECT summary, start_datetime FROM gcal.events
-            WHERE start_datetime >= '2026-03-01' AND start_datetime < '2026-04-01'
+            WHERE start_datetime >= TIMESTAMPTZ '2026-03-01T00:00:00Z' AND start_datetime < TIMESTAMPTZ '2026-04-01T00:00:00Z'
             ORDER BY start_datetime
         """)
         events = cur.fetchall()
@@ -263,10 +302,13 @@ def check_gcal():
 
     def event_on_date(target_date_str, kw_required, expected_title):
         for summary, start_dt in events:
-            try:
-                ds = start_dt.strftime("%Y-%m-%d") if hasattr(start_dt, "strftime") else str(start_dt)[:10]
-            except Exception:
-                ds = ""
+            # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant). The
+            # event date must be extracted in EXPECTED_TIMEZONE
+            # (America/New_York per task.md) — bare start_dt.strftime
+            # ("%Y-%m-%d") silently follows the PG session tz and can shift
+            # the event to the wrong day (case-study 2026-08-13).
+            ev_date, _, _ = get_zone_components(start_dt, EXPECTED_TIMEZONE)
+            ds = ev_date.isoformat() if ev_date is not None else ""
             if ds == target_date_str:
                 s_lower = (summary or "").strip().lower()
                 # Accept exact title match

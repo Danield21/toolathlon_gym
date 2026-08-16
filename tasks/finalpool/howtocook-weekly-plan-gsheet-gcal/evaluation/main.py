@@ -8,10 +8,27 @@ import sys
 
 import psycopg2
 import openpyxl
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `r[1].date()` on rows read from `gcal.events`: psycopg2
+# returns them in the PG session `TimeZone` (case-study: compute node
+# default was Asia/Shanghai), so `.date()` can shift a day. Use
+# `utils.evaluation.gcal_helpers` instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md: weekly meal plan with "6pm to 7pm" / "7am to 7:30am" wall-clock
+# times. The howtocook series defaults to America/New_York (ET).
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -200,13 +217,21 @@ def check_gcal():
         record("GCal has weekly meal prep planning event", len(prep_events) > 0,
                f"Found: {prep_events}")
 
-        # Precise date check: Meal Prep event must be on 2026-03-08
+        # Precise date check: Meal Prep event must be on 2026-03-08 (ET).
+        # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant); extract
+        # the wall-clock date in EXPECTED_TIMEZONE via get_zone_components
+        # (session-tz-independent).
         prep_date = dt.date(2026, 3, 8)
-        prep_on_date = [r for r in prep_events_raw
-                        if r[1] is not None and r[1].date() == prep_date]
+        prep_on_date = []
+        for r in prep_events_raw:
+            if r[1] is None:
+                continue
+            ev_date, _, _ = get_zone_components(r[1], EXPECTED_TIMEZONE)
+            if ev_date == prep_date:
+                prep_on_date.append(r)
         record("GCal meal prep event on 2026-03-08",
                len(prep_on_date) >= 1,
-               f"No meal prep event on {prep_date}, got {[(r[0], r[1].date() if r[1] else None) for r in prep_events_raw]}")
+               f"No meal prep event on {prep_date}, got {[(r[0], (get_zone_components(r[1], EXPECTED_TIMEZONE)[0]) if r[1] else None) for r in prep_events_raw]}")
 
         # Check daily reminder events (7 for March 9-15)
         cur.execute("""
@@ -218,9 +243,15 @@ def check_gcal():
         record("GCal has at least 7 daily meal reminder events", len(daily_events) >= 7,
                f"Found {len(daily_events)} daily reminder events")
 
-        # Precise date check: daily reminders must cover 2026-03-09..2026-03-15
+        # Precise date check: daily reminders must cover 2026-03-09..2026-03-15 (ET).
         expected_daily_dates = {dt.date(2026, 3, d) for d in range(9, 16)}
-        daily_dates = {r[1].date() for r in daily_events_raw if r[1] is not None}
+        daily_dates = set()
+        for r in daily_events_raw:
+            if r[1] is None:
+                continue
+            ev_date, _, _ = get_zone_components(r[1], EXPECTED_TIMEZONE)
+            if ev_date is not None:
+                daily_dates.add(ev_date)
         missing = expected_daily_dates - daily_dates
         record("GCal daily reminders cover 2026-03-09..2026-03-15",
                not missing,

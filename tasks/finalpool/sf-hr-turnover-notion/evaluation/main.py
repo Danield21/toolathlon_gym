@@ -12,6 +12,48 @@ def _normalize_title(s):
     return " ".join(re.sub(r"[^a-z0-9]+", " ", str(s).lower()).split())
 
 
+def _collect_title_text(props):
+    """Recursively collect title text from a Notion page/database properties
+    blob (audit §B.1.5).
+
+    The mock Notion server does not always write the ``type == "title"`` marker
+    on title properties, so requiring it makes the evaluator fail to find any
+    page title. Instead, recursively walk the structure and concatenate every
+    ``plain_text`` / ``text.content`` fragment we encounter — this matches how
+    ``_page_title()`` is computed elsewhere and is tolerant of both real
+    Notion payloads and the mock's looser shape.
+    """
+    chunks = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            # Prefer the canonical title array if explicitly marked.
+            if node.get("type") == "title":
+                for item in node.get("title", []) or []:
+                    if isinstance(item, dict):
+                        chunks.append(item.get("plain_text") or "")
+                        t = item.get("text")
+                        if isinstance(t, dict):
+                            chunks.append(t.get("content") or "")
+                    elif isinstance(item, str):
+                        chunks.append(item)
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                if isinstance(item, dict):
+                    # Title fragment forms found in arrays.
+                    chunks.append(item.get("plain_text") or "")
+                    t = item.get("text")
+                    if isinstance(t, dict):
+                        chunks.append(t.get("content") or "")
+                elif isinstance(item, str):
+                    chunks.append(item)
+
+    walk(props)
+    return "".join(chunks)
+
+
 def _levenshtein(a, b):
     """Small-scale DP edit distance between two strings."""
     if a == b:
@@ -41,7 +83,7 @@ def titles_match(expected, actual):
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -122,17 +164,8 @@ def main():
     target_phrase = "hr department workforce analysis"
     for page in pages:
         props = page[1] if isinstance(page[1], dict) else json.loads(page[1]) if page[1] else {}
-        title_text = ""
-        # Look at any title-typed property (not only one keyed 'title')
-        if isinstance(props, dict):
-            for k, v in props.items():
-                if isinstance(v, dict) and v.get("type") == "title":
-                    for item in v.get("title", []):
-                        if isinstance(item, dict):
-                            if "plain_text" in item:
-                                title_text += item.get("plain_text", "")
-                            elif isinstance(item.get("text"), dict):
-                                title_text += item["text"].get("content", "")
+        # Robust title collection (audit §B.1.5): mock may omit type markers.
+        title_text = _collect_title_text(props)
         # Exact title match (task.md prescribes the exact page title)
         if titles_match(target_phrase, title_text):
             found_page = True

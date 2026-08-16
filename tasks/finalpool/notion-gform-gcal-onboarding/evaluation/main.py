@@ -22,9 +22,20 @@ import sys
 import psycopg2
 from pptx import Presentation
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ; bare start_dt.hour / .strftime
+# silently compares wrong in non-UTC PG sessions. Use gcal_helpers.
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 5: "9:00 AM to 12:00 PM" / "12:00 PM to 1:00 PM" (corporate
+# onboarding, ET business default)
+EXPECTED_TIMEZONE = "America/New_York"
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -167,14 +178,16 @@ def check_gcal():
            f"Events: {[e[0] for e in events]}")
     if orientation is not None:
         summary, desc, start_dt, end_dt, attendees = orientation
-        # Date
-        start_date_str = start_dt.strftime("%Y-%m-%d") if start_dt else ""
+        # gcal.events.start_datetime is TIMESTAMPTZ; use session-tz-independent
+        # helper to extract ET date/hour.
+        ev_date, ev_sh, _ = get_zone_components(start_dt, EXPECTED_TIMEZONE)
+        _ev_ed_date, ev_eh, _ = get_zone_components(end_dt, EXPECTED_TIMEZONE)
+        start_date_str = ev_date.strftime("%Y-%m-%d") if ev_date else ""
         record("Orientation on 2026-03-16", start_date_str == "2026-03-16",
                f"Start date: {start_date_str}")
-        # Time
-        if start_dt and end_dt:
+        if start_dt and end_dt and ev_sh is not None and ev_eh is not None:
             record("Orientation 9 AM - 12 PM",
-                   start_dt.hour == 9 and end_dt.hour == 12,
+                   ev_sh == 9 and ev_eh == 12,
                    f"start={start_dt}, end={end_dt}")
         # Attendees include 3 emails
         attendees_str = json.dumps(attendees).lower() if attendees is not None else ""
@@ -194,12 +207,15 @@ def check_gcal():
            f"Events: {[e[0] for e in events]}")
     if lunch is not None:
         summary, desc, start_dt, end_dt, attendees = lunch
-        start_date_str = start_dt.strftime("%Y-%m-%d") if start_dt else ""
+        # gcal.events.start_datetime is TIMESTAMPTZ; use helper for ET date.
+        ev_date, ev_sh, _ = get_zone_components(start_dt, EXPECTED_TIMEZONE)
+        _ed, ev_eh, _ = get_zone_components(end_dt, EXPECTED_TIMEZONE)
+        start_date_str = ev_date.strftime("%Y-%m-%d") if ev_date else ""
         record("Team Lunch on 2026-03-16", start_date_str == "2026-03-16",
                f"Start date: {start_date_str}")
-        if start_dt and end_dt:
+        if start_dt and end_dt and ev_sh is not None and ev_eh is not None:
             record("Team Lunch 12 PM - 1 PM",
-                   start_dt.hour == 12 and end_dt.hour == 13,
+                   ev_sh == 12 and ev_eh == 13,
                    f"start={start_dt}, end={end_dt}")
 
 

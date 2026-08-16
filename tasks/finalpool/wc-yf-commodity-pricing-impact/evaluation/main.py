@@ -127,8 +127,16 @@ def check_excel(agent_workspace, gt_workspace):
                 except (ValueError, TypeError):
                     pass
                 # Estimated_Material_Cost_Pct (col 3) tol 0.02
+                # Normalize: GT stores as decimal (0.13), agent may write as
+                # percentage (13).  Convert both to decimal before comparing.
                 try:
-                    if a[3] is None or abs(float(a[3]) - float(g[3])) > 0.02:
+                    a_pct = float(a[3]) if a[3] is not None else None
+                    g_pct = float(g[3]) if g[3] is not None else None
+                    if a_pct is not None and a_pct > 1:
+                        a_pct = a_pct / 100.0
+                    if g_pct is not None and g_pct > 1:
+                        g_pct = g_pct / 100.0
+                    if a_pct is None or g_pct is None or abs(a_pct - g_pct) > 0.02:
                         errors.append(f"Category Analysis {gkey} Material_Cost_Pct={a[3]}, expected ~{g[3]}")
                 except (ValueError, TypeError):
                     pass
@@ -150,7 +158,8 @@ def check_excel(agent_workspace, gt_workspace):
                     g_val = str(g[6]).strip().lower()
                     # Accept synonyms
                     synonyms = {
-                        "meets": ["meets", "above", "above target", "exceeds"],
+                        "meets": ["meets", "meets target", "above", "above target", "exceeds", "on target"],
+                        "meets target": ["meets", "meets target", "above", "above target", "exceeds", "on target"],
                         "at risk": ["at risk", "below", "falls short", "shortfall", "below target"],
                     }
                     accepted = synonyms.get(g_val, [g_val])

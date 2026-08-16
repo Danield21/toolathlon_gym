@@ -5,7 +5,7 @@ import sys
 import openpyxl
 import psycopg2
 
-DB = {"host": os.environ.get("PGHOST", "localhost"), "port": 5432, "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
+DB = {"host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")), "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
 
 EXPECTED_COURSES = {
     "Applied Analytics & Algorithms (Fall 2013)": {"code": "AAA-2013J", "students": 383, "avg_score": 68.7, "assignments": 6, "quizzes": 0},

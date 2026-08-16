@@ -8,7 +8,7 @@ Create a Word document named Science_Communication_Survey.docx in your workspace
 
 The total document should have substantial content across all sections, with academic language appropriate for a research survey.
 
-Check the shared calendar for any existing events in April 2026. Create a calendar event titled "Science Communication Seminar" on April 10, 2026, from 14:00 to 16:00, noting that this is when the survey findings will be presented to the team. Also create a preparatory event titled "Survey Review Session" on April 3, 2026, from 10:00 to 11:00, one week before the seminar, for the team to review the draft document together.
+Check the shared calendar for any existing events in April 2026. Create a calendar event titled "Science Communication Seminar" on April 10, 2026, from 14:00 to 16:00, noting that this is when the survey findings will be presented to the team. Also create a preparatory event titled "Survey Review Session" on April 3, 2026, from 10:00 to 11:00, one week before the seminar, for the team to review the draft document together. Use the America/New_York timezone for all calendar events in this task.
 
 Send an email to seminar@science.edu with subject "Science Communication Survey - Ready for Review" and a body summarizing the survey completion, the five topics covered, the seminar date, and asking them to review the attached document. Send a second email to collab@research.org with subject "Collaboration Invitation - Veritasium Science Survey" inviting the recipient to co-present at the seminar and contribute additional paper recommendations.
 

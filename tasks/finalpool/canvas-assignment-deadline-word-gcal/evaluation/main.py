@@ -14,10 +14,33 @@ import os
 import sys
 
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `sd.hour` / `sd.date()` on rows read from `gcal.events`:
+# psycopg2 returns them in the PG session `TimeZone` (case-study: compute
+# node default was Asia/Shanghai, masking 8 AM ET as 20:00+08). Use
+# `utils.evaluation.gcal_helpers` instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md: "schedule a calendar reminder event that starts 7 days before
+# the due date at 8:00 AM Eastern Time (ET) ... Use the America/New_York
+# timezone"
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+EXPECTED_REMINDER_HOUR = 8   # 8 AM ET (DST-aware via ZoneInfo)
+EXPECTED_REMINDER_MINUTE = 0
+EXPECTED_REMINDER_DURATION_MIN = 30  # "lasts 30 minutes"
+
+# Evaluator runs as `python -m tasks.finalpool.<task>.evaluation.main` with
+# cwd = /workspace (toolathlon_gym root), so `utils/` is importable directly.
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -424,20 +447,19 @@ def check_gcal():
     for summary, start_dt, end_dt in assignment_events:
         if start_dt is None:
             continue
-        # start_dt is a datetime (or string)
-        try:
-            if isinstance(start_dt, str):
-                sd = datetime.fromisoformat(start_dt.replace("Z", "+00:00"))
-            else:
-                sd = start_dt
-            event_date = sd.date() if hasattr(sd, "date") else None
-            event_hour = sd.hour if hasattr(sd, "hour") else None
-        except Exception:
+        # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant). Use the
+        # session-tz-independent helper to extract components in EXPECTED_TIMEZONE
+        # (America/New_York per task.md). Bare sd.hour / sd.date() silently
+        # compares against the PG session tz (case-study 2026-08-13).
+        ev_date, ev_hour, ev_minute = get_zone_components(start_dt, EXPECTED_TIMEZONE)
+        if ev_date is None:
             continue
-        if event_date in expected_reminder_dates and event_hour in {12, 13}:
+        if ev_date in expected_reminder_dates \
+           and ev_hour == EXPECTED_REMINDER_HOUR \
+           and ev_minute == EXPECTED_REMINDER_MINUTE:
             valid_reminder_events += 1
     record(
-        "At least 1 reminder event scheduled 7 days before a due date at 8am ET (12:00/13:00 UTC)",
+        "At least 1 reminder event scheduled 7 days before a due date at 8am ET",
         valid_reminder_events >= 1,
         f"Found {valid_reminder_events} matching reminder events",
     )

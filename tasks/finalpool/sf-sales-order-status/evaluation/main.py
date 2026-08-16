@@ -33,7 +33,7 @@ def _db_order_status():
     """Compute expected order-status aggregates from live DB. Returns dict, or None if DB unavailable."""
     try:
         import psycopg2
-        conn = psycopg2.connect(host='localhost', port=5432,
+        conn = psycopg2.connect(host='localhost', port=int(os.environ.get("PGPORT", "5432")),
                                 dbname='toolathlon_gym', user='eigent', password='camel')
         cur = conn.cursor()
         cur.execute('''

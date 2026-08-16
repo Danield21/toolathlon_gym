@@ -160,7 +160,7 @@ def main():
     print("  Checking email...")
     try:
         import psycopg2
-        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
+        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
         cur.execute("SELECT m.subject, m.from_addr, m.to_addr, m.body_text FROM email.messages m")

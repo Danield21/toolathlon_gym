@@ -17,7 +17,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -78,14 +78,21 @@ def product_name_match(agent_name, exp_name):
 def get_expected_top20():
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
+    # Aggregate by product BASE name, matching task.md ("Aggregate revenue and
+    # units by the product base name ... several distinct product IDs may share
+    # the same base product name ... do not aggregate by PRODUCT_ID"). The old
+    # GROUP BY full PRODUCT_NAME split base products into multiple rows and
+    # produced a GT ordering no compliant agent could match (c4 case-study
+    # 2026-08-15). No status filter: task.md grades on all orders.
     cur.execute('''
-        SELECT p."PRODUCT_NAME", p."CATEGORY",
+        SELECT REGEXP_REPLACE(p."PRODUCT_NAME", ' with No Cost EMI.*$', '') AS base_name,
+               p."CATEGORY",
                SUM(o."TOTAL_AMOUNT")::float as revenue,
                SUM(o."QUANTITY")::int as units,
                COUNT(o."ORDER_ID")::int as order_count
         FROM sf_data."SALES_DW__PUBLIC__ORDERS" o
         JOIN sf_data."SALES_DW__PUBLIC__PRODUCTS" p ON o."PRODUCT_ID" = p."PRODUCT_ID"
-        GROUP BY p."PRODUCT_NAME", p."CATEGORY"
+        GROUP BY REGEXP_REPLACE(p."PRODUCT_NAME", ' with No Cost EMI.*$', ''), p."CATEGORY"
         ORDER BY revenue DESC
         LIMIT 20
     ''')

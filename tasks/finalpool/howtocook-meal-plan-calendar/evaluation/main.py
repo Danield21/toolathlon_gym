@@ -22,9 +22,21 @@ import sys
 
 import psycopg2
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ (UTC instant). psycopg2 returns
+# it in the PG session TimeZone (compute node Asia/Shanghai → 12:00 ET shows
+# as 00:00+08 next day, masking noon events). Use gcal_helpers; never bare
+# start_dt.hour / .date() / strftime("%H").
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 5: "12:00 to 13:00 in the America/New_York timezone"
+EXPECTED_TIMEZONE = "America/New_York"
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -232,13 +244,18 @@ def check_gcal(expected_menu=None):
 
     for summary, description, start_dt, end_dt in events:
         if start_dt:
-            day = start_dt.strftime("%Y-%m-%d")
-            days_covered.add(day)
+            # gcal.events.start_datetime is TIMESTAMPTZ; use session-tz-
+            # independent helper to extract date/hour in EXPECTED_TIMEZONE.
+            ev_date, ev_hour, ev_minute = get_zone_components(
+                start_dt, EXPECTED_TIMEZONE
+            )
+            if ev_date is not None:
+                day = ev_date.strftime("%Y-%m-%d")
+                days_covered.add(day)
 
-            # Check start time is around noon (between 11:00 and 13:00)
-            hour = start_dt.hour
-            if 11 <= hour <= 13:
-                noon_events += 1
+                # Check start time is around noon (between 11:00 and 13:00)
+                if 11 <= ev_hour <= 13:
+                    noon_events += 1
 
         if description and len(description.strip()) > 5:
             events_with_description += 1

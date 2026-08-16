@@ -4,13 +4,33 @@ import json
 import os
 import sys
 from datetime import date
+from zoneinfo import ZoneInfo
 
 import openpyxl
 import psycopg2
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `sd.hour` / `sd.date()` on rows read from `gcal.events`:
+# psycopg2 returns them in the PG session `TimeZone` (case-study: compute
+# node default was Asia/Shanghai). Use `utils.evaluation.gcal_helpers`
+# instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 5: university Canvas courses (Global Governance / Geopolitics
+# Fall 2013/2014). task.md line 13: study sessions Mon-Fri "starting at 9 AM".
+# University (Canvas) context -> America/New_York (ET).
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+
+# Evaluator runs as `python -m tasks.finalpool.<task>.evaluation.main` with
+# cwd = /workspace (toolathlon_gym root), so `utils/` is importable directly.
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -278,8 +298,15 @@ def check_gcal(expected):
     expected_dates = {date(2026, 3, 9), date(2026, 3, 10), date(2026, 3, 11), date(2026, 3, 12), date(2026, 3, 13)}
     found_dates = set()
     for sm, desc, start, end in events:
-        if start is not None:
-            found_dates.add(start.date() if hasattr(start, "date") else start)
+        if start is None:
+            continue
+        # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant). Use the
+        # session-tz-independent helper to extract the ET date (case-study
+        # 2026-08-13). Bare start.date() silently compares against the PG
+        # session tz.
+        ev_date, _ev_hour, _ev_minute = get_zone_components(start, EXPECTED_TIMEZONE)
+        if ev_date is not None:
+            found_dates.add(ev_date)
     for d in expected_dates:
         check(f"Calendar has event on {d}", d in found_dates, f"got {found_dates}")
 

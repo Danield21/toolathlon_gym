@@ -3,6 +3,7 @@
     "playwright_with_chunk",
     "terminal",
     "arxiv_local",
+    "arxiv-latex",
     "excel",
     "pptx"
   ],

@@ -1,7 +1,27 @@
 """Evaluation for yf-portfolio-allocation-excel-gcal."""
 import os
 import argparse, os, sys
+
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime / end_datetime are TIMESTAMPTZ storing the UTC
+# instant. psycopg2 returns a tz-aware datetime whose display tz follows the
+# PG session TimeZone (case-study: compute node default Asia/Shanghai), so
+# bare sd.hour / sd.date() silently compares against the wrong wall-clock.
+# Use utils.evaluation.gcal_helpers (session-tz-independent, DST-aware).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 9: schedule "Portfolio Rebalancing" on April 30, 2026 from
+# 10:00 to 11:30 (portfolio / financial context → America/New_York / ET).
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+EXPECTED_START_HOUR = 10
+EXPECTED_START_MINUTE = 0
+EXPECTED_END_HOUR = 11
+EXPECTED_END_MINUTE = 30
 
 
 def num_close(a, b, tol=0.5):
@@ -103,18 +123,19 @@ def check_excel(agent_workspace):
 def check_gcal():
     errors = []
     try:
-        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
+        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
         cur.execute("""
             SELECT summary, start_datetime, end_datetime, description FROM gcal.events
-            WHERE start_datetime::date = '2026-04-30'
+            WHERE start_datetime >= '2026-04-29'
+              AND start_datetime <  '2026-05-01'
             ORDER BY start_datetime
         """)
         rows = cur.fetchall()
         cur.close(); conn.close()
         if not rows:
-            errors.append("No GCal event found on 2026-04-30")
+            errors.append("No GCal event found near 2026-04-30")
         else:
             # Find the rebalancing event
             target = None
@@ -131,16 +152,25 @@ def check_gcal():
                         target = r
                         break
             if target is None:
-                errors.append(f"No portfolio rebalancing event on 2026-04-30 (found: {[r[0] for r in rows]})")
+                errors.append(f"No portfolio rebalancing event near 2026-04-30 (found: {[r[0] for r in rows]})")
             else:
-                # Verify start time 10:00 and end time 11:30
+                # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant). The PG
+                # session TimeZone (case-study: Asia/Shanghai) changes the display
+                # wall-clock, so bare start_dt.hour/.minute would miscompare.
                 start_dt, end_dt, desc = target[1], target[2], target[3]
                 if start_dt is not None:
-                    if start_dt.hour != 10 or start_dt.minute != 0:
-                        errors.append(f"GCal event start time={start_dt}, expected 10:00")
+                    sd_date, sd_hour, sd_minute = get_zone_components(start_dt, EXPECTED_TIMEZONE)
+                    if sd_date is None \
+                       or sd_date.isoformat() != "2026-04-30" \
+                       or sd_hour != EXPECTED_START_HOUR \
+                       or sd_minute != EXPECTED_START_MINUTE:
+                        errors.append(f"GCal event start time={start_dt}, expected 2026-04-30 10:00 ET")
                 if end_dt is not None:
-                    if end_dt.hour != 11 or end_dt.minute != 30:
-                        errors.append(f"GCal event end time={end_dt}, expected 11:30")
+                    ed_date, ed_hour, ed_minute = get_zone_components(end_dt, EXPECTED_TIMEZONE)
+                    if ed_date is None \
+                       or ed_hour != EXPECTED_END_HOUR \
+                       or ed_minute != EXPECTED_END_MINUTE:
+                        errors.append(f"GCal event end time={end_dt}, expected 2026-04-30 11:30 ET")
                 # Verify description mentions the 5 stock symbols and the $100,000 total
                 desc_low = (desc or "").lower()
                 missing_syms = [sym for sym in ("googl", "amzn", "jpm", "jnj", "xom") if sym not in desc_low]
@@ -156,7 +186,7 @@ def check_gcal():
 def check_email():
     errors = []
     try:
-        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
+        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
         cur.execute("""

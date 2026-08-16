@@ -16,10 +16,32 @@ import sys
 from argparse import ArgumentParser
 
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime / end_datetime are TIMESTAMPTZ storing the UTC
+# instant. psycopg2 returns a tz-aware datetime whose display tz follows the
+# PG session TimeZone (case-study: compute node default Asia/Shanghai), so
+# bare sd.hour / sd.date() silently compares against the wrong wall-clock.
+# Use utils.evaluation.gcal_helpers (session-tz-independent, DST-aware).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 9: TypeScript Quiz Deadline on March 25, 2026 (closes 23:59)
+# and TypeScript Quiz Review Session on March 26, 2026 from 14:00 to 15:00
+# (university / course context → America/New_York / ET).
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+EXPECTED_DEADLINE_DATE = "2026-03-25"
+EXPECTED_REVIEW_DATE = "2026-03-26"
+EXPECTED_REVIEW_HOUR = 14
+EXPECTED_REVIEW_MINUTE = 0
+EXPECTED_REVIEW_END_HOUR = 15
+EXPECTED_REVIEW_END_MINUTE = 0
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -283,10 +305,17 @@ def check_gcal():
     for s, sd, ed in events:
         sl = (s or "").lower()
         if sd is None: continue
-        if sd.date().isoformat() == "2026-03-25" and "typescript" in sl and "deadline" in sl:
+        # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant); bare
+        # sd.date() / sd.hour / sd.minute follow the PG session TimeZone
+        # (case-study: Asia/Shanghai), so use the session-tz-independent helper
+        # anchored to task.md's ET (university course hours).
+        sd_date, _, _ = get_zone_components(sd, EXPECTED_TIMEZONE)
+        if sd_date is None:
+            continue
+        if sd_date.isoformat() == EXPECTED_DEADLINE_DATE and "typescript" in sl and "deadline" in sl:
             deadline_evt = (s, sd, ed)
         # Review session — must contain TypeScript AND ('review' or 'review session')
-        if sd.date().isoformat() == "2026-03-26" and "typescript" in sl and "review" in sl:
+        if sd_date.isoformat() == EXPECTED_REVIEW_DATE and "typescript" in sl and "review" in sl:
             review_evt = (s, sd, ed)
 
     record("GCal has TypeScript Quiz Deadline event on 2026-03-25",
@@ -297,9 +326,10 @@ def check_gcal():
            f"Found {len(events)} matching events, summaries: {[e[0] for e in events]}")
     if review_evt is not None:
         sd, ed = review_evt[1], review_evt[2]
-        time_ok = (sd.hour == 14 and sd.minute == 0)
-        if ed is not None:
-            time_ok = time_ok and (ed.hour == 15 and ed.minute == 0)
+        _, sd_hour, sd_minute = get_zone_components(sd, EXPECTED_TIMEZONE)
+        _, ed_hour, ed_minute = get_zone_components(ed, EXPECTED_TIMEZONE)
+        time_ok = (sd_hour == EXPECTED_REVIEW_HOUR and sd_minute == EXPECTED_REVIEW_MINUTE
+                   and ed_hour == EXPECTED_REVIEW_END_HOUR and ed_minute == EXPECTED_REVIEW_END_MINUTE)
         record("Review session start=14:00 end=15:00", time_ok,
                f"start={sd}, end={ed}")
 

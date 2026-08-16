@@ -42,6 +42,28 @@ def inject_data(launch_time):
         (inbox_id, '<noise-email_scheduler-001@co.com>', 'Weekly Newsletter', 'newsletter@company.com',
          json.dumps(['all@company.com']), launch_dt - timedelta(hours=6),
          'This week in company news: New coffee machine installed in break room.'))
+    # Internal scheduler efficiency metrics (the "internal" half of the gap
+    # analysis; the external benchmark half comes from the mock API). Without
+    # this email the task has no internal data source and agents fabricate
+    # numbers (case-study 2026-08-16 round-2 audit, §5.5).
+    internal_metrics_body = (
+        "Hi,\n\n"
+        "Below are the Q1 2026 internal Email Scheduler Efficiency Index values "
+        "per department (higher is better):\n\n"
+        "Customer Support: 92\n"
+        "Finance: 105\n"
+        "Human Resources: 88\n"
+        "Marketing: 118\n"
+        "Operations: 74\n"
+        "Sales: 110\n\n"
+        "Please use these internal values for the benchmark comparison analysis.\n\n"
+        "Thanks,\nOperations Team"
+    )
+    cur.execute("""INSERT INTO email.messages (folder_id, message_id, subject, from_addr, to_addr, date, body_text, is_read)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, true)""",
+        (inbox_id, '<internal-metrics_scheduler-002@co.com>', 'Q1 Scheduler Internal Metrics', 'ops@company.com',
+         json.dumps(['analyst@company.com']), launch_dt - timedelta(hours=5),
+         internal_metrics_body))
 
     cur.execute("""INSERT INTO gcal.events (summary, start_datetime, end_datetime, description, status)
         VALUES ('Daily Standup', %s, %s, 'Regular standup', 'confirmed')""",

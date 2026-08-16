@@ -15,6 +15,16 @@ import sys
 import openpyxl
 import psycopg2
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ; bare end_dt.hour / start_dt
+# silently compares wrong in non-UTC PG sessions. Use gcal_helpers.
+# ──────────────────────────────────────────────────────────────────────────
+# task.md: SF company board presentation → America/Los_Angeles (PT)
+EXPECTED_TIMEZONE = "America/Los_Angeles"
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 try:
     from pptx import Presentation
 except ImportError:
@@ -22,7 +32,7 @@ except ImportError:
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -323,17 +333,19 @@ def check_calendar():
             record("Board presentation event exists", True)
 
             # Check date is March 28, 2026 (blocking once event exists)
-            dt_str = str(start_dt)
+            # gcal.events.start_datetime is TIMESTAMPTZ; use session-tz-
+            # independent helper to extract PT date/hour.
+            ev_date, ev_hour, ev_minute = get_zone_components(start_dt, EXPECTED_TIMEZONE)
+            date_str = ev_date.strftime("%Y-%m-%d") if ev_date else "None"
             record(
                 "Event on March 28, 2026",
-                "2026-03-28" in dt_str,
-                f"Start: {dt_str}",
+                date_str == "2026-03-28",
+                f"Start date (PT): {date_str}",
             )
 
-            # Check end_datetime is 11:30 per task
+            # Check end_datetime is 11:30 per task (PT)
             if end_dt is not None:
-                end_hour = end_dt.hour
-                end_min = end_dt.minute
+                _ed, end_hour, end_min = get_zone_components(end_dt, EXPECTED_TIMEZONE)
                 record("Event end_datetime is 11:30",
                        end_hour == 11 and end_min == 30,
                        f"End: {end_dt.isoformat()}")

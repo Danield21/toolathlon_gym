@@ -4,6 +4,6 @@ Please look up all assignments for that course and create an Excel file called A
 
 Also create a Word document called Assignment_Schedule_FFF2013J.docx with a heading Assignment Schedule for Foundations of Finance Fall 2013, followed by a table listing each assignment with its name, due date formatted as YYYY-MM-DD, and points possible. If an assignment has no due date write TBD in the due date column.
 
-For each assignment that has a due date, schedule a calendar reminder event that starts 7 days before the due date at 8am and lasts 30 minutes. The event title should be Assignment Due: followed by the assignment name. Use the America/New_York timezone.
+For each assignment that has a due date, schedule a calendar reminder event that starts 7 days before the due date at 8:00 AM Eastern Time (ET) and lasts 30 minutes. The event title should be Assignment Due: followed by the assignment name. Use the America/New_York timezone.
 
 Send an email to fff2013j.students@university.edu with the subject Foundations of Finance Assignment Deadline Reminder. The email body should list all assignments with their due dates and points, and remind students to check their calendars for the scheduled reminders.

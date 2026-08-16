@@ -8,7 +8,7 @@ Query the data warehouse to retrieve the internal salary statistics for each dep
 
 Write and run a Python script called compensation_analysis.py in your workspace. The script should compare each department's average internal salary against the external benchmark median. Calculate the gap as a percentage: (internal_avg minus benchmark_median) divided by benchmark_median times 100. Flag departments where the gap exceeds plus or minus 10 percent as needing review. The script should also identify departments where average job satisfaction is below 6.5, which might indicate compensation-related dissatisfaction.
 
-Schedule salary review meetings on the shared calendar for the week of March 16 to March 20, 2026. Create one meeting for each of the seven departments. Each meeting should be titled with the department name followed by "Salary Review Meeting". Schedule them as 1-hour meetings, two per day starting at 10 AM and 2 PM, with the last department on Friday morning. Include in the event description the department's average salary and its gap percentage compared to the benchmark.
+Schedule salary review meetings on the shared calendar for the week of March 16 to March 20, 2026. Create one meeting for each of the seven departments. Each meeting should be titled with the department name followed by "Salary Review Meeting". Schedule them as 1-hour meetings, two per day starting at 10 AM and 2 PM, with the last department on Friday morning. Use the America/Los_Angeles timezone for all calendar events in this task. Include in the event description the department's average salary and its gap percentage compared to the benchmark.
 
 Create an Excel workbook called Compensation_Benchmark_Report.xlsx in your workspace with three sheets.
 

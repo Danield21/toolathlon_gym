@@ -348,8 +348,9 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         f"workspace: {sorted(workspace_files)[:25]}",
     )
     check(
-        "paper_contents.json exists",
-        "paper_contents.json" in workspace_files,
+        "papers_contents.json exists",
+        ("papers_contents.json" in workspace_files)
+        or ("paper_contents.json" in workspace_files),
         f"workspace: {sorted(workspace_files)[:25]}",
     )
     check(

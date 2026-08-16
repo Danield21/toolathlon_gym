@@ -5,10 +5,28 @@ import os
 import sys
 
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `sd.hour` / `sd.date()` on rows read from `gcal.events`:
+# psycopg2 returns them in the PG session `TimeZone` (case-study: compute
+# node default was Asia/Shanghai). Use `utils.evaluation.gcal_helpers`
+# instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md: "Schedule them at 10:00, 11:00, and 14:00 respectively, each
+# lasting one hour" on 2026-04-01. Canvas default timezone is ET
+# (America/New_York), so the wall-clock hours anchor to America/New_York.
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -175,20 +193,30 @@ def check_calendar():
               len(events) >= 3,
               f"Found {len(events)} events")
 
-        # Filter to events on 2026-04-01
-        on_target_date = [e for e in events if e[2] and '2026-04-01' in str(e[2])]
+        # Filter to events on 2026-04-01 (ET). gcal.events.start_datetime is
+        # TIMESTAMPTZ (UTC instant); extract the wall-clock date in
+        # EXPECTED_TIMEZONE via get_zone_components (session-tz-independent).
+        on_target_date = []
+        for e in events:
+            if e[2] is None:
+                continue
+            ev_date, _, _ = get_zone_components(e[2], EXPECTED_TIMEZONE)
+            if ev_date is not None and str(ev_date) == "2026-04-01":
+                on_target_date.append(e)
         check("Events scheduled on 2026-04-01",
               len(on_target_date) >= 3,
               f"{len(on_target_date)} events on 2026-04-01 out of {len(events)} total")
 
-        # Required slot times (hours): 10, 11, 14
+        # Required slot times (hours, ET): 10, 11, 14
         required_hours = {10, 11, 14}
         observed_hours = set()
         for e in on_target_date:
             try:
-                hour = e[2].hour
-                observed_hours.add(hour)
-            except AttributeError:
+                # session-tz-independent hour in EXPECTED_TIMEZONE (ET).
+                _, ev_hour, _ = get_zone_components(e[2], EXPECTED_TIMEZONE)
+                if ev_hour is not None:
+                    observed_hours.add(ev_hour)
+            except (AttributeError, TypeError):
                 # may be a string; try parse
                 s = str(e[2])
                 if "10:00" in s:

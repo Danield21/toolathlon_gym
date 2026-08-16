@@ -6,9 +6,26 @@ import os
 import psycopg2
 from datetime import datetime
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `start_dt.hour` / `start_dt.strftime('%H:%M')` on rows read
+# from `gcal.events`: psycopg2 returns them in the PG session `TimeZone`
+# (case-study: compute node default was Asia/Shanghai, masking 3 PM ET as
+# 03:00+08 the next day). Use `utils.evaluation.gcal_helpers` instead
+# (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 7: "from 3:00 PM to 5:00 PM in the America/New_York timezone"
+# and "from 10:00 AM to 12:00 PM in the same timezone".
+EXPECTED_TIMEZONE = "America/New_York"
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -71,10 +88,23 @@ def check_gcal():
                 expected["summary_contains"].lower() in summary_lower
                 and expected["summary_contains_2"].lower() in summary_lower
             ):
-                # Check date
+                # Check date/time via session-tz-independent helper. gcal.events
+                # start_datetime is TIMESTAMPTZ; bare strftime would display the
+                # PG session tz (case-study 2026-08-13: 3 PM ET showed as 03:00+08).
                 if start_dt is not None:
-                    start_date_str = start_dt.strftime("%Y-%m-%d")
-                    start_time_str = start_dt.strftime("%H:%M")
+                    ev_date, ev_hour, ev_minute = get_zone_components(
+                        start_dt, EXPECTED_TIMEZONE
+                    )
+                    if ev_date is None:
+                        probs = ["could not parse start_datetime"]
+                        differences.append(
+                            f"{expected['summary_contains']} "
+                            f"{expected['summary_contains_2']}: {'; '.join(probs)}"
+                        )
+                        found = True
+                        break
+                    start_date_str = ev_date.strftime("%Y-%m-%d")
+                    start_time_str = f"{ev_hour:02d}:{ev_minute:02d}"
                     date_ok = start_date_str == expected["start_date"]
                     time_ok = start_time_str == expected["start_time"]
                     # Also check description prefix "Prepare for"

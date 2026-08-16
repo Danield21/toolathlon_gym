@@ -21,3 +21,5 @@ Create a Word document called Review_Policy_Memo.docx in your workspace. The doc
 Schedule the seven department review meetings on the shared calendar for the week of March 9 to March 13, 2026. Since there are seven departments and five weekdays, schedule two meetings on Friday (one at 2 PM and one at 4 PM). Each event should have a summary like "Performance Review - [Department Name]" and last one hour.
 
 Send an email to hr_leadership@company.com with the subject "Annual Performance Review Cycle - Department Summary" containing a brief summary of the overall average rating, the department with the highest average rating, and the total number of employees flagged as underperformers.
+Note: Use the America/Los_Angeles timezone for all calendar events in this task.
+

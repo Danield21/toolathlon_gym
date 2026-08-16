@@ -11,3 +11,5 @@ Create an Excel file called Sales_Forecast_Data.xlsx in the workspace with three
 Then create a PowerPoint presentation called Q2_Sales_Forecast.pptx in the workspace. The presentation should have a title slide with "Q2 2026 Sales Forecast" as the title and today's date. Add a slide summarizing Q1 performance by region with total revenues. Add a slide showing the growth projections from the market research. Add a slide with the Q2 forecast by region. Add a final slide with key takeaways and the region with the highest projected growth.
 
 Finally, schedule a board presentation in the calendar on March 28, 2026 from 10:00 to 11:30 with the title "Board Meeting: Q2 Sales Forecast Presentation". In the description, include the total company-wide Q2 forecast revenue and the top-performing region by projected growth.
+Note: Use the America/Los_Angeles timezone for all calendar events in this task.
+

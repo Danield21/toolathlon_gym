@@ -14,13 +14,23 @@ import sys
 
 import psycopg2
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ; bare e[2].hour / .date() silently
+# compares wrong in non-UTC PG sessions. Use gcal_helpers.
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 7: "10:00 AM to 11:00 AM in the America/New_York timezone"
+EXPECTED_TIMEZONE = "America/New_York"
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
     return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
 
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -261,30 +271,28 @@ def check_gcal(cur):
     event_dates = []
     for e in events:
         if e[2]:
-            try:
-                event_dates.append(e[2].date().isoformat())
-            except AttributeError:
+            # gcal.events.start_datetime is TIMESTAMPTZ; use session-tz-
+            # independent helper to extract ET date.
+            ev_date, _h, _m = get_zone_components(e[2], EXPECTED_TIMEZONE)
+            if ev_date is not None:
+                event_dates.append(ev_date.isoformat())
+            else:
                 event_dates.append(str(e[2])[:10])
     for d in expected_dates:
         if d not in event_dates:
             errors.append(f"GCal: no event on {d}")
 
-    # Each event 10:00-11:00 America/New_York. The DB may store as naive local time
-    # (interpret as ET) or as UTC. Accept hour==10 or the UTC equivalent (14 EDT / 15 EST).
-    # Tighten duration to abs(min-60) <= 1.
+    # Each event 10:00-11:00 America/New_York. Use helper to extract ET hour.
     for e in events:
         if e[2] and e[3]:
-            try:
-                start_hour = e[2].hour
-                if start_hour not in (10, 14, 15):
-                    errors.append(f"GCal: event '{e[1]}' not 10:00 ET (got {start_hour:02d}:00)")
-                if e[2].minute != 0:
-                    errors.append(f"GCal: event '{e[1]}' not on the hour (minute={e[2].minute})")
-                duration_min = (e[3] - e[2]).total_seconds() / 60
-                if abs(duration_min - 60) > 1:
-                    errors.append(f"GCal: event '{e[1]}' duration must be 60 min ±1 (got {duration_min} min)")
-            except AttributeError:
-                pass
+            ev_date, ev_hour, ev_minute = get_zone_components(e[2], EXPECTED_TIMEZONE)
+            if ev_hour is not None and ev_hour != 10:
+                errors.append(f"GCal: event '{e[1]}' not 10:00 ET (got {ev_hour:02d}:{ev_minute:02d})")
+            if ev_minute is not None and ev_minute != 0:
+                errors.append(f"GCal: event '{e[1]}' not on the hour (minute={ev_minute})")
+            duration_min = (e[3] - e[2]).total_seconds() / 60
+            if abs(duration_min - 60) > 1:
+                errors.append(f"GCal: event '{e[1]}' duration must be 60 min ±1 (got {duration_min} min)")
 
     return errors
 

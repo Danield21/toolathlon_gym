@@ -31,7 +31,7 @@ def check(name, condition, detail="", db_side=False):
 def get_conn():
     import psycopg2
     return psycopg2.connect(
-        host=os.environ.get("PGHOST", "localhost"), port=5432,
+        host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")),
         dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
         user="eigent", password="camel",
     )

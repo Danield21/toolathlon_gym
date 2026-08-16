@@ -86,7 +86,7 @@ def check_gcal():
     errors = []
     has_any = False
     try:
-        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
+        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
         cur.execute("""
@@ -139,7 +139,7 @@ def check_gform():
     errors = []
     has_any = False
     try:
-        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
+        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
         cur.execute("""
@@ -181,7 +181,7 @@ def check_email():
     errors = []
     has_any = False
     try:
-        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
+        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
         cur.execute("""

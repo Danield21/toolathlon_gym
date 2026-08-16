@@ -7,9 +7,19 @@ import sys
 
 import psycopg2
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ; bare sdt.hour silently compares
+# wrong in non-UTC PG sessions. Use gcal_helpers.
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 5: "10:00 AM to 11:00 AM" (enterprise support, ET default)
+EXPECTED_TIMEZONE = "America/New_York"
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -208,8 +218,12 @@ def check_gcal():
                    f"Events on date: {[r[0] for r in rows]}")
             if match:
                 _, sdt, edt = match
-                hours_ok = (sdt is not None and edt is not None
-                            and sdt.hour == 10 and edt.hour == 11)
+                # gcal.events.start_datetime is TIMESTAMPTZ; use session-tz-
+                # independent helper to extract ET hour.
+                _sd, s_h, _sm = get_zone_components(sdt, EXPECTED_TIMEZONE)
+                _ed2, e_h, _em = get_zone_components(edt, EXPECTED_TIMEZONE)
+                hours_ok = (s_h is not None and e_h is not None
+                            and s_h == 10 and e_h == 11)
                 record(f"'{q_title}' time 10:00-11:00",
                        hours_ok, f"start={sdt}, end={edt}")
 

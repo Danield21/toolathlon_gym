@@ -5,9 +5,18 @@ import sys
 
 import psycopg2
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ; bare r[1].hour silently compares
+# wrong in non-UTC PG sessions. Use gcal_helpers.
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 11: "the calendar stores times in UTC, so pass the start and
+# end times without a time zone parameter" → UTC target (14:00 UTC)
+from utils.evaluation.gcal_helpers import get_utc_components  # noqa: E402
+
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -144,18 +153,16 @@ def main():
         if not rows:
             all_errors.append("No Quarterly Forecast Review event on 2026-03-31")
         else:
-            # Verify 14:00 - 15:30 window
+            # Verify 14:00 - 15:30 window in UTC (session-tz-independent).
+            # gcal.events.start_datetime is TIMESTAMPTZ; r[1] is psycopg2
+            # datetime in session tz — use helper to extract UTC components.
             time_ok = False
             for r in rows:
-                try:
-                    sh = r[1].hour
-                    eh = r[2].hour
-                    em = r[2].minute
-                    if sh == 14 and eh == 15 and em == 30:
-                        time_ok = True
-                        break
-                except Exception:
-                    pass
+                _sd, sh = get_utc_components(r[1])[:2]
+                _ed2, eh, em = get_utc_components(r[2])
+                if sh == 14 and eh == 15 and em == 30:
+                    time_ok = True
+                    break
             if not time_ok:
                 all_errors.append("Quarterly Forecast Review not at 14:00-15:30")
             else:

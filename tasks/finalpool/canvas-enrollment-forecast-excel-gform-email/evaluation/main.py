@@ -9,7 +9,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -60,8 +60,49 @@ def norm_qtype(t):
 
 
 # Question type families: members of the same family are treated as equivalent.
-TEXT_TYPES = {norm_qtype(t) for t in ("text", "short_answer", "paragraph", "long_answer")}
-CHOICE_TYPES = {norm_qtype(t) for t in ("choice", "multiple_choice", "radio", "dropdown", "checkbox")}
+# norm_qtype lowercases and strips non-alphanumerics, so this accepts both the
+# evaluator's generic names (text/choice/radio/...) and the Google Forms
+# provider's camelCase names (textQuestion/choiceQuestion) case-insensitively.
+TEXT_TYPES = {norm_qtype(t) for t in (
+    "text", "shortanswer", "short_answer", "paragraph", "long_answer",
+    "textquestion", "shortanswerquestion",
+)}
+CHOICE_TYPES = {norm_qtype(t) for t in (
+    "choice", "multiplechoice", "multiple_choice", "radio", "dropdown",
+    "checkbox", "choicequestion",
+)}
+
+
+def _option_label(o):
+    # Extract a string label from one option, supporting both plain strings
+    # and the provider's nested {value: ...} / {label|text: ...} object shape.
+    if isinstance(o, str):
+        return o
+    if isinstance(o, dict):
+        for k in ("value", "label", "text"):
+            v = o.get(k)
+            if v is not None:
+                return str(v)
+    return str(o)
+
+
+def extract_choices(cfg):
+    # Return option labels from a question config, accepting all observed
+    # shapes: {"choices": [...]}, {"options": [...]} (lists of strings), the
+    # provider's {"options": [{"value": ...}, ...]} (choiceQuestion), and the
+    # full {"type": "CHECKBOX"|"RADIO", "options": [{"value": ...}, ...]}.
+    # cfg may be a dict, a JSON string, or None.
+    if not cfg:
+        return []
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except (TypeError, ValueError):
+            return []
+    if isinstance(cfg, dict):
+        raw = cfg.get("choices") or cfg.get("options") or []
+        return [str(_option_label(c)).strip().lower() for c in raw]
+    return []
 
 
 def check_excel(agent_workspace, gt_dir):
@@ -262,19 +303,11 @@ def check_gform():
                 check("Has radio/choice question for schedule", len(choice_qs) >= 2,
                       f"Types: {types}")
 
-                # Build a list of all choices across questions for content checks
-                def _choices(cfg):
-                    if not cfg:
-                        return []
-                    if isinstance(cfg, str):
-                        try:
-                            cfg = json.loads(cfg)
-                        except (TypeError, ValueError):
-                            return []
-                    if isinstance(cfg, dict):
-                        ch = cfg.get("choices") or cfg.get("options") or []
-                        return [str(c).strip().lower() for c in ch]
-                    return []
+                # Build a list of all choices across questions for content checks.
+                # extract_choices is defined at module level so it handles the
+                # provider's nested choiceQuestion.options[].value shape as well
+                # as plain string lists.
+                _choices = extract_choices
 
                 # All 7 base course names should appear as options in some checkbox/MC question
                 base_courses = [

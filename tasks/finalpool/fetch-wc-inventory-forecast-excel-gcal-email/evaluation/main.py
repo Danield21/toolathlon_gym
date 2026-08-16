@@ -19,7 +19,7 @@ TASK_NAME = "fetch-wc-inventory-forecast-excel-gcal-email"
 
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -199,8 +199,22 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
             end_match = False
             desc_with_products = False
             for s, d, sd, ed in events:
-                sd_str = str(sd) if sd else ""
-                ed_str = str(ed) if ed else ""
+                # node-pg/psycopg2 return timezone-aware datetimes rendered
+                # in the SESSION TZ (Asia/Shanghai in the container): a
+                # 09:00Z event prints as "17:00+08:00". Normalize to UTC
+                # before matching wall-clock, else every correct event
+                # fails the time check (case-study 2026-08-16 round-3).
+                def utc_str(x):
+                    if x is None:
+                        return ""
+                    if hasattr(x, "astimezone"):
+                        import datetime as _dt
+                        if x.tzinfo is None:
+                            x = x.replace(tzinfo=_dt.timezone.utc)
+                        x = x.astimezone(_dt.timezone.utc)
+                    return str(x)
+                sd_str = utc_str(sd)
+                ed_str = utc_str(ed)
                 if "2026-03-12" in sd_str:
                     date_match = True
                 if "09:00" in sd_str:

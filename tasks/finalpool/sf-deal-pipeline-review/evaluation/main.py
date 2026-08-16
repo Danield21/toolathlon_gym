@@ -6,6 +6,14 @@ import sys
 import openpyxl
 import psycopg2
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ; bare ev[2].hour silently compares
+# wrong in non-UTC PG sessions. Use gcal_helpers.
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 7: "9 AM UTC on consecutive business days" → UTC target
+from utils.evaluation.gcal_helpers import get_utc_components  # noqa: E402
+
 
 def num_close(a, b, tol=1.0):
     if a is None and b is None:
@@ -210,7 +218,7 @@ def main():
     print("  Checking Google Calendar events...")
     try:
         db_config = {
-            "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+            "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
             "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
             "user": "eigent", "password": "camel",
         }
@@ -255,22 +263,21 @@ def main():
             if events and ok_1h != len(events):
                 all_errors.append(f"GCal: {ok_1h}/{len(events)} events are exactly 1 hour")
             # Start at 9 AM UTC — check ALL events, not just first violation
+            # gcal.events.start_datetime is TIMESTAMPTZ; use helper for UTC hour.
             non_9am = []
             for ev in events:
                 if ev[2]:
-                    try:
-                        if ev[2].hour != 9:
-                            non_9am.append((ev[0], ev[2].hour))
-                    except AttributeError:
-                        pass
+                    _utc_date, ev_h, _utc_m = get_utc_components(ev[2])
+                    if ev_h != 9:
+                        non_9am.append((ev[0], ev_h))
             if non_9am:
                 all_errors.append(f"GCal: {len(non_9am)} events not at 9AM UTC: {non_9am[:3]}")
             # First event on 2026-03-10 (Tuesday) or after consecutive business days
             if events:
                 first_dt = events[0][2]
                 if first_dt:
-                    first_date = first_dt.date() if hasattr(first_dt, 'date') else first_dt
-                    if str(first_date) != "2026-03-10":
+                    first_date, _h, _m = get_utc_components(first_dt)
+                    if first_date is None or str(first_date) != "2026-03-10":
                         all_errors.append(f"GCal: first event not on 2026-03-10 (got {first_date})")
             # Description mentions gap percentage
             desc_ok = 0

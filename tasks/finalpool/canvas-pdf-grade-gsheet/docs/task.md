@@ -8,7 +8,7 @@ Assign each course a letter grade based on its class average using the scale in 
 
 Create a file called semester_grade_report.xlsx in the workspace with three sheets.
 
-The first sheet should be named "Course Grades" with the following columns: Course_Code, Course_Name, Lead_Instructor, Instructor_Email, Students_Scored, Class_Average (rounded to 2 decimal places), Letter_Grade, Distinction (write "Yes" or "No"), Probation (write "Yes" or "No"). Sort rows by Course_Code alphabetically.
+The first sheet should be named "Course Grades" with the following columns: Course_Code, Course_Name, Lead_Instructor, Instructor_Email, Students_Scored, Class_Average (rounded to 2 decimal places), Letter_Grade, Distinction (write "Yes" or "No"), Probation (write "Yes" or "No"). Sort rows by Course_Code alphabetically. Course_Name should include the semester suffix in parentheses, e.g. "Biochemistry & Bioinformatics (Spring 2014)".
 
 The second sheet should be named "Grade Distribution" with columns: Letter_Grade (list A, B, C, D, F in that order), Course_Count (how many courses received that letter grade), Courses (comma-separated course codes that received that grade, sorted alphabetically within each grade; leave empty string if no courses got that grade).
 

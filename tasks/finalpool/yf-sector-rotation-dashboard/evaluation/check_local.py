@@ -45,7 +45,7 @@ TARGET_PRICES = {
     'XOM': 115,
 }
 
-DB_CONFIG = dict(host=os.environ.get('PGHOST', 'localhost'), port=5432, database='toolathlon_gym', user='eigent', password='camel')
+DB_CONFIG = dict(host=os.environ.get('PGHOST', 'localhost'), port=int(os.environ.get("PGPORT", "5432")), database='toolathlon_gym', user='eigent', password='camel')
 
 
 def _str_match(a, b):

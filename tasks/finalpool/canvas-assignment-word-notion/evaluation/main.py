@@ -126,7 +126,7 @@ def find_number_loose(paragraphs, nouns, qualifiers):
     return best
 
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym", user="eigent", password="camel")
+DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym", user="eigent", password="camel")
 
 PASS_COUNT = 0
 FAIL_COUNT = 0

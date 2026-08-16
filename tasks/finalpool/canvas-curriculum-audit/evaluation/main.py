@@ -8,7 +8,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -227,10 +227,23 @@ def check_word(agent_workspace):
         check("Report has at least 1 recommendations section paragraph",
               len(recommend_paragraphs) >= 1,
               f"Found {len(recommend_paragraphs)} paragraphs with 'recommend'")
-        # "Key findings" or "key finding" must appear (narrative structure)
-        check("Report has Key Findings section",
-              "key finding" in all_text or "key findings" in all_text,
-              f"Sample: {all_text[:200]}")
+        # Key findings — structural/semantic check (not a literal phrase gate).
+        # task.md asks the executive summary to "describe the overall compliance
+        # rate and key findings"; that is satisfied by any narrative that states
+        # a compliance rate AND draws at least one data-grounded conclusion.
+        # Requiring the literal substring "key finding(s)" is a brittle口径 that
+        # fails semantically-correct reports (case-study 2026-08-12, case #9).
+        import re
+        has_rate = bool(re.search(r"\d+\s*%", all_text))
+        finding_synonyms = [
+            "finding", "findings", "observation", "observations",
+            "insight", "insights", "highlight", "highlights",
+            "notable", "takeaway", "takeaways", "conclusion", "conclusions",
+        ]
+        has_finding = any(s in all_text for s in finding_synonyms)
+        check("Report states a compliance rate (%) and at least one finding/observation",
+              has_rate and has_finding,
+              f"rate={has_rate}, finding={has_finding}; sample: {all_text[:200]}")
     except ImportError:
         check("python-docx available", False, "pip install python-docx")
 

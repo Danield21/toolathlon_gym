@@ -28,6 +28,44 @@ def _normalize_title(s):
     return " ".join(re.sub(r"[^a-z0-9]+", " ", str(s).lower()).split())
 
 
+def _collect_title_text(props):
+    """Recursively collect title text from a Notion page/database properties
+    blob (audit §B.1.5).
+
+    The mock Notion server does not always write the ``type == "title"`` marker
+    on title properties, so requiring it makes the evaluator fail to find any
+    page title. Instead, recursively walk the structure and concatenate every
+    ``plain_text`` / ``text.content`` fragment we encounter.
+    """
+    chunks = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "title":
+                for item in node.get("title", []) or []:
+                    if isinstance(item, dict):
+                        chunks.append(item.get("plain_text") or "")
+                        t = item.get("text")
+                        if isinstance(t, dict):
+                            chunks.append(t.get("content") or "")
+                    elif isinstance(item, str):
+                        chunks.append(item)
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                if isinstance(item, dict):
+                    chunks.append(item.get("plain_text") or "")
+                    t = item.get("text")
+                    if isinstance(t, dict):
+                        chunks.append(t.get("content") or "")
+                elif isinstance(item, str):
+                    chunks.append(item)
+
+    walk(props)
+    return "".join(chunks)
+
+
 def _levenshtein(a, b):
     """Small-scale DP edit distance between two strings."""
     if a == b:
@@ -258,7 +296,7 @@ def main():
     try:
         import json as _json
         import psycopg2
-        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
+        conn = psycopg2.connect(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym",
                                 user="eigent", password="camel")
         cur = conn.cursor()
         cur.execute("SELECT id, properties FROM notion.pages WHERE archived = false")
@@ -273,18 +311,8 @@ def main():
                     props_obj = _json.loads(props)
                 else:
                     props_obj = props
-                titles = []
-                for k, v in (props_obj.items() if isinstance(props_obj, dict) else []):
-                    if isinstance(v, dict) and v.get("type") == "title":
-                        for t in v.get("title", []):
-                            if isinstance(t, dict):
-                                pt = t.get("plain_text", "") or (
-                                    t.get("text", {}).get("content", "")
-                                    if isinstance(t.get("text"), dict) else ""
-                                )
-                                if pt:
-                                    titles.append(pt)
-                title_text = " ".join(titles).strip().lower()
+                # Robust title collection (audit §B.1.5): mock may omit type markers.
+                title_text = _collect_title_text(props_obj)
                 if titles_match(target_phrase, title_text):
                     found_count += 1
             except Exception:

@@ -13,13 +13,28 @@ import json
 from argparse import ArgumentParser
 
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md line 11: "Saturdays at 10:00 to 12:00" for the
+# four weekly Science Study Session events (Mar 14/21/28, Apr 4 2026). The
+# Calendar MCP writes events as UTC instants into the DB (TIMESTAMPTZ), so all
+# comparisons anchor to America/New_York. Never use bare `st.hour` /
+# `st.date()` on rows read from `gcal.events`: psycopg2 returns them in the
+# PG session TimeZone (case-study: compute node default was Asia/Shanghai,
+# masking ET wall-clock). Use `utils.evaluation.gcal_helpers` instead
+# (session-tz-independent, DST-aware).
+# ──────────────────────────────────────────────────────────────────────────
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -120,11 +135,18 @@ def check_gcal():
             actual_dates = set()
             for summary, st, et in events:
                 if st:
-                    actual_dates.add(st.date().isoformat())
-                    # Each event 2 hours
+                    # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant).
+                    # Use the session-tz-independent helper to extract the date
+                    # in EXPECTED_TIMEZONE (America/New_York per task.md).
+                    # Bare st.date() silently uses the PG session tz.
+                    ev_date, _, _ = get_zone_components(st, EXPECTED_TIMEZONE)
+                    if ev_date is not None:
+                        actual_dates.add(ev_date.isoformat())
+                    # Each event 2 hours. Duration is an instant delta, so it
+                    # is session-tz-independent (no helper needed).
                     if et:
                         duration = (et - st).total_seconds() / 60
-                        record(f"Event on {st.date()} duration is 120 min (10:00-12:00)",
+                        record(f"Event on {ev_date} duration is 120 min (10:00-12:00)",
                                abs(duration - 120) <= 5,
                                f"Duration: {duration} min")
             missing = expected_dates - actual_dates

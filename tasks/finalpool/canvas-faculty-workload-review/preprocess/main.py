@@ -52,10 +52,11 @@ async def main():
         cur.close()
         conn.close()
 
-    # The proxy stages task assets under files/. Keep the server in the
-    # preprocess worker's process group so the framework can reclaim it.
+    # Serve the mock Canvas API from tmp/mock_pages (Bug E in audit §A.8: a
+    # prior commit pointed this at files/, which does not exist, so the HTTP
+    # server never started and the agent saw 404s for workload_standards.json).
     task_root = Path(__file__).resolve().parent.parent
-    serve_dir = task_root / "files"
+    serve_dir = task_root / "tmp" / "mock_pages"
     standards_path = serve_dir / "api" / "workload_standards.json"
     if not standards_path.is_file():
         raise FileNotFoundError(f"Missing workload standards: {standards_path}")

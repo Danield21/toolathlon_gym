@@ -17,10 +17,30 @@ from argparse import ArgumentParser
 
 import psycopg2
 import openpyxl
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `sd.hour` / `sd.date()` on rows read from `gcal.events`:
+# psycopg2 returns them in the PG session `TimeZone` (case-study: compute
+# node default was Asia/Shanghai, masking 14:00 UTC as 22:00+08). Use
+# `utils.evaluation.gcal_helpers` instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 11: "Monday March 9 2026 from 14:00 to 15:00. Use the UTC
+# timezone."
+EXPECTED_TIMEZONE = ZoneInfo("UTC")
+EXPECTED_MEETING_HOUR = 14
+EXPECTED_MEETING_MINUTE = 0
+EXPECTED_MEETING_DURATION_MIN = 60
+
+from utils.evaluation.gcal_helpers import get_utc_components  # noqa: E402
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -172,13 +192,50 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
                 record(f"View counts match for all matched videos",
                        vc_match == overlap and overlap > 0, f"{vc_match}/{overlap}")
             elif gt_sname.lower() == "topic_summary":
-                # Validate all GT topics appear in agent's topic list
-                gt_topics = {str(r[0]).strip().lower(): r for r in gt_rows if r and r[0]}
-                a_topics = {str(r[0]).strip().lower(): r for r in a_rows if r and r[0]}
-                overlap = sum(1 for t in gt_topics if t in a_topics)
-                record(f"Topic_Summary covers all {len(gt_topics)} GT topics",
-                       overlap == len(gt_topics),
-                       f"Overlap {overlap}/{len(gt_topics)}; agent: {list(a_topics.keys())}")
+                # Topic labeling is a free-form clustering: task.md says the
+                # Primary_Topic is "derived from the video tags or title
+                # keywords", and youtube.videos carries no authoritative
+                # topic column. Locking GT's human-chosen labels ("AI/ML",
+                # "Big Tech") over-penalizes equally-defensible taxonomies
+                # ("Artificial Intelligence", "Quantum Computing" for the
+                # same 2329914-view video). Instead check SELF-CONSISTENCY:
+                # the summary must partition the agent's own Videos sheet —
+                # every video covered exactly once, and per-topic counts
+                # matching the Videos rows (case-study 2026-08-16 round-3).
+                vids_ws = None
+                for asn in wb.sheetnames:
+                    if asn.strip().lower() == "videos":
+                        vids_ws = wb[asn]
+                        break
+                if vids_ws is None:
+                    record("Topic_Summary self-consistent with Videos", False,
+                           "Videos sheet missing")
+                else:
+                    v_rows = [r for r in vids_ws.iter_rows(min_row=2, values_only=True)
+                              if any(c is not None for c in r)]
+                    try:
+                        v_hdrs = [str(c).strip().lower() if c else "" for c in
+                                  next(vids_ws.iter_rows(max_row=1, values_only=True))]
+                    except StopIteration:
+                        v_hdrs = []
+                    topic_col = next((i for i, h in enumerate(v_hdrs)
+                                      if h.replace("_", "").replace(" ", "") == "primarytopic"), 6)
+                    vid_topic_pairs = [(str(r[0]).strip().lower(),
+                                        str(r[topic_col]).strip().lower() if topic_col < len(r) and r[topic_col] else "")
+                                       for r in v_rows if r and r[0]]
+                    from collections import Counter
+                    expect_counts = Counter(t for _, t in vid_topic_pairs if t)
+                    a_topics = {str(r[0]).strip().lower(): r for r in a_rows if r and r[0]}
+                    counts_ok = all(
+                        a_topics.get(t) and len(a_topics[t]) > 1 and
+                        int(a_topics[t][1]) == expect_counts.get(t, -1)
+                        for t in expect_counts
+                    )
+                    covered = sum(expect_counts.values())
+                    record("Topic_Summary covers all agent topics with correct counts",
+                           counts_ok and covered == len(vid_topic_pairs),
+                           f"expected {dict(expect_counts)}; agent topics: {list(a_topics.keys())}; "
+                           f"videos covered {covered}/{len(vid_topic_pairs)}")
         gt_wb.close()
 
 
@@ -198,9 +255,42 @@ def check_notion():
                f"Found {len(rows)} matching pages")
         if target_id:
             with conn.cursor() as cur:
-                cur.execute("SELECT content FROM notion.blocks WHERE page_id = %s", (target_id,))
+                # notion.blocks stores the payload in block_data (JSONB); there
+                # is no `content` column (c4 case-study 2026-08-15: the old
+                # query failed with "column content does not exist").
+                cur.execute(
+                    "SELECT block_data FROM notion.blocks WHERE parent_id = %s",
+                    (target_id,))
                 blocks = cur.fetchall()
-            all_text = " ".join(str(b[0] or "") for b in blocks).lower()
+            # Extract readable text from the block JSON: rich_text arrays in
+            # paragraphs / headings / table cells.
+            def _block_text(bd):
+                if not isinstance(bd, dict):
+                    return ""
+                parts = []
+
+                def _extract(value):
+                    if isinstance(value, list):
+                        for item in value:
+                            if isinstance(item, dict):
+                                if "text" in item:
+                                    t = item["text"]
+                                    parts.append(t.get("content", "") if isinstance(t, dict) else str(t))
+                                elif "plain_text" in item:
+                                    parts.append(item.get("plain_text", ""))
+                                else:
+                                    _extract(item)
+                            elif isinstance(item, str):
+                                parts.append(item)
+                    elif isinstance(value, dict):
+                        # Notion block_data nests: {heading_2: {rich_text: [...]}}
+                        for sub in value.values():
+                            _extract(sub)
+
+                for v in bd.values():
+                    _extract(v)
+                return " ".join(p for p in parts if p)
+            all_text = " ".join(_block_text(b[0]) for b in blocks).lower()
             # Heading + summary paragraph + top 5 topics table
             record("Notion page has substantive content (>200 chars blocks)",
                    len(all_text) > 200,
@@ -219,8 +309,8 @@ def check_gcal():
                 SELECT id, summary, start_datetime, end_datetime, recurrence
                 FROM gcal.events
                 WHERE summary ILIKE '%Tech Review Meeting%'
-                  AND start_datetime >= '2026-03-01'
-                  AND start_datetime < '2026-04-01'
+                  AND start_datetime >= TIMESTAMPTZ '2026-03-01T00:00:00Z'
+                  AND start_datetime <  TIMESTAMPTZ '2026-04-01T00:00:00Z'
             """)
             rows = cur.fetchall()
         conn.close()
@@ -229,25 +319,29 @@ def check_gcal():
                f"Found {len(rows)} matching events")
         if rows:
             ev_id, summary, start_dt, end_dt, recurrence = rows[0]
-            # Date 2026-03-09
-            if start_dt:
-                date_str = str(start_dt)[:10]
+            # Date 2026-03-09. Extract via UTC components — task.md declares
+            # the event in UTC, so bare start_dt.date()/str(start_dt)[:10]
+            # would silently shift a day in a non-UTC PG session
+            # (case-study 2026-08-13).
+            ev_date, ev_hour, ev_minute = get_utc_components(start_dt)
+            if ev_date is not None:
+                date_str = ev_date.isoformat()
                 record("Tech Review Meeting on 2026-03-09",
                        date_str == "2026-03-09",
                        f"got {date_str}")
-                # 14:00 UTC start
-                try:
-                    record("Tech Review Meeting starts at 14:00",
-                           start_dt.hour == 14 and start_dt.minute == 0,
-                           f"got {start_dt.hour:02d}:{start_dt.minute:02d}")
-                except AttributeError:
-                    pass
-                # Duration 1 hour
-                if end_dt:
-                    duration = (end_dt - start_dt).total_seconds() / 60
-                    record("Tech Review Meeting is 1 hour",
-                           55 <= duration <= 65,
-                           f"duration {duration:.0f} min")
+                # 14:00 UTC start (task.md: "from 14:00 to 15:00. Use the UTC timezone").
+                record("Tech Review Meeting starts at 14:00",
+                       ev_hour == EXPECTED_MEETING_HOUR and ev_minute == EXPECTED_MEETING_MINUTE,
+                       f"got {ev_hour:02d}:{ev_minute:02d}" if ev_hour is not None else "unparseable")
+            else:
+                record("Tech Review Meeting on 2026-03-09", False, "start_datetime missing")
+                record("Tech Review Meeting starts at 14:00", False, "start_datetime missing")
+            # Duration 1 hour (timedelta on UTC instants is tz-safe).
+            if end_dt and start_dt:
+                duration = (end_dt - start_dt).total_seconds() / 60
+                record("Tech Review Meeting is 1 hour",
+                       EXPECTED_MEETING_DURATION_MIN - 5 <= duration <= EXPECTED_MEETING_DURATION_MIN + 5,
+                       f"duration {duration:.0f} min")
             # Recurring (weekly) - check recurrence field exists
             rec_str = str(recurrence or "").upper()
             record("Tech Review Meeting is recurring (weekly)",

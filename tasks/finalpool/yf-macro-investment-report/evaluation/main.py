@@ -46,7 +46,7 @@ def _compute_expected_returns():
     fallback = {"AMZN": -4.61, "GOOGL": -6.29, "JNJ": 19.30, "JPM": -6.40, "XOM": 30.22}
     try:
         import psycopg2
-        conn = psycopg2.connect(host='localhost', port=5432, dbname='toolathlon_gym',
+        conn = psycopg2.connect(host='localhost', port=int(os.environ.get("PGPORT", "5432")), dbname='toolathlon_gym',
                                 user='eigent', password='camel')
         out = {}
         with conn.cursor() as cur:

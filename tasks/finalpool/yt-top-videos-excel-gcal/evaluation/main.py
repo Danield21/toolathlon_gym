@@ -23,7 +23,7 @@ def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -204,7 +204,7 @@ def check_gcal():
         SELECT summary, start_datetime, end_datetime
         FROM gcal.events
         WHERE summary ILIKE '%team learning%'
-        AND start_datetime >= '2026-04-07' AND start_datetime < '2026-07-01'
+        AND start_datetime >= TIMESTAMPTZ '2026-04-07T00:00:00Z' AND start_datetime < TIMESTAMPTZ '2026-07-01T00:00:00Z'
         ORDER BY start_datetime
     """)
     events = cur.fetchall()
@@ -249,17 +249,18 @@ def check_gcal():
     record("All 10 sessions are 1 hour long", valid_durations == len(events),
            f"Got {valid_durations}/{len(events)} valid durations")
 
-    # 10:00 AM start (local) or 14:00 UTC equivalent
+    # 10:00 AM start — normalize to UTC before extracting hour (session TZ
+    # may shift str() representation, causing false negatives).
+    from datetime import timezone as _tz
     valid_starts = 0
     for _, sd, _ in events:
-        s = str(sd)
-        if len(s) >= 13:
-            try:
-                hr = int(s[11:13])
-                if hr in (10, 14, 15):
-                    valid_starts += 1
-            except ValueError:
-                pass
+        if hasattr(sd, 'astimezone'):
+            hr = sd.astimezone(_tz.utc).hour
+        else:
+            s = str(sd)
+            hr = int(s[11:13]) if len(s) >= 13 else -1
+        if hr in (10, 14, 15):
+            valid_starts += 1
     record("All 10 sessions start at 10:00 AM (or UTC equivalent)",
            valid_starts == len(events),
            f"Got {valid_starts}/{len(events)} valid starts")

@@ -146,7 +146,7 @@ def check_executive_summary(agent_workspace):
         try:
             import psycopg2 as _pg
             _c = _pg.connect(
-                host=os.environ.get("PGHOST", "localhost"), port=5432,
+                host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")),
                 dbname="toolathlon_gym", user="eigent", password="camel"
             )
             _cur = _c.cursor()
@@ -179,7 +179,7 @@ def check_executive_summary(agent_workspace):
         try:
             import psycopg2
             conn = psycopg2.connect(
-                host=os.environ.get("PGHOST", "localhost"), port=5432,
+                host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")),
                 dbname="toolathlon_gym", user="eigent", password="camel"
             )
             cur = conn.cursor()

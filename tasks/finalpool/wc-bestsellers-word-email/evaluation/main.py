@@ -30,7 +30,7 @@ def get_expected_top10():
     import psycopg2
 
     conn = psycopg2.connect(
-        host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
+        host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym",
         user="eigent", password="camel"
     )
     cur = conn.cursor()
@@ -167,7 +167,7 @@ def check_email(expected):
     print("\n=== Checking Email ===")
     try:
         conn = psycopg2.connect(
-            host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym",
+            host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym",
             user="eigent", password="camel"
         )
         cur = conn.cursor()

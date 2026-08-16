@@ -17,13 +17,24 @@ from argparse import ArgumentParser
 import psycopg2
 import openpyxl
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ. psycopg2 returns it in the PG
+# session TimeZone; bare start_dt.hour silently compares wrong (case-study
+# 2026-08-13). Use gcal_helpers; never bare start_dt.hour / .minute.
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 7: "from 14:00 to 15:30 each day" (academic reading group ET)
+EXPECTED_TIMEZONE = "America/New_York"
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
     return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
 
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -187,7 +198,10 @@ def check_gcal():
             duration_hours = (end_dt - start_dt).total_seconds() / 3600
             if abs(duration_hours - 1.5) < 0.01:
                 correct_duration_count += 1
-            if start_dt.hour == 14 and start_dt.minute == 0:
+            # gcal.events.start_datetime is TIMESTAMPTZ; use session-tz-
+            # independent helper to extract ET wall-clock components.
+            _ev_date, ev_hour, ev_minute = get_zone_components(start_dt, EXPECTED_TIMEZONE)
+            if ev_hour == 14 and ev_minute == 0:
                 correct_time_count += 1
     record("All reading sessions are 1.5 hours long",
            correct_duration_count == len(reading_events) and len(reading_events) > 0,

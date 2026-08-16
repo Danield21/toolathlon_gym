@@ -3,12 +3,20 @@ import os
 import argparse, json, os, sys
 import openpyxl
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ. psycopg2 returns it in PG
+# session TimeZone; bare sd.hour silently compares wrong. Use gcal_helpers.
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 9: "from 3:00 PM to 4:30 PM UTC" → UTC target
+from utils.evaluation.gcal_helpers import get_utc_components  # noqa: E402
+
 def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
     return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
 
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -281,8 +289,14 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         for e in events:
             sd = e[1]
             try:
-                if sd is not None and sd.year == 2026 and sd.month == 3 and sd.day == 13 \
-                   and sd.hour == 15 and sd.minute == 0:
+                if sd is None:
+                    continue
+                # gcal.events.start_datetime is TIMESTAMPTZ; convert to UTC
+                # via session-tz-independent helper. task.md mandates UTC.
+                utc_date, utc_hour, utc_minute = get_utc_components(sd)
+                if utc_date is not None and utc_date.year == 2026 \
+                   and utc_date.month == 3 and utc_date.day == 13 \
+                   and utc_hour == 15 and utc_minute == 0:
                     target_event = e
                     break
             except AttributeError:

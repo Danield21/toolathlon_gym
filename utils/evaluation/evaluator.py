@@ -4,9 +4,36 @@ from utils.data_structures.task_config import TaskConfig
 from utils.general.helper import run_command, read_json, write_json
 import logging
 import os
+from pathlib import Path
+
+# Infrastructure-only directories the harness/framework writes inside the
+# agent workspace during a run. These are NOT task deliverables and must never
+# be counted as visible artifacts or interfere with evaluation:
+#   .tool_results           — kimi-code oversized tool-output offload (P0-1 fix)
+#   .overlong_tool_outputs  — local_tools_server save_overlong_output
+#   .python_tmp             — python_execute scratch scripts
+# All three start with '.', so the hidden-file filter below already excludes
+# them; this set documents the contract explicitly for future scanners.
+INFRA_WORKSPACE_DIRS = frozenset({".tool_results", ".overlong_tool_outputs", ".python_tmp"})
 
 class TaskEvaluator:
     """Task evaluator"""
+
+    @staticmethod
+    def _has_visible_workspace_artifacts(agent_workspace: str) -> bool:
+        workspace = Path(agent_workspace)
+        if not workspace.is_dir():
+            return False
+        for path in workspace.rglob("*"):
+            if not path.is_file():
+                continue
+            rel_parts = path.relative_to(workspace).parts
+            # Hidden files/dirs (including INFRA_WORKSPACE_DIRS) and bytecode
+            # caches are framework/runtime byproducts, not task deliverables.
+            if any(part.startswith(".") or part == "__pycache__" for part in rel_parts):
+                continue
+            return True
+        return False
     
     @staticmethod
     async def evaluate_one(dump_line: Dict[str, Any]) -> Dict[str, Any]:
@@ -32,17 +59,46 @@ class TaskEvaluator:
         launch_time = task_config.launch_time
         print(f"launch time in eval is {launch_time}")
 
-        # First check task status: only SUCCESS is possible to pass; otherwise return pass = None
+        # Official completion still requires claim_done/SUCCESS. However, for
+        # real-time evaluation we must not discard already-produced artifacts:
+        # when a failed/no-claim run has visible workspace deliverables, run the
+        # normal evaluator while the mock services and DB are still alive. The
+        # result remains annotated as lifecycle-incomplete so downstream reports
+        # can keep success and artifact quality as separate axes.
+        artifact_only_eval = False
         if task_status != TaskStatus.SUCCESS.value:
+            if eval_command is not None and TaskEvaluator._has_visible_workspace_artifacts(agent_workspace):
+                artifact_only_eval = True
+                print(
+                    f"[eval] task status is {task_status}; running artifact-only "
+                    "evaluation because workspace deliverables exist."
+                )
+            else:
+                return {
+                    "pass": None,
+                    "details": f"Task status: {task_status}, only SUCCESS counts as pass; pass is null",
+                    "task_status": task_status,
+                    "claim_done_required": True,
+                    "artifact_eval_attempted": False,
+                }
+
+        if task_status != TaskStatus.SUCCESS.value and not artifact_only_eval:
             return {
                 "pass": None,
                 "details": f"Task status: {task_status}, only SUCCESS counts as pass; pass is null"
             }
 
-        # Evaluate all content (only when task status is SUCCESS)
+        # Evaluate all content. For artifact_only_eval=True this is a
+        # supplemental quality signal for an incomplete lifecycle, not proof
+        # that the agent followed the required claim_done protocol.
         if eval_command is not None:
             # try:
-            args = f"--res_log_file {res_log_file} --agent_workspace {agent_workspace} --groundtruth_workspace {groundtruth_workspace} --launch_time \"{launch_time}\""
+            # Strip weekday name (e.g. "Saturday") from launch_time — same as
+            # utils/roles/task_agent.py does for preprocess. Otherwise every
+            # evaluation/main.py that calls datetime.fromisoformat() crashes
+            # (c4 batch: wc-vip / wc-product-review "Invalid isoformat string").
+            lt_clean = " ".join((launch_time or "").split()[:2])  # keep "YYYY-MM-DD HH:MM:SS"
+            args = f"--res_log_file {res_log_file} --agent_workspace {agent_workspace} --groundtruth_workspace {groundtruth_workspace} --launch_time \"{lt_clean}\""
             command = f"{eval_command} {args}"
             output, error, returncode = await run_command(command, debug=True)
             print("== Evaluation STDOUT ==")
@@ -53,12 +109,22 @@ class TaskEvaluator:
                 return {
                     "pass": False,
                     "failure": output,
+                    "task_status": task_status,
+                    "claim_done_required": True,
+                    "artifact_eval_attempted": artifact_only_eval,
                 }
                 
         # Finally, it's successful
         return {
             "pass": True,
-            "details": "All evaluation checks passed, and task status is success"
+            "details": (
+                "All evaluation checks passed, and task status is success"
+                if not artifact_only_eval
+                else "Artifact-only evaluation passed, but task status was not success; claim_done lifecycle remains incomplete"
+            ),
+            "task_status": task_status,
+            "claim_done_required": True,
+            "artifact_eval_attempted": artifact_only_eval,
         }
     
     @staticmethod

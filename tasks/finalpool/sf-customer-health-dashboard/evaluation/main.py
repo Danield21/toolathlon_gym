@@ -15,9 +15,19 @@ from datetime import date
 import openpyxl
 import psycopg2
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ; bare first_dt.date() / .hour
+# silently compares wrong in non-UTC PG sessions. Use gcal_helpers.
+# ──────────────────────────────────────────────────────────────────────────
+# task.md: SF company (customer success team) → America/Los_Angeles (PT)
+EXPECTED_TIMEZONE = "America/Los_Angeles"
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -490,18 +500,17 @@ def check_calendar(expected):
     if events:
         first_dt = events[0][2]
         if first_dt:
-            first_date = first_dt.date() if hasattr(first_dt, 'date') else first_dt
+            # gcal.events.start_datetime is TIMESTAMPTZ; use helper for PT date.
+            first_date, first_hour, first_minute = get_zone_components(
+                first_dt, EXPECTED_TIMEZONE
+            )
             check("First event on 2026-04-27",
-                  str(first_date) == "2026-04-27",
+                  first_date is not None and str(first_date) == "2026-04-27",
                   f"First event date: {first_date}")
-            # 10:00 AM
-            try:
-                start_time = first_dt.time() if hasattr(first_dt, 'time') else None
-                check("First event at 10:00 AM",
-                      start_time is not None and start_time.hour == 10 and start_time.minute == 0,
-                      f"Got time: {start_time}")
-            except AttributeError:
-                pass
+            # 10:00 AM PT
+            check("First event at 10:00 AM",
+                  first_hour is not None and first_hour == 10 and first_minute == 0,
+                  f"Got time: {first_hour}:{first_minute}")
         # 30-minute duration on each event
         if len(events) > 0:
             ok_30min = 0

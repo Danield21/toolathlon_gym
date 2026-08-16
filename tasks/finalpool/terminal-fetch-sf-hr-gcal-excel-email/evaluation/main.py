@@ -9,15 +9,37 @@ import argparse
 import json
 import os
 import sys
+from zoneinfo import ZoneInfo
+
 import openpyxl
 import psycopg2
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `sd.hour` / `sd.day` on rows read from `gcal.events`:
+# psycopg2 returns them in the PG session `TimeZone` (case-study: compute
+# node default was Asia/Shanghai). Use `utils.evaluation.gcal_helpers`
+# instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 11: "Schedule salary review meetings ... for the week of March
+# 16 to March 20, 2026 ... two per day starting at 10 AM and 2 PM". SF company
+# (Compensation_Policy / hr_team@company.com) -> America/Los_Angeles (PT).
+EXPECTED_TIMEZONE = ZoneInfo("America/Los_Angeles")
+
+# Evaluator runs as `python -m tasks.finalpool.<task>.evaluation.main` with
+# cwd = /workspace (toolathlon_gym root), so `utils/` is importable directly.
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 
 def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
     return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
 
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel",
 }
@@ -170,19 +192,31 @@ def check_gcal():
         check("Events cover all 7 departments", len(dept_found) >= 7,
               f"Departments in events: {dept_found}")
 
-        # Check events are in March 16-20 2026 (the specified week)
-        target_events = [e for e in events
-                         if e[1] and e[1].year == 2026 and e[1].month == 3
-                         and 16 <= e[1].day <= 20]
+        # Check events are in March 16-20 2026 (the specified week).
+        # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant); extract
+        # components in EXPECTED_TIMEZONE (PT) so a 10 AM PT event stored as
+        # 18:00Z does not get misread as the previous/next day by a non-UTC
+        # PG session tz (case-study 2026-08-13).
+        target_events = []
+        for e in events:
+            start = e[1]
+            if start is None:
+                continue
+            ev_date, ev_hour, ev_minute = get_zone_components(start, EXPECTED_TIMEZONE)
+            if ev_date is None:
+                continue
+            if ev_date.year == 2026 and ev_date.month == 3 and 16 <= ev_date.day <= 20:
+                target_events.append((e[0], (ev_date, ev_hour, ev_minute)))
         check("Events scheduled in March 16-20 2026", len(target_events) >= 7,
               f"Found {len(target_events)} events in target week")
 
         # Check event times: 10 AM and 2 PM pattern (task.md specifies 10 AM and 2 PM slots)
-        allowed_hours = {10, 14}  # 10 AM and 2 PM
-        bad_hours = [e for e in target_events if e[1] and e[1].hour not in allowed_hours]
+        allowed_hours = {10, 14}  # 10 AM and 2 PM (PT)
+        bad_hours = [(name, comps) for name, comps in target_events
+                     if comps[1] not in allowed_hours]
         check("Review events scheduled at 10 AM or 2 PM only",
               len(bad_hours) == 0,
-              f"Events with non-10/14 hour: {[(e[0], e[1]) for e in bad_hours[:3]]}")
+              f"Events with non-10/14 hour: {bad_hours[:3]}")
 
     cur.close()
     conn.close()

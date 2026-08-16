@@ -16,7 +16,7 @@ Slide 4 should be titled "Pipeline Coverage Analysis" and show each region's pip
 
 Slide 5 should be titled "Recommendations" and include bullet points noting which regions exceeded quota (attainment above 100 percent), which fell short, and the overall company quota attainment percentage.
 
-Schedule a Google Calendar event called "Territory Review - Executive Presentation" on March 28, 2026 from 09:00 to 10:30. The description should mention the five regions and note the overall company quota attainment figure.
+Schedule a Google Calendar event called "Territory Review - Executive Presentation" on March 28, 2026 from 09:00 to 10:30. The description should mention the five regions and note the overall company quota attainment figure. Use the America/Los_Angeles timezone for the calendar event.
 
 Send an email to executive_team@company.com with the subject "Q1 2026 Territory Performance Summary". The body should highlight the top-performing region by revenue, the bottom-performing region, and the overall quota attainment percentage.
 

@@ -1,6 +1,6 @@
 I need a comprehensive enrollment report for all courses in our Canvas LMS. Please pull the enrollment data for every course and break it down by role type.
 
-Create an Excel file called Canvas_Enrollment_Report.xlsx with two sheets. The "Enrollment Data" sheet should have columns Course_Code, Course_Name, Students count, Teachers count, and Total_Enrolled being the sum of Students and Teachers. Sort by Course_Code alphabetically.
+Create an Excel file called Canvas_Enrollment_Report.xlsx with two sheets. The "Enrollment Data" sheet should have columns Course_Code, Course_Name, Students count, Teachers count, and Total_Enrolled being the sum of Students and Teachers. Sort by Course_Code alphabetically. "Students" counts enrollments of type StudentEnrollment only, and "Teachers" counts enrollments of type TeacherEnrollment only (do not include TaEnrollment or other types in either count). Include a header row on both sheets (the Enrollment Data sheet uses its column names as the header; the Summary sheet uses columns `Metric` and `Value`).
 
 The "Summary" sheet with Metric and Value should have Total_Courses, Total_Students across all courses, Total_Teachers, Largest_Course code with most students, and Smallest_Course code with fewest students. Total_Students is the sum of each course's student count (a student enrolled in multiple courses is counted once per course, not de-duplicated across courses).
 

@@ -8,7 +8,7 @@ def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
 
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -94,6 +94,32 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                         )
 
                     header_map = {h: i for i, h in enumerate(headers)}
+
+                    # Audit_Notes is open-ended per task.md ("at least 3
+                    # observations about the data comparison"): the finding
+                    # *names* must not be forced to match the GT's labels.
+                    # Validate substance (>=3 rows, each mentioning a data-
+                    # comparison theme) instead of exact row-name parity.
+                    if sheet_name.lower() == "audit_notes":
+                        detail_idx = header_map.get("detail", 1)
+                        finding_idx = header_map.get("finding", 0)
+                        substantive = 0
+                        themes = ("revenue", "order", "scale", "average",
+                                  "variance", "difference", "amount", "total",
+                                  "discrepancy", "mismatch", "gap", "value")
+                        for r in data_rows:
+                            blob = " ".join(
+                                str(r[i]).lower() for i in (finding_idx, detail_idx)
+                                if i is not None and i < len(r) and r[i]
+                            )
+                            if any(t in blob for t in themes):
+                                substantive += 1
+                        check(
+                            f"{sheet_name} has >=3 substantive data-comparison findings",
+                            substantive >= 3,
+                            f"substantive rows: {substantive}",
+                        )
+                        continue
 
                     # Build agent lookup keyed by first column (case-insensitive)
                     if data_rows:

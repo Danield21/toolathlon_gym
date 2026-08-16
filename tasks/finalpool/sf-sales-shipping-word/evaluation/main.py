@@ -20,7 +20,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -182,11 +182,12 @@ def check_word(agent_workspace, expected):
                   mode.lower() in full_text.lower(),
                   f"'{mode}' not found in document text")
 
-        # Check total orders mentioned
-        total_str = str(expected["total_orders"])
+        # Check total orders mentioned (accept bare number and thousands-separated form)
+        total_orders = expected["total_orders"]
+        order_formats = [str(total_orders), f"{total_orders:,}"]
         check("Document mentions total order count",
-              total_str in full_text,
-              f"Expected '{total_str}' in text")
+              any(fmt in full_text for fmt in order_formats),
+              f"Expected one of {order_formats} in text")
 
         # Check total revenue number mentioned (with some formatting tolerance)
         total_rev = expected["total_revenue"]

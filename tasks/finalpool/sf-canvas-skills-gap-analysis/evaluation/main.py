@@ -173,7 +173,7 @@ def check_emails():
 
         conn = psycopg2.connect(
             host=os.environ.get("PGHOST", "localhost"),
-            port=5432,
+            port=int(os.environ.get("PGPORT", "5432")),
             dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
             user=os.environ.get("PGUSER", "eigent"),
             password=os.environ.get("PGPASSWORD", "camel"),

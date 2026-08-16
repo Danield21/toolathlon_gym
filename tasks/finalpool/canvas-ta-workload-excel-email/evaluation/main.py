@@ -9,7 +9,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -152,7 +152,10 @@ def check_excel(agent_workspace):
         check("Sheet 'Summary' exists", False, f"Available: {wb.sheetnames}")
     else:
         check("Sheet 'Summary' exists", True)
-        data_rows = sum_rows[1:] if len(sum_rows) > 1 else []
+        # Metric/Value sheets may legitimately start with data (no header row).
+        # Include every row in the lookup — a header row, if present, just adds
+        # an unused key instead of swallowing the first metric (Total_Courses).
+        data_rows = sum_rows or []
         lookup = {}
         for row in data_rows:
             if row and row[0]:

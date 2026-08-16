@@ -21,7 +21,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -193,43 +193,60 @@ def check_excel(agent_workspace, groundtruth_workspace="."):
                            matched_count >= threshold,
                            f"matched {matched_count}/{len(gt_rows)}")
                 else:
-                    # Artist_Summary
-                    a_by_artist = {}
-                    for ar in a_rows:
-                        if ar and ar[0] is not None:
-                            a_by_artist[str(ar[0]).strip().lower()] = ar
+                    # Artist_Summary. The transcript carries NO artist metadata
+                    # (only one "it's Kel Vib" drop), so artist attribution is
+                    # not derivable from the data source — grading agents
+                    # against GT artist NAMES would be arbitrary (c4
+                    # case-study 2026-08-15: agent song list matched the
+                    # transcript word-for-word but 0/9 artist overlap with the
+                    # stale GT). Grade the sheet's INTERNAL CONSISTENCY with the
+                    # agent's own Tracklist instead: every summary row's
+                    # Song_Count and Total_Duration_Sec must be reproducible
+                    # from the agent's track rows.
+                    a_track_rows = []
+                    for asn in wb.sheetnames:
+                        if "track" in asn.lower():
+                            a_track_rows = [r for r in wb[asn].iter_rows(min_row=2, values_only=True)
+                                            if any(c is not None for c in r)]
+                            break
+                    # agent tracklist: artist col idx 2, duration col idx 4
+                    expected_summary = {}
+                    for tr in a_track_rows:
+                        if tr and len(tr) >= 5 and tr[2] is not None:
+                            akey = str(tr[2]).strip().lower()
+                            try:
+                                dur = float(tr[4] or 0)
+                            except (TypeError, ValueError):
+                                dur = 0.0
+                            e = expected_summary.setdefault(akey, [0, 0.0])
+                            e[0] += 1
+                            e[1] += dur
                     artist_match_count = 0
                     artist_value_match = 0
-                    for gr in gt_rows:
-                        if not gr or gr[0] is None:
+                    for ar in a_rows:
+                        if not ar or ar[0] is None:
                             continue
-                        gkey = str(gr[0]).strip().lower()
-                        ar = a_by_artist.get(gkey)
-                        if ar is None:
+                        akey = str(ar[0]).strip().lower()
+                        exp = expected_summary.get(akey)
+                        if exp is None:
                             continue
                         artist_match_count += 1
-                        all_ok = True
-                        for ci in range(min(len(gr), len(ar))):
-                            gv, av = gr[ci], ar[ci]
-                            if gv is None:
-                                continue
-                            if isinstance(gv, (int, float)):
-                                if not num_close(av, gv, max(abs(gv) * 0.10, 1.0)):
-                                    all_ok = False
-                                    break
-                            else:
-                                if not str_match(av, gv):
-                                    all_ok = False
-                                    break
-                        if all_ok:
+                        try:
+                            cnt_ok = abs(float(ar[1]) - exp[0]) < 0.5
+                            dur_ok = abs(float(ar[2]) - exp[1]) <= max(exp[1] * 0.10, 2.0)
+                        except (TypeError, ValueError, IndexError):
+                            cnt_ok = dur_ok = False
+                        if cnt_ok and dur_ok:
                             artist_value_match += 1
-                    artist_threshold = max(int(len(gt_rows) * 0.8), 4)
-                    record(f"GT '{gt_sname}' >= {artist_threshold}/{len(gt_rows)} artists present in agent",
-                           artist_match_count >= artist_threshold,
-                           f"matched {artist_match_count}/{len(gt_rows)}")
+                    # threshold relative to the AGENT's own sheet size
+                    n_agent_artists = max(len([r for r in a_rows if r and r[0] is not None]), 1)
+                    artist_threshold = max(int(n_agent_artists * 0.8), 4)
+                    record(f"GT '{gt_sname}' >= {artist_threshold} artists present in agent",
+                           artist_match_count >= min(artist_threshold, n_agent_artists),
+                           f"matched {artist_match_count}/{n_agent_artists}")
                     record(f"GT '{gt_sname}' matched artist rows have correct values (>= 80%)",
-                           artist_value_match >= artist_threshold,
-                           f"value-match {artist_value_match}/{len(gt_rows)}")
+                           artist_value_match >= min(artist_threshold, n_agent_artists),
+                           f"value-match {artist_value_match}/{n_agent_artists}")
             gt_wb.close()
 
     except Exception as e:

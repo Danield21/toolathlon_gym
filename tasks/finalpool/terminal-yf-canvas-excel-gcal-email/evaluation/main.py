@@ -13,9 +13,29 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import openpyxl
 import psycopg2
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `w[2].date()` / `w[2].weekday()` on rows read from
+# `gcal.events`: psycopg2 returns them in the PG session `TimeZone`
+# (case-study: compute node default was Asia/Shanghai, shifting the
+# wall-clock date). Use `utils.evaluation.gcal_helpers` instead
+# (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 7: "three workshops, each 90 minutes long, at 2:00 PM" (yf +
+# canvas, Eastern Time).
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+
+# Evaluator runs as `python -m tasks.finalpool.<task>.evaluation.main` with
+# cwd = /workspace (toolathlon_gym root), so `utils/` is importable directly.
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 # All DB settings come from environment variables with local defaults so the
 # evaluator connects to the same database the agent used (the harness injects
@@ -446,18 +466,27 @@ def check_calendar():
             # Check workshops are on weekdays
             for w in workshops:
                 if w[2]:
-                    dt = w[2]
-                    check(f"'{w[0]}' on weekday", dt.weekday() < 5,
-                          f"Day: {dt.strftime('%A')}")
+                    # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant).
+                    # Extract components in EXPECTED_TIMEZONE so the weekday /
+                    # wall-clock date is session-tz-independent (case-study
+                    # 2026-08-13). Bare w[2].weekday() / w[2].date() silently
+                    # compares against the PG session tz.
+                    ev_date, ev_hour, ev_minute = get_zone_components(
+                        w[2], EXPECTED_TIMEZONE)
+                    if ev_date is not None:
+                        check(f"'{w[0]}' on weekday", ev_date.weekday() < 5,
+                              f"Day: {ev_date.strftime('%A')}")
 
             # Check no two workshops on same day
             dates = set()
             for w in workshops:
                 if w[2]:
-                    d = w[2].date()
-                    check(f"'{w[0]}' unique date", d not in dates,
-                          f"Duplicate: {d}")
-                    dates.add(d)
+                    ev_date, _ev_hour, _ev_minute = get_zone_components(
+                        w[2], EXPECTED_TIMEZONE)
+                    if ev_date is not None:
+                        check(f"'{w[0]}' unique date", ev_date not in dates,
+                              f"Duplicate: {ev_date}")
+                        dates.add(ev_date)
 
         cur.close()
         conn.close()

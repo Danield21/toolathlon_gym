@@ -21,3 +21,5 @@ Publish the Category_Summary data to the shared spreadsheet system so the team c
 Schedule a restock review meeting on the shared calendar for March 11, 2026 at 10:00 AM lasting one hour. The event summary should be "Inventory Restock Review Meeting" and the description should mention the number of critical items identified.
 
 Send an email to purchasing@company.com with the subject "Critical Inventory Alert - Restock Required" summarizing the number of out-of-stock and critical products, along with the top three most urgent items that need immediate restocking.
+Note: Use the America/New_York timezone for all calendar events in this task.
+
