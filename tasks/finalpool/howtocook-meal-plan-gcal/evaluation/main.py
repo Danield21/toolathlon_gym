@@ -13,9 +13,19 @@ import sys
 
 import psycopg2
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ; bare start_dt.hour / .date()
+# silently compares wrong in non-UTC PG sessions. Use gcal_helpers.
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 7: "Set the timezone to America/New_York"
+EXPECTED_TIMEZONE = "America/New_York"
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -49,8 +59,11 @@ def check_gcal_events(cur):
         dinner_count = 0
         for _, summary, start_dt, end_dt in events:
             if start_dt:
-                if hasattr(start_dt, 'date'):
-                    days.add(start_dt.date())
+                # gcal.events.start_datetime is TIMESTAMPTZ; use session-tz-
+                # independent helper to extract ET date.
+                ev_date, _h, _m = get_zone_components(start_dt, EXPECTED_TIMEZONE)
+                if ev_date is not None:
+                    days.add(ev_date)
                 else:
                     days.add(str(start_dt)[:10])
             if start_dt and end_dt:
@@ -60,17 +73,20 @@ def check_gcal_events(cur):
                         bad_durations += 1
                 except Exception:
                     pass
-            # Hour buckets: breakfast 7AM, lunch 11:30AM, dinner 6PM (any TZ form)
-            if start_dt and hasattr(start_dt, 'hour'):
-                h = start_dt.hour
-                # Accept UTC offset variations. America/New_York is -5 (EST) or -4 (EDT)
-                # local 7AM -> 11 or 12 UTC; local 11:30 -> 15:30 or 16:30; local 18:00 -> 22 or 23 UTC
-                if h in (7, 11, 12) or h == 7:
-                    breakfast_count += 1
-                elif h == 11 or h in (15, 16):
-                    lunch_count += 1
-                elif h in (18, 22, 23):
-                    dinner_count += 1
+            # Hour buckets in ET: breakfast 7AM, lunch 11:30AM, dinner 6PM.
+            if start_dt:
+                ev_date, ev_hour, ev_minute = get_zone_components(
+                    start_dt, EXPECTED_TIMEZONE
+                )
+                if ev_hour is not None:
+                    h = ev_hour
+                    # ET wall-clock hours: 7 (breakfast), 11 (lunch), 18 (dinner)
+                    if h == 7:
+                        breakfast_count += 1
+                    elif h == 11:
+                        lunch_count += 1
+                    elif h == 18:
+                        dinner_count += 1
         if len(days) < 7:
             errors.append(f"Events span {len(days)} days, expected at least 7")
         if bad_durations > 2:

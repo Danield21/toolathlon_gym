@@ -11,12 +11,32 @@ import os
 import sys
 import re
 from argparse import ArgumentParser
+from zoneinfo import ZoneInfo
 
 import psycopg2
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `start.hour` / `end.hour` on rows read from `gcal.events`:
+# psycopg2 returns them in the PG session `TimeZone` (case-study: compute
+# node default was Asia/Shanghai, masking the intended local hour). Use
+# `utils.evaluation.gcal_helpers` instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 1: "Qufu, the birthplace of Confucius"; line 9 train times
+# from Beijing/Qufu are China local (Asia/Shanghai). Cultural visit also
+# China local ("starting at 09:00 and ending at 17:00").
+EXPECTED_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+# Evaluator runs as `python -m tasks.finalpool.<task>.evaluation.main` with
+# cwd = /workspace (toolathlon_gym root), so `utils/` is importable directly.
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -200,8 +220,14 @@ def check_gcal():
 
         if outbound is not None:
             start = outbound[1]
+            # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant). Extract
+            # the hour in EXPECTED_TIMEZONE so the wall-clock comparison is
+            # session-tz-independent (case-study 2026-08-13). Bare start.hour
+            # silently compares against the PG session tz.
+            _ev_date, ev_hour, _ev_minute = get_zone_components(
+                start, EXPECTED_TIMEZONE) if start is not None else (None, None, None)
             # Task says 'evening' — accept 17:00-19:59 (covers G235 17:30 and other evening trains)
-            ok_time = start is not None and 17 <= start.hour <= 19
+            ok_time = ev_hour is not None and 17 <= ev_hour <= 19
             record("Outbound event starts in evening (17:00-19:59)",
                    ok_time, f"start: {start}")
 
@@ -225,9 +251,16 @@ def check_gcal():
         if cultural is not None:
             start = cultural[1]
             end = cultural[2]
+            # gcal.events.start_datetime/end_datetime are TIMESTAMPTZ (UTC
+            # instants). Extract hours in EXPECTED_TIMEZONE so wall-clock
+            # comparisons are session-tz-independent (case-study 2026-08-13).
             # Task: starts 09:00, ends 17:00
-            ok_start = start is not None and start.hour == 9
-            ok_end = end is not None and end.hour == 17
+            _cs_date, cs_hour, _cs_minute = get_zone_components(
+                start, EXPECTED_TIMEZONE) if start is not None else (None, None, None)
+            _ce_date, ce_hour, _ce_minute = get_zone_components(
+                end, EXPECTED_TIMEZONE) if end is not None else (None, None, None)
+            ok_start = cs_hour is not None and cs_hour == 9
+            ok_end = ce_hour is not None and ce_hour == 17
             record("Cultural visit starts at 09:00", ok_start, f"start: {start}")
             record("Cultural visit ends at 17:00", ok_end, f"end: {end}")
 
@@ -256,8 +289,13 @@ def check_gcal():
 
         if return_ev is not None:
             start = return_ev[1]
+            # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant). Extract
+            # the hour in EXPECTED_TIMEZONE so the wall-clock comparison is
+            # session-tz-independent (case-study 2026-08-13).
+            _ev_date, ev_hour, _ev_minute = get_zone_components(
+                start, EXPECTED_TIMEZONE) if start is not None else (None, None, None)
             # Task says "afternoon (12:00-18:00)"; accept any hour in that window.
-            ok_time = start is not None and 12 <= start.hour < 18
+            ok_time = ev_hour is not None and 12 <= ev_hour < 18
             record("Return event starts in afternoon window 12:00-17:59",
                    ok_time, f"start: {start}")
 

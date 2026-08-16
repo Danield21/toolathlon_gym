@@ -14,7 +14,7 @@ import openpyxl
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -45,9 +45,9 @@ EXPECTED_COURSES = [
         "Course_Name": "Creative Computing & Culture",
         "Enrollment": 2498,
         "Avg_Score": 70.22,
-        "Assignment_Count": 10,
+        "Assignment_Count": 6,
         "Quiz_Count": 4,
-        "Total_Assessments": 14,
+        "Total_Assessments": 10,
     },
     {
         "Course_Code": "DDD-2014J",
@@ -72,18 +72,18 @@ EXPECTED_COURSES = [
         "Course_Name": "Foundations of Finance",
         "Enrollment": 2365,
         "Avg_Score": 76.51,
-        "Assignment_Count": 13,
+        "Assignment_Count": 6,
         "Quiz_Count": 7,
-        "Total_Assessments": 20,
+        "Total_Assessments": 13,
     },
     {
         "Course_Code": "GGG-2014J",
         "Course_Name": "Global Governance & Geopolitics",
         "Enrollment": 749,
         "Avg_Score": 76.60,
-        "Assignment_Count": 10,
+        "Assignment_Count": 4,
         "Quiz_Count": 6,
-        "Total_Assessments": 16,
+        "Total_Assessments": 10,
     },
 ]
 
@@ -214,7 +214,12 @@ def load_expected_courses_from_db():
                        WHERE a.course_id = c.id AND s.score IS NOT NULL
                        GROUP BY s.user_id
                    ) u) as avg_score,
-                   (SELECT COUNT(*) FROM canvas.assignments a WHERE a.course_id = c.id) as assignment_count,
+                   (SELECT COUNT(*) FROM canvas.assignments a
+                    WHERE a.course_id = c.id
+                      AND NOT EXISTS (
+                        SELECT 1 FROM canvas.quizzes q
+                        WHERE q.course_id = a.course_id AND q.assignment_id = a.id
+                      )) as assignment_count,
                    (SELECT COUNT(*) FROM canvas.quizzes q WHERE q.course_id = c.id) as quiz_count
             FROM canvas.courses c
             WHERE c.course_code LIKE '%%2014J%%'
@@ -318,6 +323,22 @@ def check_excel(agent_workspace):
         expected_list = db_courses
         print(f"  Using DB-derived expected data for {len(db_courses)} courses")
 
+    # Self-consistency guard: Assignment_Count + Quiz_Count must equal
+    # Total_Assessments for each expected course. If this invariant is
+    # violated on the GT side (hardcoded or DB-derived), the whole check is
+    # invalid, so fail loudly rather than silently mis-scoring the agent.
+    for exp in expected_list:
+        a, q, t = exp["Assignment_Count"], exp["Quiz_Count"], exp["Total_Assessments"]
+        if a + q != t:
+            errors.append(
+                f"GT self-consistency FAIL for {exp['Course_Code']}: "
+                f"Assignment_Count({a}) + Quiz_Count({q}) = {a + q} != "
+                f"Total_Assessments({t}). Rebuild GT with "
+                f"files/generate_groundtruth.py."
+            )
+    if errors:
+        return False, errors
+
     # Check each course
     for expected in expected_list:
         code = expected["Course_Code"]
@@ -358,6 +379,28 @@ def check_excel(agent_workspace):
                         errors.append(
                             f"{code}: Quiz_Count {quiz_count} differs from expected {expected['Quiz_Count']} (tolerance 1)"
                         )
+
+                # Check Total_Assessments against expected, and require
+                # Total_Assessments == Assignment_Count + Quiz_Count for the
+                # agent's own submitted values (tolerance 1 on the total).
+                if "Total_Assessments" in col_map:
+                    total_cell = row[col_map["Total_Assessments"]]
+                    if total_cell is not None:
+                        total_val = int(total_cell)
+                        if abs(total_val - expected["Total_Assessments"]) > 1:
+                            errors.append(
+                                f"{code}: Total_Assessments {total_val} differs from "
+                                f"expected {expected['Total_Assessments']} (tolerance 1)"
+                            )
+                        if assign_count is not None and quiz_count is not None:
+                            submitted_sum = int(assign_count) + int(quiz_count)
+                            if total_val != submitted_sum:
+                                errors.append(
+                                    f"{code}: self-consistency FAIL — "
+                                    f"Total_Assessments({total_val}) != "
+                                    f"Assignment_Count({assign_count}) + "
+                                    f"Quiz_Count({quiz_count}) = {submitted_sum}"
+                                )
 
                 break
 

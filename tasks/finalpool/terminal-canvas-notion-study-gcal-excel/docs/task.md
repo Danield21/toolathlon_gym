@@ -19,3 +19,5 @@ The first sheet should be named Course_Analysis and contain columns Course_Name,
 The second sheet should be named Weekly_Schedule and contain columns Day, Time, Course, Duration_Hours, and Session_Type. Include one row for each calendar event you created, showing Monday through Friday with the corresponding course study session details.
 
 The third sheet should be named Priority_Matrix and contain columns Priority_Level, Course_Count, Total_Weekly_Hours, and Avg_Hours_Per_Course. Include one row each for High, Medium, and Low priority levels summarizing the courses in each category.
+Note: Use the America/New_York timezone for all calendar events in this task.
+

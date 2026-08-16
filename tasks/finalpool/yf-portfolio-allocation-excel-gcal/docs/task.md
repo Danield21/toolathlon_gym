@@ -11,3 +11,5 @@ Schedule a shared calendar event called "Portfolio Rebalancing" on April 30, 202
 Send an email to portfolio_manager@wealth.com with subject "Portfolio Allocation Plan - April 2026" summarizing the allocation strategy and the key metrics from the Allocation Summary sheet.
 
 When you are finished, call claim_done.
+Note: Use the America/New_York timezone for all calendar events in this task.
+

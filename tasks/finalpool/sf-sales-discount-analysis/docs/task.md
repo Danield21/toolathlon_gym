@@ -8,6 +8,6 @@ Note: the warehouse currently has no orders with a discount above 0.20, so the "
 
 Create an Excel file called Sales_Discount_Report.xlsx with two sheets. The "Discount Analysis" should have Discount_Band, Orders count, Revenue rounded to 2 decimals, and Avg_Order_Value rounded to 2 decimals. Sort alphabetically by band name.
 
-The "Summary" should have Total_Orders, Total_Revenue, No_Discount_Revenue, and Discounted_Revenue.
+The "Summary" should have Total_Orders, Total_Revenue, No_Discount_Revenue, and Discounted_Revenue. Include a header row with columns `Metric` and `Value`, with one data row per metric below it.
 
 Send an email to finance@company.com with subject "Discount Impact Analysis" summarizing the findings.

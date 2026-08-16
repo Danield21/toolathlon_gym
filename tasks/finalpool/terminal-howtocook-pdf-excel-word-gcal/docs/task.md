@@ -15,3 +15,5 @@ The third sheet should be called Budget_Overview with columns Category, Cost_Per
 Create a Word document called Meal_Plan_Report.docx in the workspace. The report should have a title about the campus food festival, a section describing the event parameters (50 guests per day, 5 days, 20000 yuan budget), a section listing each selected recipe with its category and key ingredients, a budget analysis section showing the total costs and confirming the plan is within budget, and a section with preparation recommendations.
 
 Finally, create five calendar events, one for each day from Monday March 9 through Friday March 13, 2026. Each event should be titled "Food Festival Prep - Day N" (where N is 1 through 5), scheduled from 7:00 AM to 10:00 AM, and include a description listing the five recipes being prepared that day.
+Note: Use the America/New_York timezone for all calendar events in this task.
+

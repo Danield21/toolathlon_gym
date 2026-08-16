@@ -9,7 +9,7 @@ import psycopg2
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -293,8 +293,14 @@ def check_email(expected_total, risk_keywords):
                   len(body) > 100, f"len={len(body)}")
             # Body should contain exact at-risk count.
             if expected_total:
+                # Tolerate thousand-separator variants: "2,297" / "2 297" / "2297"
+                # all represent the same number. Normalize the body by stripping
+                # commas and spaces before the literal count check (B.1.5 pattern:
+                # evaluator assumption too strict; task.md does not mandate a
+                # specific number format).
+                body_normalized = body.replace(",", "").replace(" ", "")
                 check(f"Email body mentions exact at-risk count {expected_total}",
-                      str(expected_total) in body,
+                      str(expected_total) in body_normalized,
                       f"body sample: {body[:200]}")
             # Body mentions courses with high at-risk counts: require >= 2 of the
             # top-N at-risk course keywords derived from the database (so the check

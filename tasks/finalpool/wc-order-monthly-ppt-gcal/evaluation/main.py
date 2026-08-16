@@ -12,7 +12,7 @@ def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -60,13 +60,20 @@ def check_ppt(agent_workspace):
         slide_count = len(prs.slides)
         check("PPT has exactly 5 slides", slide_count == 5, f"Found {slide_count} slides (expected 5)")
 
-        # Extract all text from all slides
+        # Extract all text from all slides. Include table cells: the monthly
+        # breakdown table on slide 2 carries the month names, and text_frame
+        # traversal alone misses them (c4 case-study 2026-08-15: 9/12 months
+        # found → false FAIL "missing months").
         all_text = ""
         for slide in prs.slides:
             for shape in slide.shapes:
                 if shape.has_text_frame:
                     for para in shape.text_frame.paragraphs:
                         all_text += para.text.lower() + " "
+                if getattr(shape, "has_table", False):
+                    for row in shape.table.rows:
+                        for cell in row.cells:
+                            all_text += cell.text.lower() + " "
 
         check("PPT contains title 'Monthly Sales'",
               "monthly sales" in all_text,

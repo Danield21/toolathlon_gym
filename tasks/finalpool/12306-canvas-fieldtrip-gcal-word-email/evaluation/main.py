@@ -17,10 +17,25 @@ import sys
 from argparse import ArgumentParser
 
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md line 1: field trip by high-speed rail from
+# "Beijing" to "Qufu" on March 12/15, 2026 (China rail, CN wall-clock). The
+# Calendar MCP writes events as UTC instants into the DB (TIMESTAMPTZ), so all
+# comparisons anchor to Asia/Shanghai. Never use bare `st.hour` / `st.minute`
+# on rows read from `gcal.events`: psycopg2 returns them in the PG session
+# TimeZone (case-study: compute node default was Asia/Shanghai, masking the CN
+# wall-clock in other sessions). Use `utils.evaluation.gcal_helpers` instead
+# (session-tz-independent, DST-aware).
+# ──────────────────────────────────────────────────────────────────────────
+EXPECTED_TIMEZONE = ZoneInfo("Asia/Shanghai")
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -146,11 +161,15 @@ def check_gcal():
         title_ok = ("field trip" in sl) and ("depart" in sl or "outbound" in sl or "qufu" in sl)
         if not title_ok:
             continue
-        try:
-            start_min = st.hour * 60 + st.minute
-            end_min = et.hour * 60 + et.minute
-        except Exception:
+        # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant). Use the
+        # session-tz-independent helper to extract CN wall-clock components.
+        # Bare st.hour / st.minute silently compares against the PG session tz.
+        _, st_h, st_m = get_zone_components(st, EXPECTED_TIMEZONE)
+        _, et_h, et_m = get_zone_components(et, EXPECTED_TIMEZONE)
+        if st_h is None or et_h is None:
             continue
+        start_min = st_h * 60 + st_m
+        end_min = et_h * 60 + et_m
         # Dep 17:30 (1050), 1 hr before = 16:30 (990).
         # Arr 19:16 (1156), 1 hr after = 20:16 (1216).
         if start_min <= 990 + 15 and end_min >= 1216 - 15:
@@ -172,11 +191,13 @@ def check_gcal():
         title_ok = ("field trip" in sl) and ("return" in sl or "back" in sl or "beijing" in sl)
         if not title_ok:
             continue
-        try:
-            start_min = st.hour * 60 + st.minute
-            end_min = et.hour * 60 + et.minute
-        except Exception:
+        # Same TIMESTAMPTZ fix as the depart loop above.
+        _, st_h, st_m = get_zone_components(st, EXPECTED_TIMEZONE)
+        _, et_h, et_m = get_zone_components(et, EXPECTED_TIMEZONE)
+        if st_h is None or et_h is None:
             continue
+        start_min = st_h * 60 + st_m
+        end_min = et_h * 60 + et_m
         # Dep 15:00 (900), 1 hr before = 14:00 (840).
         # Arr 16:46 (1006), 1 hr after = 17:46 (1066).
         if start_min <= 840 + 15 and end_min >= 1066 - 15:

@@ -5,7 +5,17 @@ import sys
 
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ; bare r[2].hour silently compares
+# wrong in non-UTC PG sessions. Use gcal_helpers.
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 19: "March 28, 2026 from 09:00 to 10:30" → SF company PT
+EXPECTED_TIMEZONE = "America/Los_Angeles"
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
+DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")),
           dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
           user="eigent", password="camel")
 
@@ -89,15 +99,12 @@ def check_gcal():
             for r in rows:
                 sum_lower = (r[0] or "").lower()
                 if ("territory" in sum_lower or "review" in sum_lower or "executive" in sum_lower):
-                    # Verify 09:00-10:30 window (tolerant of TZ)
-                    try:
-                        sh = r[2].hour
-                        eh = r[3].hour
-                        em = r[3].minute
-                        if sh == 9 and eh == 10 and em == 30:
-                            matched = True
-                            break
-                    except Exception:
+                    # Verify 09:00-10:30 window in PT (session-tz-independent).
+                    # gcal.events.start_datetime is TIMESTAMPTZ; r[2] is psycopg2
+                    # datetime in session tz — use helper to extract PT components.
+                    _sd, sh = get_zone_components(r[2], EXPECTED_TIMEZONE)[:2]
+                    _sd2, eh, em = get_zone_components(r[3], EXPECTED_TIMEZONE)
+                    if sh == 9 and eh == 10 and em == 30:
                         matched = True
                         break
             if not matched:

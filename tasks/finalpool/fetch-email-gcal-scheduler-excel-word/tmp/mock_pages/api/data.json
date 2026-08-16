@@ -1,13 +1,15 @@
 {
-  "data": [
-    {
-      "key": "A",
-      "value": 100
-    },
-    {
-      "key": "B",
-      "value": 200
-    }
-  ],
+  "external_benchmarks": {
+    "dimension": "department",
+    "metric": "Email Scheduling Efficiency Index",
+    "departments": [
+      {"name": "Customer Support", "benchmark": 100},
+      {"name": "Finance", "benchmark": 100},
+      {"name": "Human Resources", "benchmark": 100},
+      {"name": "Marketing", "benchmark": 100},
+      {"name": "Operations", "benchmark": 100},
+      {"name": "Sales", "benchmark": 100}
+    ]
+  },
   "source": "Generic API"
 }

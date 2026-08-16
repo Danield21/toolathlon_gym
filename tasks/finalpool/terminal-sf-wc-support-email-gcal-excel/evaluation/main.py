@@ -2,9 +2,25 @@
 import os
 import argparse, json, os, sys
 import openpyxl
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# task.md (SF company) schedules calendar events in Pacific Time: line 17
+# "Quality Review Meeting on March 19, 2026 from 10:00 to 11:30" and
+# "Quality Improvement Planning session on March 21, 2026 from 14:00 to 16:00".
+# gcal.events.start_datetime is a TIMESTAMPTZ UTC instant; never use bare
+# ev[2].hour on rows read from gcal.events — psycopg2 returns them in the PG
+# session TimeZone (case-study: compute node default was Asia/Shanghai,
+# shifting the hour). Use utils.evaluation.gcal_helpers instead
+# (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+EXPECTED_TIMEZONE = ZoneInfo("America/Los_Angeles")
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -290,9 +306,11 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                   f"got {start_str}")
             try:
                 if ev[2] and ev[3]:
+                    # task.md: 10:00 PT. get_zone_components is session-tz-safe.
+                    ev_hour = get_zone_components(ev[2], EXPECTED_TIMEZONE)[1]
                     check("Review Meeting starts at 10:00",
-                          ev[2].hour == 10,
-                          f"got {ev[2].hour}:00")
+                          ev_hour == 10,
+                          f"got {ev_hour}:00")
                     duration_min = (ev[3] - ev[2]).total_seconds() / 60
                     check("Review Meeting 90 minutes (10:00-11:30)",
                           85 <= duration_min <= 95,
@@ -310,9 +328,11 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                   f"got {start_str}")
             try:
                 if ev[2] and ev[3]:
+                    # task.md: 14:00 PT. get_zone_components is session-tz-safe.
+                    ev_hour = get_zone_components(ev[2], EXPECTED_TIMEZONE)[1]
                     check("Planning event starts at 14:00",
-                          ev[2].hour == 14,
-                          f"got {ev[2].hour}:00")
+                          ev_hour == 14,
+                          f"got {ev_hour}:00")
                     duration_min = (ev[3] - ev[2]).total_seconds() / 60
                     check("Planning event 120 minutes (14:00-16:00)",
                           115 <= duration_min <= 125,

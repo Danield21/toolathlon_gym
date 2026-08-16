@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym", user="eigent", password="camel")
+DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym", user="eigent", password="camel")
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -82,14 +82,67 @@ def check_ppt(agent_workspace):
     missing_cats = [c for c in expected_cats if _norm_cat(c) not in full_text_norm]
     check("PPT mentions all 6 category names",
           len(missing_cats) == 0, f"Missing: {missing_cats}")
-    # Require specific best/worst category names with exact ratings
-    # (Headphones best at 4.78, Speakers worst at 4.43)
-    check("PPT identifies Headphones as best category (4.78)",
-          "headphones" in full_text_norm and "4.78" in full_text_norm,
-          "Headphones rating 4.78 not found")
-    check("PPT identifies Speakers as worst category (4.43)",
-          "speakers" in full_text_norm and "4.43" in full_text_norm,
-          "Speakers rating 4.43 not found")
+    # Require specific best/worst category names with exact ratings.
+    # The old constants (Headphones 4.78 / Speakers 4.43) drifted from the seed
+    # data: recomputing from wc.product_reviews JOIN wc.products shows TV & Home
+    # Theater = 4.78 best and Speakers = 4.39 worst (c4 case-study 2026-08-15).
+    # Compute the ratings from the DB so GT can never go stale again
+    # (〔拍板 B.1.5〕evaluator-data-side precedent).
+    best_cat = best_rating = worst_cat = worst_rating = None
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        cur.execute("""
+            WITH per_review AS (
+                SELECT
+                       -- categories is a JSON array of {id, name} objects from
+                       -- coarse to fine. The LAST element is the finest
+                       -- sub-category (Headphones, Speakers, TV & Home
+                       -- Theater, ...). Verified against the seed dump:
+                       -- best = TV & Home Theater 4.78 (n=63),
+                       -- worst = Speakers 4.39 (n=28).
+                       (p.categories::jsonb -> -1) ->> 'name' AS subcat,
+                       r.rating
+                FROM wc.product_reviews r
+                JOIN wc.products p ON p.id = r.product_id
+                WHERE r.status = 'approved'
+            )
+            SELECT subcat, ROUND(AVG(rating)::numeric, 2) AS avg_rating, COUNT(*) AS n
+            FROM per_review
+            WHERE subcat IS NOT NULL
+            GROUP BY subcat
+            ORDER BY avg_rating DESC
+        """)
+        agg = cur.fetchall()
+        cur.close()
+        conn.close()
+        if agg:
+            best_cat, best_rating, _ = agg[0]
+            worst_cat, worst_rating, _ = agg[-1]
+    except Exception as e:
+        print(f"  [warn] could not compute category ratings from DB: {e}")
+
+    def _fmt_rating(v):
+        return f"{float(v):.2f}" if v is not None else None
+
+    if best_cat and worst_cat:
+        check(f"PPT identifies {best_cat} as best category ({_fmt_rating(best_rating)})",
+              _norm_cat(best_cat) in full_text_norm
+              and _fmt_rating(best_rating) in full_text_norm,
+              f"{best_cat} rating {_fmt_rating(best_rating)} not found")
+        check(f"PPT identifies {worst_cat} as worst category ({_fmt_rating(worst_rating)})",
+              _norm_cat(worst_cat) in full_text_norm
+              and _fmt_rating(worst_rating) in full_text_norm,
+              f"{worst_cat} rating {_fmt_rating(worst_rating)} not found")
+    else:
+        # DB unavailable: fall back to the (documented-stale) constants so the
+        # remaining checks still produce signal instead of hard-crashing.
+        check("PPT identifies Headphones as best category (4.78)",
+              "headphones" in full_text_norm and "4.78" in full_text_norm,
+              "Headphones rating 4.78 not found")
+        check("PPT identifies Speakers as worst category (4.43)",
+              "speakers" in full_text_norm and "4.43" in full_text_norm,
+              "Speakers rating 4.43 not found")
     check("PPT mentions top/best reviewed section",
           "best" in full_text or "top" in full_text or "highest" in full_text,
           "No best-products section found")

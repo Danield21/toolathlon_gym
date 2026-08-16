@@ -251,14 +251,16 @@ def _structural_xlsx_check(agent_xlsx_path, gt_xlsx_path, label, expected_keywor
 
     gt_rows = total_nonempty_rows(gt_wb_f)
     a_rows = total_nonempty_rows(a_wb_f)
-    # Allow agent to produce between ~an eighth and ~triple the GT row count.
-    # Floor of 2 so a compact-but-complete deliverable (title + header + one
-    # data row) still clears the row check; substance is enforced by the
-    # keyword-coverage and numeric-overlap checks below.
+    # Only enforce a LOWER bound on substance (audit §B.1.5 / §A.11): a more
+    # complete / verbose deliverable must not be penalised for having more
+    # rows than the GT. Floor of 2 so a compact-but-complete deliverable
+    # (title + header + one data row) still clears the check; actual content
+    # correctness is enforced by the keyword-coverage and numeric-overlap
+    # checks below. The previous upper bound hi=max(gt*3, gt+10) falsely
+    # failed legitimate, fuller implementations.
     lo = max(2, gt_rows // 8)
-    hi = max(gt_rows * 3, gt_rows + 10)
-    record(f"xlsx {fname} row count in tolerant range [{lo}, {hi}] (GT={gt_rows})",
-           lo <= a_rows <= hi, f"agent_rows={a_rows}")
+    record(f"xlsx {fname} row count >= lower bound {lo} (GT={gt_rows})",
+           a_rows >= lo, f"agent_rows={a_rows}")
 
     # Keyword coverage check
     a_texts = _collect_text_cells(a_wb_f)

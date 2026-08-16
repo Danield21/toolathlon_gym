@@ -4,6 +4,26 @@ import re
 import sys
 import argparse
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime / end_datetime are TIMESTAMPTZ storing the UTC
+# instant. psycopg2 returns a tz-aware datetime whose display tz follows the
+# PG session TimeZone (case-study: compute node default Asia/Shanghai), so
+# bare sd.hour / sd.date() / strftime('%H:%M') silently compares against the
+# wrong wall-clock. Use utils.evaluation.gcal_helpers (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 7: "Portfolio Review Meeting" on April 10, 2026 from 14:00 to
+# 15:30 (NYSE / financial context → America/New_York / ET).
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+EXPECTED_REVIEW_DATE = "2026-04-10"
+EXPECTED_REVIEW_START_HOUR = 14
+EXPECTED_REVIEW_START_MINUTE = 0
+EXPECTED_REVIEW_END_HOUR = 15
+EXPECTED_REVIEW_END_MINUTE = 30
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
@@ -201,7 +221,8 @@ def check_gcal_event():
         cur.execute("""
             SELECT summary, description, start_datetime, end_datetime
             FROM gcal.events
-            WHERE start_datetime::date = '2026-04-10'
+            WHERE start_datetime >= TIMESTAMPTZ '2026-04-09T00:00:00Z'
+              AND start_datetime <  TIMESTAMPTZ '2026-04-12T00:00:00Z'
             ORDER BY start_datetime
         """)
         rows = cur.fetchall()
@@ -229,14 +250,25 @@ def check_gcal_event():
         return
 
     summary, desc, sdt, edt = matched[0]
-    # Time check: 14:00 to 15:30 (90 minutes)
-    try:
-        s_str = sdt.strftime("%H:%M") if hasattr(sdt, "strftime") else str(sdt)[11:16]
-        e_str = edt.strftime("%H:%M") if hasattr(edt, "strftime") else str(edt)[11:16]
-    except Exception:
-        s_str, e_str = "", ""
-    ok_time = s_str == "14:00" and e_str == "15:30"
-    record("GCal event time 14:00-15:30", ok_time, f"start={s_str} end={e_str}")
+    # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant). strftime('%H:%M')
+    # / str(sdt)[:10] would render the PG session-tz wall-clock (case-study:
+    # Asia/Shanghai), so compare via the session-tz-independent helper anchored
+    # to task.md's ET (NYSE hours).
+    ok_time = False
+    if sdt is not None:
+        sd_date, sd_hour, sd_minute = get_zone_components(sdt, EXPECTED_TIMEZONE)
+        ed_hour = ed_minute = None
+        if edt is not None:
+            _, ed_hour, ed_minute = get_zone_components(edt, EXPECTED_TIMEZONE)
+        ok_time = (
+            sd_date is not None
+            and sd_date.isoformat() == EXPECTED_REVIEW_DATE
+            and sd_hour == EXPECTED_REVIEW_START_HOUR
+            and sd_minute == EXPECTED_REVIEW_START_MINUTE
+            and ed_hour == EXPECTED_REVIEW_END_HOUR
+            and ed_minute == EXPECTED_REVIEW_END_MINUTE
+        )
+    record("GCal event time 14:00-15:30", ok_time, f"start={sdt} end={edt}")
 
     desc_lower = (desc or "").lower()
     summary_lower = (summary or "").lower()

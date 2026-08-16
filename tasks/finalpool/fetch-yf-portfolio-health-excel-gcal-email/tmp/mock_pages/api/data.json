@@ -7,22 +7,22 @@
     },
     {
       "symbol": "AMZN",
-      "target_price": 240.83,
+      "target_price": 229.89,
       "analyst_rating": "Buy"
     },
     {
       "symbol": "JPM",
-      "target_price": 322.91,
+      "target_price": 337.58,
       "analyst_rating": "Buy"
     },
     {
       "symbol": "JNJ",
-      "target_price": 263.59,
+      "target_price": 287.56,
       "analyst_rating": "Hold"
     },
     {
       "symbol": "XOM",
-      "target_price": 165.84,
+      "target_price": 188.45,
       "analyst_rating": "Buy"
     }
   ],

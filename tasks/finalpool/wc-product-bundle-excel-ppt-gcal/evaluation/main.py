@@ -2,13 +2,33 @@
 import argparse
 import os
 import sys
+from zoneinfo import ZoneInfo
 
 import openpyxl
 import psycopg2
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `ev[1].hour` or `str(ev[1])`-date-matching on rows read
+# from `gcal.events`: psycopg2 returns them in the PG session `TimeZone`
+# (case-study: compute node default was Asia/Shanghai, shifting both the
+# wall-clock date and hour). Use `utils.evaluation.gcal_helpers` instead
+# (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 11: "schedule three bundle launch planning meetings ... Each
+# meeting should be 1 hour long starting at 10:00 AM" (ecommerce, ET).
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+
+# Evaluator runs as `python -m tasks.finalpool.<task>.evaluation.main` with
+# cwd = /workspace (toolathlon_gym root), so `utils/` is importable directly.
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -278,17 +298,36 @@ def check_calendar():
             target_dates = {"2026-03-16", "2026-03-18", "2026-03-20"}
             hit_dates = set()
             for ev in events:
-                start_str = str(ev[1]) if ev[1] else ""
-                for td in target_dates:
-                    if td in start_str:
-                        hit_dates.add(td)
+                if ev[1] is None:
+                    continue
+                # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant).
+                # Extract the wall-clock date in EXPECTED_TIMEZONE so date
+                # matching is session-tz-independent (case-study 2026-08-13).
+                # Bare str(ev[1]) matches against the PG session tz.
+                ev_date, _ev_hour, _ev_minute = get_zone_components(
+                    ev[1], EXPECTED_TIMEZONE)
+                if ev_date is not None:
+                    ds = ev_date.strftime("%Y-%m-%d")
+                    if ds in target_dates:
+                        hit_dates.add(ds)
             record("All target dates (March 16, 18, 20) covered",
                    hit_dates == target_dates,
                    f"Hit: {sorted(hit_dates)}, Expected: {sorted(target_dates)}",
                    runtime_only=True)
 
             # Start time check (10:00 per triage)
-            ten_am_count = sum(1 for ev in events if ev[1] and ev[1].hour == 10)
+            ten_am_count = 0
+            for ev in events:
+                if ev[1] is None:
+                    continue
+                # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant).
+                # Extract the hour in EXPECTED_TIMEZONE so the comparison is
+                # session-tz-independent (case-study 2026-08-13). Bare
+                # ev[1].hour silently compares against the PG session tz.
+                _ev_date, ev_hour, _ev_minute = get_zone_components(
+                    ev[1], EXPECTED_TIMEZONE)
+                if ev_hour is not None and ev_hour == 10:
+                    ten_am_count += 1
             record("Events start at 10:00",
                    ten_am_count >= 3,
                    f"{ten_am_count} start at 10:00",

@@ -6,7 +6,8 @@
     "excel",
     "word",
     "google_calendar",
-    "filesystem"
+    "filesystem",
+    "pdf-tools"
   ],
   "needed_local_tools": [
     "claim_done",

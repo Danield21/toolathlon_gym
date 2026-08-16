@@ -8,11 +8,11 @@ import os
 COURSES = [
     ("AAA-2014J", "Applied Analytics & Algorithms", 365, 67.85, 6, 0),
     ("BBB-2014J", "Biochemistry & Bioinformatics", 2292, 64.31, 6, 0),
-    ("CCC-2014J", "Creative Computing & Culture", 2498, 70.22, 10, 4),
+    ("CCC-2014J", "Creative Computing & Culture", 2498, 70.22, 6, 4),
     ("DDD-2014J", "Data-Driven Design", 1803, 69.99, 7, 0),
     ("EEE-2014J", "Environmental Economics & Ethics", 1188, 81.27, 5, 0),
-    ("FFF-2014J", "Foundations of Finance", 2365, 76.51, 13, 7),
-    ("GGG-2014J", "Global Governance & Geopolitics", 749, 76.60, 10, 6),
+    ("FFF-2014J", "Foundations of Finance", 2365, 76.51, 6, 7),
+    ("GGG-2014J", "Global Governance & Geopolitics", 749, 76.60, 4, 6),
 ]
 
 def main():

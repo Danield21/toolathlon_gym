@@ -8,7 +8,7 @@ def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
 
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -159,6 +159,13 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
 
             def fmt_dt(dt):
                 try:
+                    # psycopg2 renders timestamptz in the session TZ
+                    # (Asia/Shanghai): a 10:00Z event prints as 18:00+08.
+                    # Normalize to UTC before comparing wall-clock.
+                    import datetime as _dt
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=_dt.timezone.utc)
+                    dt = dt.astimezone(_dt.timezone.utc)
                     return dt.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
                     return str(dt) if dt else ""
@@ -171,11 +178,43 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                   fmt_dt(end_dt) == "2026-03-14 11:30:00",
                   f"got {fmt_dt(end_dt)}")
 
-            # Description must mention top 3 products with largest price gaps
-            # From GT, those would be the ones in Action_Items: TV 55in, Headphones, Smartphone
+            # Description must mention the top-3 largest-gap products.
+            # Derive the expected keywords from the GT's own Action_Items
+            # (sorted by |Price_Diff| desc) instead of hardcoding old-mock
+            # generic names ("tv"/"headphones"/"smartphone") — the mock is
+            # now product-level and those words no longer appear in any
+            # product name (case-study 2026-08-16 round-3).
             desc_low = (desc or "").lower()
-            for prod_key in ("tv", "headphones", "smartphone"):
-                check(f"Event description mentions '{prod_key}'",
+            gt_ai = []
+            try:
+                gt_wb_ai = openpyxl.load_workbook(
+                    os.path.join(groundtruth_workspace, "Competitive_Pricing_Analysis.xlsx"),
+                    read_only=True)
+                ai_ws = gt_wb_ai["Action_Items"] if "Action_Items" in gt_wb_ai.sheetnames else None
+                pc_ws = gt_wb_ai["Price_Comparison"] if "Price_Comparison" in gt_wb_ai.sheetnames else None
+                diffs = {}
+                if pc_ws:
+                    hdr = [str(c.value).strip().lower() if c.value else "" for c in next(pc_ws.iter_rows(max_row=1))]
+                    if "product_name" in hdr and "price_diff" in hdr:
+                        ni, di = hdr.index("product_name"), hdr.index("price_diff")
+                        for r in pc_ws.iter_rows(min_row=2, values_only=True):
+                            if r and r[ni]:
+                                try:
+                                    diffs[str(r[ni]).strip().lower()] = abs(float(r[di]))
+                                except (TypeError, ValueError):
+                                    pass
+                names = []
+                if ai_ws:
+                    for r in ai_ws.iter_rows(min_row=2, values_only=True):
+                        if r and r[0]:
+                            names.append(str(r[0]).strip().lower())
+                names.sort(key=lambda n: -diffs.get(n, 0))
+                gt_ai = names[:3]
+                gt_wb_ai.close()
+            except Exception:
+                gt_ai = []
+            for prod_key in (gt_ai or ["tv", "headphones", "smartphone"]):
+                check(f"Event description mentions '{prod_key[:40]}'",
                       prod_key in desc_low, f"desc: {desc_low[:200]}")
 
         # Reverse verification: noise events should not match task keyword

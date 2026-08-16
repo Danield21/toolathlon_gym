@@ -10,10 +10,31 @@ import argparse
 import json
 import os
 import sys
+from zoneinfo import ZoneInfo
+
 import psycopg2
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `start_dt.day` / `start_dt.month` on rows read from
+# `gcal.events`: psycopg2 returns them in the PG session `TimeZone`
+# (case-study: compute node default was Asia/Shanghai, shifting the
+# wall-clock date). Use `utils.evaluation.gcal_helpers` instead
+# (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 13: "the week of March 9 to March 13, 2026 between 9 AM and
+# 5 PM Eastern Time" (yf financial, ET).
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+
+# Evaluator runs as `python -m tasks.finalpool.<task>.evaluation.main` with
+# cwd = /workspace (toolathlon_gym root), so `utils/` is importable directly.
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel",
 }
@@ -189,11 +210,17 @@ def check_gcal():
             # Check it's in the March 9-13 week
             start_dt = evt[2]
             if start_dt:
-                day = start_dt.day if hasattr(start_dt, 'day') else None
-                month = start_dt.month if hasattr(start_dt, 'month') else None
-                check("Event in March 9-13 week",
-                      month == 3 and 9 <= day <= 13,
-                      f"Start: {start_dt}")
+                # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant).
+                # Extract components in EXPECTED_TIMEZONE so day/month are
+                # session-tz-independent (case-study 2026-08-13). Bare
+                # start_dt.day / start_dt.month silently compares against
+                # the PG session tz.
+                ev_date, _ev_hour, _ev_minute = get_zone_components(
+                    start_dt, EXPECTED_TIMEZONE)
+                if ev_date is not None:
+                    check("Event in March 9-13 week",
+                          ev_date.month == 3 and 9 <= ev_date.day <= 13,
+                          f"Start: {start_dt}")
 
                 # Check 90-minute duration
                 if evt[3]:

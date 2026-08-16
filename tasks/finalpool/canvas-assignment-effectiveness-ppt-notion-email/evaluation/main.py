@@ -31,6 +31,18 @@ Robustness notes (see NewBenchmark audit T3__canvas-assignment-effectiveness-ppt
   course+assignment, with assignment-name fallback), so multi-agent duplicate writes or extra
   assignments with zero submissions cannot cause false FAILs. Columns are anchored by header
   keywords (with a positional fallback to the documented column layout).
+- Course Summary uses a UNIFIED eligible-assignment set with the Assignment Metrics layer
+  (case-study 2026-08-12, case #15). Previously the summary compared the agent's written
+  Avg_Completion_Rate (computed over whatever rows the agent chose to average, e.g. its full
+  57-row set including 6 extra zero-submission assignments) against a GT summary computed over
+  a 51-row set -- two different eligible sets that cannot be compared. The summary's numeric
+  aggregates (Avg_Completion_Rate, Avg_DI, Good/Acceptable/Poor counts, Total) are now
+  RE-COMPUTED from the agent's own per-assignment Assignment-Metrics rows restricted to the
+  GT-keyed eligible set, then compared to the GT summary. This guarantees both layers reference
+  the same eligible set, so an agent that writes correct per-assignment values also produces a
+  correct summary, and an agent that invents per-assignment values still fails. The agent's
+  literal Course Summary cells are still read for the presence/row-count checks but are no
+  longer the basis of the numeric GT comparison.
 """
 import argparse
 import json
@@ -226,6 +238,38 @@ def _emit_numeric_checks(label, stats, min_checked, missing):
                   f"{s['matched']}/{s['checked']} within tolerance; missing rows: {missing[:3]}")
 
 
+def _recompute_course_summary(rows_for_course, comp_idx, di_idx, eff_idx):
+    """Re-aggregate one course's summary from its per-assignment rows.
+
+    Returns (total, good, acceptable, poor, avg_completion, avg_di). rows_for_course is an
+    iterable of Assignment-Metrics rows (tuples) for a single course. This is used by the
+    Course Summary check so that both the Assignment Metrics layer and the Summary layer
+    aggregate over the SAME eligible-assignment set (case-study 2026-08-12, case #15).
+    """
+    total = 0
+    good = acceptable = poor = 0
+    comps = []
+    dis = []
+    for r in rows_for_course:
+        total += 1
+        eff = str(r[eff_idx]).strip().lower() if eff_idx is not None and len(r) > eff_idx and r[eff_idx] else ""
+        if "good" in eff:
+            good += 1
+        elif "accept" in eff:
+            acceptable += 1
+        elif "poor" in eff:
+            poor += 1
+        cv = _to_float(r[comp_idx]) if comp_idx is not None and len(r) > comp_idx else None
+        if cv is not None:
+            comps.append(cv)
+        dv = _to_float(r[di_idx]) if di_idx is not None and len(r) > di_idx else None
+        if dv is not None:
+            dis.append(dv)
+    avg_comp = round(sum(comps) / len(comps), 1) if comps else None
+    avg_di = round(sum(dis) / len(dis), 3) if dis else None
+    return total, good, acceptable, poor, avg_comp, avg_di
+
+
 # ============================================================
 # Check 1: Excel
 # ============================================================
@@ -268,6 +312,16 @@ def check_excel(agent_workspace, gt_workspace):
 
         # Compare with groundtruth (content-based, tolerant, per-column numeric)
         gt_xlsx = os.path.join(gt_workspace, "Assessment_Effectiveness.xlsx")
+        # Function-scope state shared with the Course Summary check below so BOTH layers
+        # aggregate over the SAME eligible-assignment set (the GT-keyed rows). Without this,
+        # the summary compares the agent's written Avg_Completion_Rate (averaged over whatever
+        # rows the agent happened to include, e.g. extra zero-submission assignments) against a
+        # GT summary computed over a different set -- two non-comparable eligible sets
+        # (case-study 2026-08-12, case #15).
+        gt_rows_by_course = {}
+        agent_gtkeyed_by_course = {}
+        agent_shared_hmap = {}
+        agent_shared_idx = {}
         if os.path.isfile(gt_xlsx):
             gt_wb = openpyxl.load_workbook(gt_xlsx, data_only=False)
             gt_metrics = _find_sheet(gt_wb, "assignment", "metric") or gt_wb[gt_wb.sheetnames[0]]
@@ -277,6 +331,7 @@ def check_excel(agent_workspace, gt_workspace):
             for row in gt_rows[1:]:
                 if len(row) >= 2 and row[0] and row[1]:
                     gt_by_key[(str(row[0]).strip(), str(row[1]).strip())] = row
+                    gt_rows_by_course.setdefault(str(row[0]).strip(), []).append(row)
 
             agent_hmap = _build_header_map(metrics_ws)
             agent_course_idx = _agent_col(agent_hmap, 0, (("course",),))
@@ -300,6 +355,12 @@ def check_excel(agent_workspace, gt_workspace):
             eff_idx = _agent_col(agent_hmap, 8, (("effectiveness",), ("effect",)))
             di_agent_idx = agent_idx_of["Discrimination_Index"]
 
+            # Share the agent header map + column indices with the Course Summary check so it
+            # can re-aggregate the agent's per-assignment rows over the GT-keyed eligible set.
+            agent_shared_hmap.update(agent_hmap)
+            agent_shared_idx.update(agent_idx_of)
+            agent_shared_idx["__eff__"] = eff_idx
+
             stats = {name: {"checked": 0, "matched": 0} for name, _, _ in METRIC_NUMERIC_COLS}
             eff_checked = 0
             eff_matched = 0
@@ -311,6 +372,9 @@ def check_excel(agent_workspace, gt_workspace):
                     missing.append(key)
                     continue
                 checked += 1
+                # Collect the agent rows that match a GT key, grouped by course, so the Course
+                # Summary check can re-aggregate over the SAME eligible set (case-study #15).
+                agent_gtkeyed_by_course.setdefault(str(key[0]).strip(), []).append(agent_row)
                 for name, gt_idx, kwgroups in METRIC_NUMERIC_COLS:
                     use_di = (name == "Discrimination_Index")
                     tol = 0.0 if use_di else COL_TOL[name]
@@ -377,21 +441,30 @@ def check_excel(agent_workspace, gt_workspace):
                       present >= 5,
                       f"{present}/7 course names found")
 
-            # Numeric comparison of the summary values vs GT
-            if os.path.isfile(gt_xlsx):
+            # Numeric comparison of the summary values vs GT.
+            #
+            # CRITICAL (case-study 2026-08-12, case #15): both the Assignment Metrics layer and
+            # this Summary layer MUST aggregate over the SAME eligible-assignment set. We do NOT
+            # compare the agent's literal Course-Summary cells against the GT summary cells,
+            # because the agent may have written its summary over a different row set (e.g. it
+            # included extra zero-submission assignments that GT excludes). Instead we
+            # re-aggregate the agent's OWN per-assignment Assignment-Metrics values, restricted
+            # to the GT-keyed eligible set, and compare the re-aggregated summary to the GT
+            # summary. This way an agent that writes correct per-assignment values also produces
+            # a correct summary, and an agent that fabricates per-assignment values still fails.
+            if os.path.isfile(gt_xlsx) and agent_gtkeyed_by_course:
                 gt_wb3 = openpyxl.load_workbook(gt_xlsx, data_only=False)
                 gt_sum_ws = _find_sheet(gt_wb3, "course", "summary")
                 if gt_sum_ws and len(summary_rows) > 1:
                     gt_sum_rows = _non_empty_rows(gt_sum_ws)[1:]
-                    sum_hmap = _build_header_map(summary_ws)
-                    s_total_idx = _agent_col(sum_hmap, 1, (("total",),))
-                    s_good_idx = _agent_col(sum_hmap, 2, (("good",),))
-                    s_acc_idx = _agent_col(sum_hmap, 3, (("acceptable",), ("accept",)))
-                    s_poor_idx = _agent_col(sum_hmap, 4, (("poor",),))
-                    s_avgcomp_idx = _agent_col(sum_hmap, 5, (("avg", "completion"), ("completion",)))
-                    s_avgdi_idx = _agent_col(sum_hmap, 6, (("avg", "di"), ("di",)))
 
-                    agent_sum_rows = summary_rows[1:]
+                    # Column indices into the agent's Assignment-Metrics rows (shared from the
+                    # metrics check above). These define how to read Completion_Rate, DI, and
+                    # Effectiveness from each per-assignment row.
+                    a_comp_idx = agent_shared_idx.get("Completion_Rate")
+                    a_di_idx = agent_shared_idx.get("Discrimination_Index")
+                    a_eff_idx = agent_shared_idx.get("__eff__")
+
                     sum_stats = {
                         "Total_Assignments": {"checked": 0, "matched": 0},
                         "Good_Count": {"checked": 0, "matched": 0},
@@ -400,26 +473,52 @@ def check_excel(agent_workspace, gt_workspace):
                         "Avg_Completion_Rate": {"checked": 0, "matched": 0},
                         "Avg_DI": {"checked": 0, "matched": 0},
                     }
+                    sum_missing = []
                     for gs in gt_sum_rows:
                         gname = str(gs[0]).strip().lower()
                         hint = next((h for h in gt_course_hints if h in gname), None)
                         if hint is None:
                             continue
-                        best = None
-                        for ar in agent_sum_rows:
-                            if hint in " ".join(str(c) for c in ar if c).lower():
-                                best = ar
-                                break
-                        if best is None:
+                        # Match the GT course to an agent course name. The agent's per-assignment
+                        # rows were grouped under the EXACT course string from gt_by_key keys, so
+                        # find the agent course whose name contains this hint.
+                        ag_course = next(
+                            (ac for ac in agent_gtkeyed_by_course
+                             if hint in ac.lower()),
+                            None,
+                        )
+                        if ag_course is None:
+                            sum_missing.append(gname)
                             continue
-                        _compare_column("Total_Assignments", 1, s_total_idx, 1.0, gs, best, sum_stats)
-                        _compare_column("Good_Count", 2, s_good_idx, SUM_COUNT_TOL, gs, best, sum_stats)
-                        _compare_column("Acceptable_Count", 3, s_acc_idx, SUM_COUNT_TOL, gs, best, sum_stats)
-                        _compare_column("Poor_Count", 4, s_poor_idx, SUM_COUNT_TOL, gs, best, sum_stats)
-                        _compare_column("Avg_Completion_Rate", 5, s_avgcomp_idx, SUM_COMP_TOL, gs, best, sum_stats)
-                        _compare_column("Avg_DI", 6, s_avgdi_idx, SUM_DI_TOL, gs, best, sum_stats)
+                        ag_rows = agent_gtkeyed_by_course[ag_course]
+                        # GT summary counts/values (authoritative). gs layout:
+                        # [Course, Total, Good, Acceptable, Poor, AvgCompletion, AvgDI]
+                        gt_total = _to_float(gs[1]) if len(gs) > 1 else None
+                        gt_good = _to_float(gs[2]) if len(gs) > 2 else None
+                        gt_acc = _to_float(gs[3]) if len(gs) > 3 else None
+                        gt_poor = _to_float(gs[4]) if len(gs) > 4 else None
+                        gt_avgcomp = _to_float(gs[5]) if len(gs) > 5 else None
+                        gt_avgdi = _to_float(gs[6]) if len(gs) > 6 else None
+                        # Re-aggregate the agent's eligible rows over the unified set.
+                        (a_total, a_good, a_acc, a_poor,
+                         a_avgcomp, a_avgdi) = _recompute_course_summary(
+                            ag_rows, a_comp_idx, a_di_idx, a_eff_idx,
+                        )
 
-                    _emit_numeric_checks("Course Summary", sum_stats, MIN_SUMMARY_COMPARE, missing)
+                        def _cmp(name, ag_v, gt_v, tol):
+                            sum_stats[name]["checked"] += 1
+                            if num_close(ag_v, gt_v, tol):
+                                sum_stats[name]["matched"] += 1
+
+                        _cmp("Total_Assignments", a_total, gt_total, 1.0)
+                        _cmp("Good_Count", a_good, gt_good, SUM_COUNT_TOL)
+                        _cmp("Acceptable_Count", a_acc, gt_acc, SUM_COUNT_TOL)
+                        _cmp("Poor_Count", a_poor, gt_poor, SUM_COUNT_TOL)
+                        _cmp("Avg_Completion_Rate", a_avgcomp, gt_avgcomp, SUM_COMP_TOL)
+                        _cmp("Avg_DI", a_avgdi, gt_avgdi, SUM_DI_TOL)
+
+                    _emit_numeric_checks("Course Summary", sum_stats,
+                                         MIN_SUMMARY_COMPARE, sum_missing)
 
         # Check Revision Needed sheet
         revision_ws = _find_sheet(wb, "revision")

@@ -16,10 +16,30 @@ import sys
 from argparse import ArgumentParser
 
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `sd.hour` / `sd.date()` on rows read from `gcal.events`:
+# psycopg2 returns them in the PG session `TimeZone` (case-study: compute
+# node default was Asia/Shanghai, masking 9 AM ET as 21:00+08). Use
+# `utils.evaluation.gcal_helpers` instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 7: "2025-01-07 from 09:00 to 09:30" ... "2025-02-04 from
+# 09:00 to 09:30" (six monthly review events, 09:00-09:30).
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+EXPECTED_REVIEW_HOUR = 9
+EXPECTED_REVIEW_MINUTE = 0
+EXPECTED_REVIEW_DURATION_MIN = 30
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -231,11 +251,13 @@ def check_gcal(top_per_month):
     by_date = {}
     for ev in digest_events:
         if ev[2]:
-            try:
-                d = ev[2].date().isoformat()
-            except AttributeError:
-                d = str(ev[2])[:10]
-            by_date[d] = ev
+            # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant). The
+            # event date must be extracted in EXPECTED_TIMEZONE
+            # (America/New_York per task.md), NOT via bare sd.date() which
+            # silently follows the PG session tz (case-study 2026-08-13).
+            ev_date, _, _ = get_zone_components(ev[2], EXPECTED_TIMEZONE)
+            if ev_date is not None:
+                by_date[ev_date.isoformat()] = ev
 
     for exp_date, exp_month_year in expected_events:
         ev = by_date.get(exp_date)
@@ -250,20 +272,20 @@ def check_gcal(top_per_month):
         record(f"Event on {exp_date} title is exactly '{expected_title}'",
                summary.strip().lower() == expected_title.strip().lower(),
                f"got '{summary}'")
-        # Time 09:00 start
-        try:
-            if ev[2].hour != 9 or ev[2].minute != 0:
-                record(f"Event on {exp_date} starts at 09:00", False,
-                       f"got {ev[2].hour:02d}:{ev[2].minute:02d}")
-            else:
-                record(f"Event on {exp_date} starts at 09:00", True)
-        except AttributeError:
-            pass
-        # Duration 30 min
+        # Time 09:00 start (in EXPECTED_TIMEZONE per task.md).
+        ev_date, ev_hour, ev_minute = get_zone_components(ev[2], EXPECTED_TIMEZONE)
+        if ev_hour is None:
+            record(f"Event on {exp_date} starts at {EXPECTED_REVIEW_HOUR:02d}:00", False,
+                   "start_datetime missing/unparseable")
+        else:
+            record(f"Event on {exp_date} starts at {EXPECTED_REVIEW_HOUR:02d}:00",
+                   ev_hour == EXPECTED_REVIEW_HOUR and ev_minute == EXPECTED_REVIEW_MINUTE,
+                   f"got {ev_hour:02d}:{ev_minute:02d}")
+        # Duration 30 min (timedelta arithmetic on UTC instants is tz-safe).
         if ev[2] and ev[3]:
             duration_min = (ev[3] - ev[2]).total_seconds() / 60
-            record(f"Event on {exp_date} is 30 minutes",
-                   25 <= duration_min <= 35,
+            record(f"Event on {exp_date} is {EXPECTED_REVIEW_DURATION_MIN} minutes",
+                   EXPECTED_REVIEW_DURATION_MIN - 5 <= duration_min <= EXPECTED_REVIEW_DURATION_MIN + 5,
                    f"duration {duration_min:.0f} min")
         # Description mentions that month's top video title
         if top_per_month:

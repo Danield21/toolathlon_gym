@@ -1,0 +1,373 @@
+[
+  {
+    "id": "2401.00141",
+    "title": "Reliable Tool Use by Language Model Agents in Multi-Agent Systems",
+    "authors": [
+      "Maya Chen",
+      "David Ortiz"
+    ],
+    "abstract": "This paper presents reliable tool use by language model agents in multi-agent systems. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.AI and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.",
+    "categories": [
+      "cs.AI",
+      "cs.CL",
+      "cs.MA"
+    ],
+    "published": "2024-02-15",
+    "full_prompt": "\\documentclass{article}\n\\title{Reliable Tool Use by Language Model Agents in Multi-Agent Systems}\n\\begin{document}\n\\maketitle\n\\begin{abstract}This paper presents reliable tool use by language model agents in multi-agent systems. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.AI and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.\\end{abstract}\n\\section{Introduction}\nReliable Tool Use by Language Model Agents in Multi-Agent Systems addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper.\n\\section{Related Work}\nWe review prior literature and position our contribution relative to existing approaches.\n\\section{Method}\nOur methodology is described in detail, including the experimental design and analytical procedures used by the authors.\n\\section{Experiments}\nWe report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed.\n\\section{Conclusion}\nWe summarize the contributions, note limitations, and suggest directions for future work.\n\\end{document}",
+    "sections": [
+      {
+        "title": "Introduction",
+        "content": "Reliable Tool Use by Language Model Agents in Multi-Agent Systems addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper."
+      },
+      {
+        "title": "Related Work",
+        "content": "We review prior literature and position our contribution relative to existing approaches."
+      },
+      {
+        "title": "Method",
+        "content": "Our methodology is described in detail, including the experimental design and analytical procedures used by the authors."
+      },
+      {
+        "title": "Experiments",
+        "content": "We report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed."
+      },
+      {
+        "title": "Conclusion",
+        "content": "We summarize the contributions, note limitations, and suggest directions for future work."
+      }
+    ]
+  },
+  {
+    "id": "2401.00142",
+    "title": "Retrieval-Augmented Generation with Evidence Calibration",
+    "authors": [
+      "Priya Nair",
+      "Jonas Weber"
+    ],
+    "abstract": "This paper presents retrieval-augmented generation with evidence calibration. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.IR and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.",
+    "categories": [
+      "cs.IR",
+      "cs.CL"
+    ],
+    "published": "2024-03-15",
+    "full_prompt": "\\documentclass{article}\n\\title{Retrieval-Augmented Generation with Evidence Calibration}\n\\begin{document}\n\\maketitle\n\\begin{abstract}This paper presents retrieval-augmented generation with evidence calibration. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.IR and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.\\end{abstract}\n\\section{Introduction}\nRetrieval-Augmented Generation with Evidence Calibration addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper.\n\\section{Related Work}\nWe review prior literature and position our contribution relative to existing approaches.\n\\section{Method}\nOur methodology is described in detail, including the experimental design and analytical procedures used by the authors.\n\\section{Experiments}\nWe report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed.\n\\section{Conclusion}\nWe summarize the contributions, note limitations, and suggest directions for future work.\n\\end{document}",
+    "sections": [
+      {
+        "title": "Introduction",
+        "content": "Retrieval-Augmented Generation with Evidence Calibration addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper."
+      },
+      {
+        "title": "Related Work",
+        "content": "We review prior literature and position our contribution relative to existing approaches."
+      },
+      {
+        "title": "Method",
+        "content": "Our methodology is described in detail, including the experimental design and analytical procedures used by the authors."
+      },
+      {
+        "title": "Experiments",
+        "content": "We report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed."
+      },
+      {
+        "title": "Conclusion",
+        "content": "We summarize the contributions, note limitations, and suggest directions for future work."
+      }
+    ]
+  },
+  {
+    "id": "2401.00143",
+    "title": "Multimodal Foundation Models for Scientific Discovery",
+    "authors": [
+      "Elena Rossi",
+      "Ahmed Saleh"
+    ],
+    "abstract": "This paper presents multimodal foundation models for scientific discovery. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.LG and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.",
+    "categories": [
+      "cs.LG",
+      "cs.CV"
+    ],
+    "published": "2024-04-15",
+    "full_prompt": "\\documentclass{article}\n\\title{Multimodal Foundation Models for Scientific Discovery}\n\\begin{document}\n\\maketitle\n\\begin{abstract}This paper presents multimodal foundation models for scientific discovery. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.LG and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.\\end{abstract}\n\\section{Introduction}\nMultimodal Foundation Models for Scientific Discovery addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper.\n\\section{Related Work}\nWe review prior literature and position our contribution relative to existing approaches.\n\\section{Method}\nOur methodology is described in detail, including the experimental design and analytical procedures used by the authors.\n\\section{Experiments}\nWe report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed.\n\\section{Conclusion}\nWe summarize the contributions, note limitations, and suggest directions for future work.\n\\end{document}",
+    "sections": [
+      {
+        "title": "Introduction",
+        "content": "Multimodal Foundation Models for Scientific Discovery addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper."
+      },
+      {
+        "title": "Related Work",
+        "content": "We review prior literature and position our contribution relative to existing approaches."
+      },
+      {
+        "title": "Method",
+        "content": "Our methodology is described in detail, including the experimental design and analytical procedures used by the authors."
+      },
+      {
+        "title": "Experiments",
+        "content": "We report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed."
+      },
+      {
+        "title": "Conclusion",
+        "content": "We summarize the contributions, note limitations, and suggest directions for future work."
+      }
+    ]
+  },
+  {
+    "id": "2401.00144",
+    "title": "Reproducible Computational Experiment Pipelines",
+    "authors": [
+      "Samuel Green",
+      "Yuki Tanaka"
+    ],
+    "abstract": "This paper presents reproducible computational experiment pipelines. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.SE and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.",
+    "categories": [
+      "cs.SE",
+      "cs.DC"
+    ],
+    "published": "2024-05-15",
+    "full_prompt": "\\documentclass{article}\n\\title{Reproducible Computational Experiment Pipelines}\n\\begin{document}\n\\maketitle\n\\begin{abstract}This paper presents reproducible computational experiment pipelines. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.SE and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.\\end{abstract}\n\\section{Introduction}\nReproducible Computational Experiment Pipelines addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper.\n\\section{Related Work}\nWe review prior literature and position our contribution relative to existing approaches.\n\\section{Method}\nOur methodology is described in detail, including the experimental design and analytical procedures used by the authors.\n\\section{Experiments}\nWe report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed.\n\\section{Conclusion}\nWe summarize the contributions, note limitations, and suggest directions for future work.\n\\end{document}",
+    "sections": [
+      {
+        "title": "Introduction",
+        "content": "Reproducible Computational Experiment Pipelines addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper."
+      },
+      {
+        "title": "Related Work",
+        "content": "We review prior literature and position our contribution relative to existing approaches."
+      },
+      {
+        "title": "Method",
+        "content": "Our methodology is described in detail, including the experimental design and analytical procedures used by the authors."
+      },
+      {
+        "title": "Experiments",
+        "content": "We report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed."
+      },
+      {
+        "title": "Conclusion",
+        "content": "We summarize the contributions, note limitations, and suggest directions for future work."
+      }
+    ]
+  },
+  {
+    "id": "2401.00145",
+    "title": "Causal Evaluation of Adaptive Research Systems",
+    "authors": [
+      "Nora Ibrahim",
+      "Lucas Martin"
+    ],
+    "abstract": "This paper presents causal evaluation of adaptive research systems. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in stat.ML and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.",
+    "categories": [
+      "stat.ML",
+      "cs.LG"
+    ],
+    "published": "2024-06-15",
+    "full_prompt": "\\documentclass{article}\n\\title{Causal Evaluation of Adaptive Research Systems}\n\\begin{document}\n\\maketitle\n\\begin{abstract}This paper presents causal evaluation of adaptive research systems. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in stat.ML and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.\\end{abstract}\n\\section{Introduction}\nCausal Evaluation of Adaptive Research Systems addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper.\n\\section{Related Work}\nWe review prior literature and position our contribution relative to existing approaches.\n\\section{Method}\nOur methodology is described in detail, including the experimental design and analytical procedures used by the authors.\n\\section{Experiments}\nWe report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed.\n\\section{Conclusion}\nWe summarize the contributions, note limitations, and suggest directions for future work.\n\\end{document}",
+    "sections": [
+      {
+        "title": "Introduction",
+        "content": "Causal Evaluation of Adaptive Research Systems addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper."
+      },
+      {
+        "title": "Related Work",
+        "content": "We review prior literature and position our contribution relative to existing approaches."
+      },
+      {
+        "title": "Method",
+        "content": "Our methodology is described in detail, including the experimental design and analytical procedures used by the authors."
+      },
+      {
+        "title": "Experiments",
+        "content": "We report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed."
+      },
+      {
+        "title": "Conclusion",
+        "content": "We summarize the contributions, note limitations, and suggest directions for future work."
+      }
+    ]
+  },
+  {
+    "id": "2401.00146",
+    "title": "Graph Neural Networks for Molecular Measurement Analysis",
+    "authors": [
+      "Fatima Khan",
+      "Owen Brooks"
+    ],
+    "abstract": "This paper presents graph neural networks for molecular measurement analysis. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.LG and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.",
+    "categories": [
+      "cs.LG",
+      "physics.chem-ph"
+    ],
+    "published": "2024-07-15",
+    "full_prompt": "\\documentclass{article}\n\\title{Graph Neural Networks for Molecular Measurement Analysis}\n\\begin{document}\n\\maketitle\n\\begin{abstract}This paper presents graph neural networks for molecular measurement analysis. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.LG and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.\\end{abstract}\n\\section{Introduction}\nGraph Neural Networks for Molecular Measurement Analysis addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper.\n\\section{Related Work}\nWe review prior literature and position our contribution relative to existing approaches.\n\\section{Method}\nOur methodology is described in detail, including the experimental design and analytical procedures used by the authors.\n\\section{Experiments}\nWe report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed.\n\\section{Conclusion}\nWe summarize the contributions, note limitations, and suggest directions for future work.\n\\end{document}",
+    "sections": [
+      {
+        "title": "Introduction",
+        "content": "Graph Neural Networks for Molecular Measurement Analysis addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper."
+      },
+      {
+        "title": "Related Work",
+        "content": "We review prior literature and position our contribution relative to existing approaches."
+      },
+      {
+        "title": "Method",
+        "content": "Our methodology is described in detail, including the experimental design and analytical procedures used by the authors."
+      },
+      {
+        "title": "Experiments",
+        "content": "We report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed."
+      },
+      {
+        "title": "Conclusion",
+        "content": "We summarize the contributions, note limitations, and suggest directions for future work."
+      }
+    ]
+  },
+  {
+    "id": "2401.00147",
+    "title": "Bayesian Adaptive Design for Small Laboratory Studies",
+    "authors": [
+      "Grace Liu",
+      "Mateo Silva"
+    ],
+    "abstract": "This paper presents bayesian adaptive design for small laboratory studies. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in stat.ME and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.",
+    "categories": [
+      "stat.ME",
+      "stat.AP"
+    ],
+    "published": "2024-08-15",
+    "full_prompt": "\\documentclass{article}\n\\title{Bayesian Adaptive Design for Small Laboratory Studies}\n\\begin{document}\n\\maketitle\n\\begin{abstract}This paper presents bayesian adaptive design for small laboratory studies. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in stat.ME and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.\\end{abstract}\n\\section{Introduction}\nBayesian Adaptive Design for Small Laboratory Studies addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper.\n\\section{Related Work}\nWe review prior literature and position our contribution relative to existing approaches.\n\\section{Method}\nOur methodology is described in detail, including the experimental design and analytical procedures used by the authors.\n\\section{Experiments}\nWe report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed.\n\\section{Conclusion}\nWe summarize the contributions, note limitations, and suggest directions for future work.\n\\end{document}",
+    "sections": [
+      {
+        "title": "Introduction",
+        "content": "Bayesian Adaptive Design for Small Laboratory Studies addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper."
+      },
+      {
+        "title": "Related Work",
+        "content": "We review prior literature and position our contribution relative to existing approaches."
+      },
+      {
+        "title": "Method",
+        "content": "Our methodology is described in detail, including the experimental design and analytical procedures used by the authors."
+      },
+      {
+        "title": "Experiments",
+        "content": "We report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed."
+      },
+      {
+        "title": "Conclusion",
+        "content": "We summarize the contributions, note limitations, and suggest directions for future work."
+      }
+    ]
+  },
+  {
+    "id": "2401.00148",
+    "title": "Open Science Infrastructure for Data and Code Reuse",
+    "authors": [
+      "Isabelle Moreau",
+      "Henry Adams"
+    ],
+    "abstract": "This paper presents open science infrastructure for data and code reuse. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.DL and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.",
+    "categories": [
+      "cs.DL",
+      "cs.SE"
+    ],
+    "published": "2024-09-15",
+    "full_prompt": "\\documentclass{article}\n\\title{Open Science Infrastructure for Data and Code Reuse}\n\\begin{document}\n\\maketitle\n\\begin{abstract}This paper presents open science infrastructure for data and code reuse. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.DL and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.\\end{abstract}\n\\section{Introduction}\nOpen Science Infrastructure for Data and Code Reuse addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper.\n\\section{Related Work}\nWe review prior literature and position our contribution relative to existing approaches.\n\\section{Method}\nOur methodology is described in detail, including the experimental design and analytical procedures used by the authors.\n\\section{Experiments}\nWe report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed.\n\\section{Conclusion}\nWe summarize the contributions, note limitations, and suggest directions for future work.\n\\end{document}",
+    "sections": [
+      {
+        "title": "Introduction",
+        "content": "Open Science Infrastructure for Data and Code Reuse addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper."
+      },
+      {
+        "title": "Related Work",
+        "content": "We review prior literature and position our contribution relative to existing approaches."
+      },
+      {
+        "title": "Method",
+        "content": "Our methodology is described in detail, including the experimental design and analytical procedures used by the authors."
+      },
+      {
+        "title": "Experiments",
+        "content": "We report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed."
+      },
+      {
+        "title": "Conclusion",
+        "content": "We summarize the contributions, note limitations, and suggest directions for future work."
+      }
+    ]
+  },
+  {
+    "id": "2501.00149",
+    "title": "Human-in-the-Loop Validation for High-Stakes AI",
+    "authors": [
+      "Rachel Kim",
+      "Tomas Novak"
+    ],
+    "abstract": "This paper presents human-in-the-loop validation for high-stakes ai. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.HC and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.",
+    "categories": [
+      "cs.HC",
+      "cs.AI"
+    ],
+    "published": "2025-01-15",
+    "full_prompt": "\\documentclass{article}\n\\title{Human-in-the-Loop Validation for High-Stakes AI}\n\\begin{document}\n\\maketitle\n\\begin{abstract}This paper presents human-in-the-loop validation for high-stakes ai. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.HC and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.\\end{abstract}\n\\section{Introduction}\nHuman-in-the-Loop Validation for High-Stakes AI addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper.\n\\section{Related Work}\nWe review prior literature and position our contribution relative to existing approaches.\n\\section{Method}\nOur methodology is described in detail, including the experimental design and analytical procedures used by the authors.\n\\section{Experiments}\nWe report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed.\n\\section{Conclusion}\nWe summarize the contributions, note limitations, and suggest directions for future work.\n\\end{document}",
+    "sections": [
+      {
+        "title": "Introduction",
+        "content": "Human-in-the-Loop Validation for High-Stakes AI addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper."
+      },
+      {
+        "title": "Related Work",
+        "content": "We review prior literature and position our contribution relative to existing approaches."
+      },
+      {
+        "title": "Method",
+        "content": "Our methodology is described in detail, including the experimental design and analytical procedures used by the authors."
+      },
+      {
+        "title": "Experiments",
+        "content": "We report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed."
+      },
+      {
+        "title": "Conclusion",
+        "content": "We summarize the contributions, note limitations, and suggest directions for future work."
+      }
+    ]
+  },
+  {
+    "id": "2501.001410",
+    "title": "Benchmarking Scientific AI under Distribution Shift",
+    "authors": [
+      "Amina Yusuf",
+      "Peter Hall"
+    ],
+    "abstract": "This paper presents benchmarking scientific ai under distribution shift. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.LG and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.",
+    "categories": [
+      "cs.LG",
+      "stat.ML"
+    ],
+    "published": "2025-02-15",
+    "full_prompt": "\\documentclass{article}\n\\title{Benchmarking Scientific AI under Distribution Shift}\n\\begin{document}\n\\maketitle\n\\begin{abstract}This paper presents benchmarking scientific ai under distribution shift. We investigate methodological advances and report empirical results relevant to research laboratories. The work addresses open questions in cs.LG and proposes a framework evaluated on standard benchmarks, demonstrating measurable improvements and discussing limitations and future directions.\\end{abstract}\n\\section{Introduction}\nBenchmarking Scientific AI under Distribution Shift addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper.\n\\section{Related Work}\nWe review prior literature and position our contribution relative to existing approaches.\n\\section{Method}\nOur methodology is described in detail, including the experimental design and analytical procedures used by the authors.\n\\section{Experiments}\nWe report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed.\n\\section{Conclusion}\nWe summarize the contributions, note limitations, and suggest directions for future work.\n\\end{document}",
+    "sections": [
+      {
+        "title": "Introduction",
+        "content": "Benchmarking Scientific AI under Distribution Shift addresses a core problem for our laboratory. We motivate the study, state our contributions, and outline the paper."
+      },
+      {
+        "title": "Related Work",
+        "content": "We review prior literature and position our contribution relative to existing approaches."
+      },
+      {
+        "title": "Method",
+        "content": "Our methodology is described in detail, including the experimental design and analytical procedures used by the authors."
+      },
+      {
+        "title": "Experiments",
+        "content": "We report experiments, datasets, metrics, and quantitative results. The findings are reproducible and the analysis is discussed."
+      },
+      {
+        "title": "Conclusion",
+        "content": "We summarize the contributions, note limitations, and suggest directions for future work."
+      }
+    ]
+  }
+]

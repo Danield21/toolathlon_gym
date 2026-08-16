@@ -8,7 +8,20 @@ from datetime import datetime, timedelta
 
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym", user="eigent", password="camel")
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. gcal.events.start_datetime is TIMESTAMPTZ
+# (UTC instant). psycopg2 returns it in the PG session TimeZone (compute node
+# default Asia/Shanghai, masking 15:00 ET as 03:00+08 next day). Always use
+# utils.evaluation.gcal_helpers; never bare start_dt.hour / .date().
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 7: "Each session should start at 3:00 PM" (canvas Fall 2013J
+# finance course → America/New_York ET)
+EXPECTED_TIMEZONE = "America/New_York"
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
+DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym", user="eigent", password="camel")
 
 PASS_COUNT = 0
 FAIL_COUNT = 0
@@ -151,9 +164,13 @@ def check_gcal(launch_time_str=None):
         if start_dt is None or end_dt is None:
             check(f"Event '{summary}' has start/end timestamps", False, f"start={start_dt} end={end_dt}")
             continue
+        # gcal.events.start_datetime is TIMESTAMPTZ; convert to EXPECTED_TIMEZONE
+        # via session-tz-independent helper. Bare start_dt.hour silently compares
+        # against the PG session tz (case-study 2026-08-13).
+        ev_date, ev_hour, ev_minute = get_zone_components(start_dt, EXPECTED_TIMEZONE)
         check(
             f"Event '{summary}' starts at 15:00",
-            start_dt.hour == 15 and start_dt.minute == 0,
+            ev_hour == 15 and ev_minute == 0,
             f"start_datetime={start_dt}",
         )
         duration = end_dt - start_dt
@@ -167,7 +184,7 @@ def check_gcal(launch_time_str=None):
     expected_dates = _expected_session_dates(launch_time_str)
     if expected_dates is not None and len(remediation_events) >= 1:
         sorted_remed = sorted(remediation_events, key=lambda e: e[2])
-        actual_dates = [e[2].date() for e in sorted_remed[: len(expected_dates)]]
+        actual_dates = [get_zone_components(e[2], EXPECTED_TIMEZONE)[0] for e in sorted_remed[: len(expected_dates)]]
         # First session: Monday of week after launch
         check(
             f"First remediation session on Monday {expected_dates[0]}",

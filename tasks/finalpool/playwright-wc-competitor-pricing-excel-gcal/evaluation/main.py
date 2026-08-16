@@ -14,10 +14,29 @@ import sys
 
 import openpyxl
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `sd.hour` / `ed.hour` / `sd.minute` on rows read from
+# `gcal.events`: psycopg2 returns them in the PG session `TimeZone`
+# (case-study: compute node default was Asia/Shanghai). Use
+# `utils.evaluation.gcal_helpers` instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md: "from 2:00 PM to 3:00 PM in America/New_York timezone".
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+EXPECTED_MEETING_HOUR = 14   # 2:00 PM ET (DST-aware via ZoneInfo)
+EXPECTED_MEETING_END_HOUR = 15  # 3:00 PM ET
+EXPECTED_MEETING_MINUTE = 0
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -333,40 +352,28 @@ def check_calendar():
             continue
         ok_date = False
         ok_time = False
-        from datetime import datetime as _dt
         for summary, sd, ed in evs:
-            sd_str = str(sd)
-            if ymd in sd_str:
-                ok_date = True
-            # Check that hour is 14 (NY local) OR 19 (UTC equivalent for EST -05).
-            # Parse start/end as datetime to require explicit hour values.
-            try:
-                if isinstance(sd, _dt):
-                    sd_obj = sd
-                else:
-                    sd_obj = _dt.fromisoformat(str(sd).replace("Z", "+00:00"))
-                if isinstance(ed, _dt):
-                    ed_obj = ed
-                elif ed:
-                    ed_obj = _dt.fromisoformat(str(ed).replace("Z", "+00:00"))
-                else:
-                    ed_obj = None
-                start_hour = sd_obj.hour
-                end_hour = ed_obj.hour if ed_obj else None
-                # NY local 14:00-15:00 (hour=14, end_hour=15) OR UTC 19:00-20:00.
-                hour_pair = (start_hour, end_hour)
-                if hour_pair in {(14, 15), (19, 20), (18, 19), (13, 14)}:
-                    ok_time = True
-                # Also check minute is 00
-                if sd_obj.minute != 0:
-                    ok_time = False
-            except Exception:
+            if sd is None:
                 continue
+            # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant).
+            # Extract wall-clock components in EXPECTED_TIMEZONE (ET) via
+            # get_zone_components (session-tz-independent).
+            ev_date, ev_hour, ev_minute = get_zone_components(sd, EXPECTED_TIMEZONE)
+            if ev_date is not None and str(ev_date) == ymd:
+                ok_date = True
+            # end time: also expressed in ET.
+            _, ev_end_hour, _ = (get_zone_components(ed, EXPECTED_TIMEZONE)
+                                 if ed is not None else (None, None, None))
+            # task.md: 2:00 PM - 3:00 PM in America/New_York.
+            if (ev_hour == EXPECTED_MEETING_HOUR
+                    and ev_end_hour == EXPECTED_MEETING_END_HOUR
+                    and ev_minute == EXPECTED_MEETING_MINUTE):
+                ok_time = True
         record(f"  Event for {cat} dated {ymd}", ok_date,
                f"start_datetimes: {[str(sd) for _, sd, _ in evs]}")
         if not ok_date:
             all_ok = False
-        record(f"  Event for {cat} 14:00-15:00 (NY local or 19:00-20:00 UTC)", ok_time,
+        record(f"  Event for {cat} 14:00-15:00 (America/New_York)", ok_time,
                f"start/end: {[(str(sd), str(ed)) for _, sd, ed in evs]}")
         if not ok_time:
             all_ok = False

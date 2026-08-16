@@ -5,10 +5,25 @@ import sys
 
 import openpyxl
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# task.md (e-commerce store; default local timezone is ET) schedules price
+# review meetings "each lasting one hour starting at 2:00 PM" starting from
+# March 10, 2026 (line 13). gcal.events.start_datetime is a TIMESTAMPTZ UTC
+# instant; never use bare start_dt.hour / start_dt.date() on rows read from
+# gcal.events — psycopg2 returns them in the PG session TimeZone (case-study:
+# compute node default was Asia/Shanghai, shifting the day/hour). Use
+# utils.evaluation.gcal_helpers instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -317,15 +332,20 @@ def check_calendar():
     )
 
     # Validate each event: 14:00 start, 1h duration, on/after March 10 2026, dates differ
-    from datetime import timedelta
+    from datetime import date as _date, timedelta
+    min_date = _date(2026, 3, 10)
     seen_dates = set()
     for summary, description, start_dt, end_dt in events:
         if start_dt is None or end_dt is None:
             record(f"Event '{summary}' has start/end", False)
             continue
+        # gcal.events columns are TIMESTAMPTZ UTC instants. Use
+        # get_zone_components (session-tz-independent) instead of bare
+        # start_dt.hour / start_dt.date(), which follow the PG session tz.
+        ev_date, ev_hour, ev_minute = get_zone_components(start_dt, EXPECTED_TIMEZONE)
         record(
             f"Event '{summary}' starts at 14:00",
-            start_dt.hour == 14 and start_dt.minute == 0,
+            ev_hour == 14 and ev_minute == 0,
             f"start={start_dt}",
         )
         record(
@@ -335,10 +355,11 @@ def check_calendar():
         )
         record(
             f"Event '{summary}' on/after 2026-03-10",
-            start_dt.date() >= __import__("datetime").date(2026, 3, 10),
-            f"date={start_dt.date()}",
+            ev_date is not None and ev_date >= min_date,
+            f"date={ev_date}",
         )
-        seen_dates.add(start_dt.date())
+        if ev_date is not None:
+            seen_dates.add(ev_date)
         # Description must mention gap percentage
         desc_l = (description or "").lower()
         record(

@@ -6,7 +6,7 @@ import sys
 
 import psycopg2
 
-DB = {"host": os.environ.get("PGHOST", "localhost"), "port": 5432, "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
+DB = {"host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")), "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
 
 SYMBOLS = ["AMZN", "GOOGL", "JNJ", "JPM", "XOM"]
 
@@ -158,13 +158,15 @@ def check_notion(income, balance):
         rows = cur.fetchall()
 
         # Find page titled 'Financial Health Dashboard'
+        # Bug C variant: agent-generated properties often omit "type":"title"
+        # discriminator. Accept a property as title when it has a "title" array.
         target = "financial health dashboard"
         target_page_id = None
         for pid, props in rows:
             if not isinstance(props, dict):
                 continue
             for prop in props.values():
-                if isinstance(prop, dict) and prop.get("type") == "title":
+                if isinstance(prop, dict) and ("title" in prop or prop.get("type") == "title"):
                     title_arr = prop.get("title", [])
                     title_text = "".join(t.get("plain_text", "") or t.get("text", {}).get("content", "") for t in title_arr)
                     if target in title_text.strip().lower():

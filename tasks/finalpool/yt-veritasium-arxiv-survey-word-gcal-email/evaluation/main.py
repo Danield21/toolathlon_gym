@@ -15,10 +15,26 @@ import sys
 from argparse import ArgumentParser
 
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md line 11: "Science Communication Seminar" on
+# April 10, 2026, from 14:00 to 16:00 (scientific seminar, ET wall-clock);
+# "Survey Review Session" on April 3, 2026, from 10:00 to 11:00. The Calendar
+# MCP writes events as UTC instants into the DB (TIMESTAMPTZ), so all
+# comparisons anchor to America/New_York. Never use bare `sd.hour` /
+# `sd.date()` on rows read from `gcal.events`: psycopg2 returns them in the
+# PG session TimeZone (case-study: compute node default was Asia/Shanghai,
+# masking ET wall-clock). Use `utils.evaluation.gcal_helpers` instead
+# (session-tz-independent, DST-aware).
+# ──────────────────────────────────────────────────────────────────────────
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent",
     "password": "camel",
@@ -135,30 +151,39 @@ def check_gcal():
            f"April events: {[e[0] for e in events]}")
     if seminar:
         s, sd, ed = seminar
+        # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant). Use the
+        # session-tz-independent helper to extract components in
+        # EXPECTED_TIMEZONE (America/New_York per task.md). Bare sd.hour /
+        # sd.date() silently compares against the PG session tz.
+        ev_date, ev_hour, ev_minute = get_zone_components(sd, EXPECTED_TIMEZONE)
         record(
             "Seminar event date is 2026-04-10",
-            sd.date().isoformat() == "2026-04-10",
-            f"date={sd.date()}",
+            ev_date is not None and ev_date.isoformat() == "2026-04-10",
+            f"date={ev_date}",
         )
+        _, ed_hour, ed_minute = get_zone_components(ed, EXPECTED_TIMEZONE)
         record(
             "Seminar event time is 14:00-16:00",
-            sd.hour == 14 and sd.minute == 0 and ed.hour == 16 and ed.minute == 0,
-            f"start={sd} end={ed}",
+            ev_hour == 14 and ev_minute == 0 and ed_hour == 16 and ed_minute == 0,
+            f"start_hour={ev_hour}:{ev_minute} end_hour={ed_hour}:{ed_minute}",
         )
 
     record("GCal has 'Survey Review Session' event", review is not None,
            f"April events: {[e[0] for e in events]}")
     if review:
         s, sd, ed = review
+        # Same TIMESTAMPTZ fix as the seminar event above.
+        ev_date, ev_hour, ev_minute = get_zone_components(sd, EXPECTED_TIMEZONE)
         record(
             "Review event date is 2026-04-03",
-            sd.date().isoformat() == "2026-04-03",
-            f"date={sd.date()}",
+            ev_date is not None and ev_date.isoformat() == "2026-04-03",
+            f"date={ev_date}",
         )
+        _, ed_hour, ed_minute = get_zone_components(ed, EXPECTED_TIMEZONE)
         record(
             "Review event time is 10:00-11:00",
-            sd.hour == 10 and sd.minute == 0 and ed.hour == 11 and ed.minute == 0,
-            f"start={sd} end={ed}",
+            ev_hour == 10 and ev_minute == 0 and ed_hour == 11 and ed_minute == 0,
+            f"start_hour={ev_hour}:{ev_minute} end_hour={ed_hour}:{ed_minute}",
         )
 
 

@@ -176,7 +176,7 @@ def check_gsheet():
     print("\n=== Checking Google Sheet ===")
 
     try:
-        conn = psycopg2.connect(**{"host": os.environ.get("PGHOST", "localhost"), "port": 5432, "dbname": "toolathlon_gym",
+        conn = psycopg2.connect(**{"host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")), "dbname": "toolathlon_gym",
                                    "user": "eigent", "password": "camel"})
         cur = conn.cursor()
         cur.execute("""
@@ -219,7 +219,7 @@ def check_emails():
     print("\n=== Checking Emails ===")
 
     try:
-        conn = psycopg2.connect(**{"host": os.environ.get("PGHOST", "localhost"), "port": 5432, "dbname": "toolathlon_gym",
+        conn = psycopg2.connect(**{"host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")), "dbname": "toolathlon_gym",
                                    "user": "eigent", "password": "camel"})
         cur = conn.cursor()
         cur.execute("SELECT subject, from_addr, to_addr, COALESCE(body_text, body_html, '') FROM email.messages")

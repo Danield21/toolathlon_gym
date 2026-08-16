@@ -100,6 +100,11 @@ def _normalize_percent(v, other):
     return v
 
 
+def _norm_header(h):
+    """Normalize a column header for order/case/punctuation-insensitive compare."""
+    return "".join(ch for ch in str(h).strip().lower() if ch.isalnum())
+
+
 def check_excel(agent_workspace, groundtruth_workspace):
     print("\n=== Checking Excel ===")
     xlsx_path = os.path.join(agent_workspace, "Grade_Equity_Analysis.xlsx")
@@ -146,27 +151,106 @@ def check_excel(agent_workspace, groundtruth_workspace):
                   len(rows) == len(gt_rows),
                   f"Found {len(rows)} rows, expected {len(gt_rows)}")
 
-            # Check each course exists
+            # Check each course exists.
+            # Tolerate an optional course_code prefix (e.g. "AAA Applied
+            # Analytics & Algorithms" vs "Applied Analytics & Algorithms"):
+            # task.md does not forbid prepending it, and Canvas exposes both
+            # `name` and `course_code` fields (case-study 2026-08-16 §5.4).
+            def strip_code_prefix(n):
+                import re as _re
+                return _re.sub(r'^[A-Z]{2,4}\s+', '', n.strip())
             agent_names = [str(r[0]).strip() if r[0] else "" for r in rows]
+            agent_names_stripped = [strip_code_prefix(n) for n in agent_names]
             for name in COURSE_NAMES:
                 check(f"Course '{name}' in Course Comparison",
-                      name in agent_names,
+                      name in agent_names_stripped,
                       f"Found: {agent_names}")
 
-            # Check sort order (alphabetical by Course_Name)
-            agent_names_lower = [n.lower() for n in agent_names if n]
+            # Check sort order (alphabetical by Course_Name).
+            # Use the prefix-stripped view so "AAA Applied..." sorts with
+            # "Applied..." — the code prefix must not break the order check.
+            agent_names_lower = [strip_code_prefix(n).lower() for n in agent_names if n]
             check("Course Comparison sorted alphabetically",
                   agent_names_lower == sorted(agent_names_lower),
                   f"Order: {agent_names}")
 
+            # ---- GT self-consistency guard -----------------------------------
+            # Verify the loaded GT is internally consistent before trusting it.
+            # A prior hand-built GT drifted from the DB (AAA-2014J had
+            # Fall_2014_Pass_Rate = 90.9 ≈ 309/340, while the real seed data has
+            # 310/340 = 91.2). That turned a correct model answer into a false
+            # FAIL. We now check, per GT row, that pass-rate columns equal
+            # (A+B+C)/Total*100 using the GT's own Grade Distribution sheet; if
+            # they don't, we flag GT_INVALID rather than silently mis-scoring.
+            gt_dist_lookup = {}
+            if "Grade Distribution" in gt_wb.sheetnames:
+                _gd = gt_wb["Grade Distribution"]
+                _gd_cached = gt_wb_cached["Grade Distribution"]
+                for _r in _gd.iter_rows(min_row=2, values_only=True):
+                    if not _r or not _r[0]:
+                        continue
+                    try:
+                        _yr = int(_r[1])
+                    except (TypeError, ValueError):
+                        continue
+                    _col = {k: i for i, k in enumerate(
+                        [_norm_header(c.value) for c in _gd[1]])}
+                    def _gv(row, key):
+                        idx = _col.get(_norm_header(key))
+                        return row[idx] if idx is not None and idx < len(row) else None
+                    a = _to_float(_gv(_r, "A_Count"))
+                    b = _to_float(_gv(_r, "B_Count"))
+                    c = _to_float(_gv(_r, "C_Count"))
+                    d = _to_float(_gv(_r, "D_Count"))
+                    f = _to_float(_gv(_r, "F_Count"))
+                    tot = _to_float(_gv(_r, "Total_Students"))
+                    if None in (a, b, c, d, f, tot) or tot == 0:
+                        continue
+                    gt_dist_lookup[(str(_r[0]).strip(), _yr)] = {
+                        "A": a, "B": b, "C": c, "D": d, "F": f, "Total": tot,
+                        "Passed": a + b + c,
+                    }
+
+            def _gt_pass_rate_for(name, year, pr_col_idx, gt_row, gt_cached_row):
+                """Return (gt_pass_rate_float, numerator, denominator) from the GT's
+                own Grade Distribution, so failures can report numerator/denominator
+                and we can cross-check GT Course Comparison vs GT Grade Distribution."""
+                d = gt_dist_lookup.get((name, year))
+                if not d:
+                    return None, None, None
+                return round(d["Passed"] / d["Total"] * 100, 1), int(d["Passed"]), int(d["Total"])
+
+            # Cross-check GT Course Comparison pass rates against GT Grade
+            # Distribution. If GT disagrees with itself, emit a hard GT_INVALID
+            # check so the run is not scored against a broken oracle.
+            for _name, _gt_row in {str(r[0]).strip(): r for r in gt_rows}.items():
+                for _year, _ci in [(2013, 4), (2014, 5)]:
+                    _g_val, _ = _resolve_cell(
+                        _gt_row[_ci] if len(_gt_row) > _ci else None,
+                        None)
+                    _d = gt_dist_lookup.get((_name, _year))
+                    if _g_val is None or not _d:
+                        continue
+                    _expected = round(_d["Passed"] / _d["Total"] * 100, 1)
+                    if abs(_expected - _g_val) > 0.05:
+                        check(f"GT self-consistent {_name} {_year} pass_rate",
+                              False,
+                              f"GT Course Comparison={_g_val} but GT Grade Distribution "
+                              f"({_d['Passed']}/{_d['Total']})*100={_expected}. "
+                              f"Regenerate GT with files/generate_groundtruth.py.")
+            # ------------------------------------------------------------------
+
             # Check numeric values with tolerance — tightened to 0.2 (1-decimal rounding)
-            gt_dict = {str(r[0]).strip(): r for r in gt_rows}
-            gt_cached_dict = {str(r[0]).strip(): r for r in gt_cached_rows}
+            # Match agent rows to GT rows on the code-prefix-stripped name so a
+            # "AAA Applied..." row still pairs with the GT "Applied..." row.
+            gt_dict = {strip_code_prefix(str(r[0]).strip() if r[0] else ""): r for r in gt_rows}
+            gt_cached_dict = {strip_code_prefix(str(r[0]).strip() if r[0] else ""): r for r in gt_cached_rows}
             for i, row in enumerate(rows):
                 name = str(row[0]).strip() if row[0] else ""
-                if name in gt_dict:
-                    gt_row = gt_dict[name]
-                    gt_cached_row = gt_cached_dict.get(name)
+                key = strip_code_prefix(name)
+                if key in gt_dict:
+                    gt_row = gt_dict[key]
+                    gt_cached_row = gt_cached_dict.get(key)
                     cached_row = cached_rows[i] if i < len(cached_rows) else None
                     for col_idx, col_name in [(1, "Fall_2013_Mean"), (2, "Fall_2014_Mean"),
                                                (3, "Score_Difference"),
@@ -183,9 +267,21 @@ def check_excel(agent_workspace, groundtruth_workspace):
                         g_val = _normalize_percent(g_val, a_val)
                         if a_val is not None and g_val is not None:
                             diff = abs(a_val - g_val)
+                            # On pass-rate mismatches, surface numerator/denominator
+                            # from the GT's own Grade Distribution so it's obvious
+                            # whether GT or the agent is the outlier.
+                            extra = ""
+                            if col_name in ("Fall_2013_Pass_Rate", "Fall_2014_Pass_Rate"):
+                                _yr = 2013 if col_name == "Fall_2013_Pass_Rate" else 2014
+                                _grp, _gn, _gd2 = _gt_pass_rate_for(
+                                    name, _yr, col_idx, gt_row, gt_cached_row)
+                                if _gn is not None:
+                                    extra = (f" [GT dist: pass={_grp} ({_gn}/{_gd2}); "
+                                             f"check agent Grade Distribution {name} {_yr}]")
                             check(f"{name} {col_name} within tolerance",
                                   diff <= 0.2,
-                                  f"Agent={row[col_idx]}, GT={gt_row[col_idx]}, diff={diff:.2f}")
+                                  f"Agent={row[col_idx]}, GT={gt_row[col_idx]}, "
+                                  f"diff={diff:.2f}{extra}")
                         elif a_formula and g_val is None:
                             check(f"{name} {col_name} value present",
                                   True,
@@ -216,9 +312,6 @@ def check_excel(agent_workspace, groundtruth_workspace):
             # are ambiguous at continuous-score edges.
             expected_cols = {"course_name", "year", "a_count", "b_count", "c_count",
                              "d_count", "f_count", "total_students"}
-
-            def _norm_header(h):
-                return "".join(ch for ch in str(h).strip().lower() if ch.isalnum())
 
             header_vals = [_norm_header(c.value) for c in ws[1] if c.value is not None]
             expected_vals = {_norm_header(h) for h in expected_cols}

@@ -14,9 +14,25 @@ from datetime import datetime
 
 import openpyxl
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# task.md (e-commerce store; default local timezone is ET) schedules the
+# restock review meeting on March 11, 2026 at 10:00 AM (line 21). This is an
+# e-commerce / business context with no other zone declared, so we anchor to
+# America/New_York (Eastern). gcal.events.start_datetime is a TIMESTAMPTZ UTC
+# instant; never use bare sd.year / sd.hour / sd.minute on rows read from
+# gcal.events — psycopg2 returns them in the PG session TimeZone (case-study:
+# compute node default was Asia/Shanghai, shifting the day/hour). Use
+# utils.evaluation.gcal_helpers instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel",
 }
@@ -266,7 +282,7 @@ def check_gcal():
               f"Events: {[e[0] for e in events]}")
         if target_event:
             summary, desc, start, end = target_event
-            # Date == 2026-03-11, time 10:00 AM
+            # Date == 2026-03-11, time 10:00 AM (task.md line 21).
             ok_date = False
             ok_time = False
             ok_dur = False
@@ -275,8 +291,13 @@ def check_gcal():
                     sd = start
                 else:
                     sd = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
-                ok_date = (sd.year == 2026 and sd.month == 3 and sd.day == 11)
-                ok_time = (sd.hour == 10 and sd.minute == 0)
+                # gcal.events columns are TIMESTAMPTZ UTC instants. Use
+                # get_zone_components (session-tz-independent) instead of bare
+                # sd.year/month/day/hour/minute, which follow the PG session tz.
+                ev_date, ev_hour, ev_minute = get_zone_components(sd, EXPECTED_TIMEZONE)
+                ok_date = (ev_date is not None and ev_date.year == 2026
+                           and ev_date.month == 3 and ev_date.day == 11)
+                ok_time = (ev_hour == 10 and ev_minute == 0)
                 if isinstance(end, datetime):
                     ed = end
                 elif end is not None:
@@ -284,6 +305,7 @@ def check_gcal():
                 else:
                     ed = None
                 if ed:
+                    # duration arithmetic on absolute instants is session-tz-safe.
                     dur = (ed - sd).total_seconds()
                     ok_dur = abs(dur - 3600) < 300  # 1 hour ± 5 min
             except Exception as e:

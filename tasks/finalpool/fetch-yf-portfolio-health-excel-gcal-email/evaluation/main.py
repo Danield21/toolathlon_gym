@@ -19,7 +19,7 @@ TASK_NAME = "fetch-yf-portfolio-health-excel-gcal-email"
 
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -157,9 +157,13 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
                             check(f"Metrics '{gt_m}' ~{gf}",
                                   abs(gf - af) <= tol, f"got {av}")
                         elif gt_v is not None and av is not None:
-                            # Non-numeric (e.g. Best_Opportunity = 'GOOGL') exact match
+                            # Non-numeric (e.g. Best_Opportunity = 'XOM') exact match.
+                            # Agents may annotate the value ("XOM (25.0%)") —
+                            # compare the leading ticker token, not the whole cell.
+                            gt_tok = str(gt_v).strip().split('(')[0].strip().split()[0] if str(gt_v).strip() else ''
+                            av_tok = str(av).strip().split('(')[0].strip().split()[0] if str(av).strip() else ''
                             check(f"Metrics '{gt_m}' == '{gt_v}'",
-                                  str(gt_v).strip().lower() == str(av).strip().lower(),
+                                  gt_tok.lower() == av_tok.lower(),
                                   f"got {av}")
 
         check("Recommendations sheet exists", "Recommendations" in wb.sheetnames)

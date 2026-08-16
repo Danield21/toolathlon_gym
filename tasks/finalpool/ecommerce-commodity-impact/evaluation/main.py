@@ -29,7 +29,7 @@ def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "database": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -44,20 +44,32 @@ def compute_expected_category_sales():
     """
     Compute expected category sales from completed WooCommerce orders.
     Returns a dict: {category_name: {"revenue": float, "order_count": int, "avg_order_value": float}}
+
+    Products carry the FULL category chain (e.g. [Audio, Speakers]) and the
+    WooCommerce API exposes it verbatim, so both parent-level ("Audio") and
+    leaf-level ("Speakers"/"Headphones") groupings are defensible readings.
+    We therefore compute expectations for EVERY category name that appears
+    anywhere in a product's chain — check_excel_categories then validates the
+    agent's rows against whichever granularity the agent chose, plus a
+    partition-conservation check (round-3 case-study 2026-08-16: fixing the
+    evaluator to cats[0] made leaf-level answers fail, and vice versa).
     """
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # Get product -> category mapping
+    # product -> ALL category names on its chain
     cur.execute("SELECT id, categories FROM wc.products")
-    prod_cat = {}
+    prod_cats = {}
     for pid, cats in cur.fetchall():
         if cats and len(cats) > 0:
-            prod_cat[pid] = cats[0]["name"]
+            prod_cats[pid] = [c.get("name") for c in cats if c.get("name")]
         else:
-            prod_cat[pid] = "Uncategorized"
+            prod_cats[pid] = ["Uncategorized"]
+    # names that appear as a product's FIRST (top-level) category — used to
+    # derive the partition total below.
+    top_names = {names[0] for names in prod_cats.values()}
 
-    # Get completed orders and their line items
+    # Get completed orders and their line items; accumulate per category name
     cur.execute("SELECT id, line_items FROM wc.orders WHERE status = 'completed'")
     cat_revenue = defaultdict(float)
     cat_orders = defaultdict(set)
@@ -69,9 +81,9 @@ def compute_expected_category_sales():
             pid = item.get("product_id")
             qty = item.get("quantity", 0)
             price = float(item.get("price", 0))
-            cat = prod_cat.get(pid, "Unknown")
-            cat_revenue[cat] += qty * price
-            cat_orders[cat].add(oid)
+            for cat in prod_cats.get(pid, ["Unknown"]):
+                cat_revenue[cat] += qty * price
+                cat_orders[cat].add(oid)
 
     conn.close()
 
@@ -85,6 +97,11 @@ def compute_expected_category_sales():
             "order_count": cnt,
             "avg_order_value": aov,
         }
+    # Top-level total (each order-line counted once at its product's primary
+    # category) — the conservation target for the partition check.
+    result["__partition_total__"] = round(
+        sum(v["revenue"] for k, v in result.items() if k in top_names), 2
+    )
     return result
 
 
@@ -171,7 +188,15 @@ def safe_float(val):
 # ---------------------------------------------------------------------------
 
 def check_excel_categories(wb, expected):
-    """Check the 'Category Sales' sheet against expected data."""
+    """Check the 'Category Sales' sheet against expected data.
+
+    The agent may group at any level of the category tree (parent "Audio" or
+    leaves "Speakers"/"Headphones") — the API exposes the full chain, so we:
+      1. validate each agent row against the per-name expectation,
+      2. require the chosen rows to form a PARTITION: summed revenue must
+         equal the top-level (cats[0]) total, so neither double counting
+         (Audio + Speakers) nor dropping a leaf is accepted.
+    """
     data = read_excel_sheet(wb, "Category Sales")
     if data is None:
         return False, "Sheet 'Category Sales' not found in workbook"
@@ -221,10 +246,24 @@ def check_excel_categories(wb, expected):
                 f"Category '{cat}': Avg_Order_Value mismatch: agent={agent_aov}, expected={exp['avg_order_value']}"
             )
 
-    # Check for missing categories
-    missing = set(expected.keys()) - found_categories
-    if missing:
-        errors.append(f"Missing categories: {missing}")
+    # Rows must partition the catalog: their summed revenue equals the
+    # top-level total (each order-line counted exactly once, at whichever
+    # granularity the agent picked). expected[cat]["revenue"] for parent
+    # categories IS that total because every product's chain starts with
+    # its top-level category.
+    known_rows = [r for r in data if str(r.get("Category", "")).strip() in expected]
+    partition_total = expected.get("__partition_total__")
+    if partition_total is not None and known_rows:
+        row_sum = sum(safe_float(r.get("Total_Revenue")) or 0 for r in known_rows)
+        if abs(row_sum - partition_total) > 2.0:
+            errors.append(
+                f"Rows do not partition the catalog: sum {round(row_sum,2)} != top-level total {partition_total} "
+                f"(double-counted or dropped categories)"
+            )
+
+    # Every top-level category must be represented by at least one row
+    # (either itself, or split across its leaves). A dropped leaf breaks the
+    # partition total above, so no separate missing-category check is needed.
 
     # Check sort order (by revenue descending)
     revenues = []
@@ -237,7 +276,7 @@ def check_excel_categories(wb, expected):
 
     if errors:
         return False, "Category Sales errors:\n  " + "\n  ".join(errors)
-    return True, f"Category Sales: all {len(expected)} categories verified correctly"
+    return True, f"Category Sales: all {len(found_categories)} category rows verified correctly"
 
 
 def check_excel_commodities(wb, expected):
@@ -327,11 +366,18 @@ def check_excel_summary(wb, expected_cats, expected_commodities):
         if metric:
             agent_metrics[metric] = value
 
-    # Compute expected summary values
-    sorted_cats = sorted(expected_cats.items(), key=lambda x: x[1]["revenue"], reverse=True)
+    # Compute expected summary values.
+    # Filter out the injected partition-total sentinel, then compute at the
+    # TOP-LEVEL granularity only (names that are primary categories): at
+    # leaf granularity the "bottom category" could be a sub-slice like
+    # Headphones(1160.89) instead of Cameras(1237.22) — both defensible, so
+    # we accept either the top-level or any leaf-level answer.
+    real_cats = {k: v for k, v in expected_cats.items() if not k.startswith("__")}
+    top_names = real_cats  # all known names incl. leaves; top identified by revenue partition
+    sorted_cats = sorted(real_cats.items(), key=lambda x: x[1]["revenue"], reverse=True)
     top_cat = sorted_cats[0]
     bottom_cat = sorted_cats[-1]
-    total_rev = sum(v["revenue"] for v in expected_cats.values())
+    total_rev = expected_cats.get("__partition_total__") or sum(v["revenue"] for v in real_cats.values())
 
     gold_pct = expected_commodities["GC=F"]["change_pct"]
     energy_pct = expected_commodities["XOM"]["change_pct"]
@@ -350,8 +396,11 @@ def check_excel_summary(wb, expected_cats, expected_commodities):
     expected_summary = {
         "Top_Category": ("str", top_cat[0]),
         "Top_Category_Revenue": ("num", round(top_cat[1]["revenue"], 2)),
-        "Bottom_Category": ("str", bottom_cat[0]),
-        "Bottom_Category_Revenue": ("num", round(bottom_cat[1]["revenue"], 2)),
+        # Bottom at leaf granularity differs from top-level (e.g. Headphones
+        # vs Cameras) — both are correct readings of the category tree, so
+        # validate against the agent's OWN Category Sales sheet instead of
+        # a fixed expectation (see below).
+        "Bottom_Category_Revenue": ("num", None),  # filled from agent sheet
         "Total_Store_Revenue": ("num", round(total_rev, 2)),
         "Gold_6M_Change_Pct": ("num", gold_pct),
         "Energy_6M_Change_Pct": ("num", energy_pct),
@@ -360,6 +409,29 @@ def check_excel_summary(wb, expected_cats, expected_commodities):
     }
 
     errors = []
+
+    # Bottom_Category must match the minimum-revenue row of the agent's OWN
+    # Category Sales sheet (any granularity is fine, but it must be the true
+    # minimum of whatever partition the agent reported).
+    agent_bottom_cat = str(agent_metrics.get("Bottom_Category", "")).strip()
+    agent_bottom_rev = safe_float(agent_metrics.get("Bottom_Category_Revenue"))
+    cs_data = read_excel_sheet(wb, "Category Sales") or []
+    cs_rows = [(str(r.get("Category", "")).strip(), safe_float(r.get("Total_Revenue")))
+               for r in cs_data]
+    cs_rows = [(c, v) for c, v in cs_rows if c and v is not None]
+    if cs_rows:
+        min_cat, min_rev = min(cs_rows, key=lambda x: x[1])
+        if agent_bottom_cat.lower() != min_cat.lower():
+            errors.append(
+                f"Metric 'Bottom_Category': mismatch: agent='{agent_bottom_cat}', "
+                f"minimum of own Category Sales='{min_cat}'"
+            )
+        if agent_bottom_rev is None or abs(agent_bottom_rev - min_rev) > 1.0:
+            errors.append(
+                f"Metric 'Bottom_Category_Revenue': mismatch: agent={agent_bottom_rev}, "
+                f"minimum of own Category Sales={round(min_rev, 2)} (tol=1.0)"
+            )
+    # else: Category Sales sheet already failed its own check
 
     for metric, (vtype, exp_val) in expected_summary.items():
         agent_val = agent_metrics.get(metric)
@@ -403,8 +475,30 @@ def check_memory(agent_workspace):
 
     try:
         with open(memory_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, Exception) as e:
+            raw = f.read().strip()
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            # Agent may write JSON Lines (one object per line) via the memory
+            # MCP's append semantics.  Two observed line shapes:
+            #   {"entities":[...],"relations":[...]}   (batch container)
+            #   {"type":"entity","name":...}           (memory MCP native append)
+            entities, relations = [], []
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                if obj.get("type") in ("entity", "relation"):
+                    if obj["type"] == "entity":
+                        entities.append(obj)
+                    else:
+                        relations.append(obj)
+                else:
+                    entities.extend(obj.get("entities", []))
+                    relations.extend(obj.get("relations", []))
+            data = {"entities": entities, "relations": relations}
+    except Exception as e:
         return False, f"memory/memory.json is not valid JSON: {e}"
 
     entities = data.get("entities", [])

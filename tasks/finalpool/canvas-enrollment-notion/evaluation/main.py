@@ -7,7 +7,7 @@ import sys
 
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432, dbname="toolathlon_gym", user="eigent", password="camel")
+DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")), dbname="toolathlon_gym", user="eigent", password="camel")
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
@@ -46,6 +46,39 @@ def _extract_text(json_obj):
             if k in json_obj:
                 return _extract_text(json_obj[k])
     return ""
+
+
+_PROP_META_KEYS = {"id", "type", "name"}
+
+
+def _prop_kind(pval):
+    """Determine a property value's kind (e.g. 'title', 'number').
+
+    The Notion provider stores page properties WITHOUT a `"type"` wrapper
+    ({"title": [...]}, {"number": 694}) — the kind is the non-meta key.
+    Some callers/representations instead carry a `"type"` discriminator
+    ({"type": "title", "title": [...]}, {"type": "number", "number": 694}).
+    Accept both."""
+    if not isinstance(pval, dict):
+        return None
+    ptype = pval.get("type")
+    if isinstance(ptype, str):
+        return ptype
+    for k in pval:
+        if k not in _PROP_META_KEYS:
+            return k
+    return None
+
+
+def _read_prop_value(pval, kind):
+    """Return the raw value for a property kind, handling both the
+    wrapped (with a `type` field) and unwrapped (kind-as-key) shapes.
+    Returns None when the property is not of the requested kind."""
+    if not isinstance(pval, dict):
+        return None
+    if pval.get("type") == kind or kind in pval:
+        return pval.get(kind)
+    return None
 
 
 def _normalize(s):
@@ -165,15 +198,14 @@ def check_notion(expected):
     for pid, props in pages:
         if not props:
             continue
-        # Find the title property value
+        # Find the title property value. A property's kind may be carried as a
+        # "type" field OR as the value's key (the provider stores the latter).
         title_text = ""
-        # props is dict of {propname: {type:..., title:..., number:..., ...}}
         for pname, pval in props.items():
-            if isinstance(pval, dict):
-                ptype = pval.get("type")
-                if ptype == "title":
-                    title_text = _extract_text(pval.get("title", []))
-                    break
+            tval = _read_prop_value(pval, "title")
+            if tval is not None:
+                title_text = _extract_text(tval)
+                break
         seen_titles.append(title_text)
         # Loose match: title must contain the course name core (or vice versa),
         # be within edit distance 3, or contain all course-name keywords
@@ -184,12 +216,11 @@ def check_notion(expected):
             # Verify the student count only (per task.md)
             student_val = None
             for pname, pval in props.items():
-                if not isinstance(pval, dict): continue
                 lname = _normalize(pname).replace(" ", "_")
-                if pval.get("type") == "number":
-                    val = pval.get("number")
-                    if lname in ("student_count", "studentcount", "students", "student"):
-                        student_val = val
+                if lname in ("student_count", "studentcount", "students", "student"):
+                    nval = _read_prop_value(pval, "number")
+                    if nval is not None:
+                        student_val = nval
             pages_with_props_checked += 1
             ok = (student_val == exp["students"])
             if ok:

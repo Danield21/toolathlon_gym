@@ -5,9 +5,19 @@ import sys
 
 import psycopg2
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ; bare start_dt.hour silently
+# compares wrong in non-UTC PG sessions. Use gcal_helpers.
+# ──────────────────────────────────────────────────────────────────────────
+# task.md: SF company L&D program → America/Los_Angeles (PT)
+EXPECTED_TIMEZONE = "America/Los_Angeles"
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -338,7 +348,14 @@ def main():
                 f"GCal: found {len(priority_events)} priority-department training events, expected 3"
             )
         # Date coverage (any of priority events on each expected date)
-        dates_seen = {start_dt.date().isoformat() for _, _, start_dt, _ in priority_events if start_dt}
+        # gcal.events.start_datetime is TIMESTAMPTZ; convert to EXPECTED_TIMEZONE
+        # via session-tz-independent helper. Bare start_dt.date() can shift a day.
+        dates_seen = {
+            get_zone_components(start_dt, EXPECTED_TIMEZONE)[0].isoformat()
+            for _, _, start_dt, _ in priority_events
+            if start_dt is not None
+            and get_zone_components(start_dt, EXPECTED_TIMEZONE)[0] is not None
+        }
         for d in TRAINING_DATES:
             if d not in dates_seen:
                 all_errors.append(f"GCal: no priority training event on {d}")
@@ -348,10 +365,12 @@ def main():
             if start_dt is None or end_dt is None:
                 all_errors.append(f"GCal event '{summary}' missing start/end timestamps")
                 continue
-            if start_dt.hour != 9 or start_dt.minute != 0:
-                all_errors.append(f"GCal event '{summary}' start_datetime hour={start_dt.hour}:{start_dt.minute}, expected 09:00")
-            if end_dt.hour != 17 or end_dt.minute != 0:
-                all_errors.append(f"GCal event '{summary}' end_datetime hour={end_dt.hour}:{end_dt.minute}, expected 17:00")
+            _sd, s_h, s_m = get_zone_components(start_dt, EXPECTED_TIMEZONE)
+            _ed, e_h, e_m = get_zone_components(end_dt, EXPECTED_TIMEZONE)
+            if s_h != 9 or s_m != 0:
+                all_errors.append(f"GCal event '{summary}' start hour={s_h}:{s_m}, expected 09:00")
+            if e_h != 17 or e_m != 0:
+                all_errors.append(f"GCal event '{summary}' end hour={e_h}:{e_m}, expected 17:00")
             duration = end_dt - start_dt
             if duration != timedelta(hours=8):
                 all_errors.append(f"GCal event '{summary}' duration={duration}, expected 8h")

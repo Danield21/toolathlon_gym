@@ -15,7 +15,7 @@ import sys
 import openpyxl
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
+DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")),
           dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
           user="eigent", password="camel")
 
@@ -214,8 +214,8 @@ def check_excel(agent_workspace, expected):
         sym_aliases = {"^DJI": ["DJI", "^DJI"], "AMZN": ["AMZN"], "JPM": ["JPM"]}
         expected_names = {
             "^DJI": "Dow Jones Industrial Average",
-            "AMZN": "Amazon.com Inc",
-            "JPM": "JPMorgan Chase & Co",
+            "AMZN": "Amazon.com, Inc.",
+            "JPM": "JPMorgan Chase & Co.",
         }
         for sym, aliases in sym_aliases.items():
             r = None

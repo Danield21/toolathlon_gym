@@ -15,9 +15,20 @@ import sys
 import openpyxl
 import psycopg2
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ; bare start_dt.strftime("%H:%M")
+# displays in PG session TimeZone (compute node Asia/Shanghai → ET time slot
+# shows as a different HH:MM in CN). Use gcal_helpers.
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 9: "Use the timezone America/New_York"
+EXPECTED_TIMEZONE = "America/New_York"
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -336,8 +347,15 @@ def check_gcal():
     gcal_unique = set()
     for summary, description, start_dt, end_dt in events:
         if start_dt:
-            date_key = start_dt.strftime("%Y-%m-%d")
-            time_key = start_dt.strftime("%H:%M")
+            # gcal.events.start_datetime is TIMESTAMPTZ; use session-tz-
+            # independent helper to extract ET date/hour/minute.
+            ev_date, ev_hour, ev_minute = get_zone_components(
+                start_dt, EXPECTED_TIMEZONE
+            )
+            if ev_date is None:
+                continue
+            date_key = ev_date.strftime("%Y-%m-%d")
+            time_key = f"{ev_hour:02d}:{ev_minute:02d}"
             gcal_unique.add((date_key, time_key))
     check(f"Exactly {len(unique_slots)} unique (date, time) events",
           len(gcal_unique) == len(unique_slots),

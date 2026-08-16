@@ -14,10 +14,29 @@ import sys
 from datetime import datetime
 
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `st.date()` on rows read from `gcal.events`: psycopg2
+# returns them in the PG session `TimeZone` (case-study: compute node
+# default was Asia/Shanghai), so `st.date()` can shift a day. Use
+# `utils.evaluation.gcal_helpers` instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md: "Schedule each event on the assignment due date." Canvas default
+# timezone is ET (America/New_York), and the event must match the due_at
+# calendar day in that timezone. We compare both sides in ET to stay
+# session-tz-independent and self-consistent.
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
 
 DB_CONFIG = {
     "host": os.environ.get("PGHOST", "localhost"),
-    "port": 5432,
+    "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": "toolathlon_gym",
     "user": "eigent",
     "password": "camel",
@@ -200,17 +219,20 @@ def check_calendar(assignments):
 
     # Check event start_datetime matches assignment due_at
     if assignments and course_events:
-        # Build map: code -> set of due_at dates
+        # Build map: code -> set of due_at dates, expressed in
+        # EXPECTED_TIMEZONE (ET) so the comparison is session-tz-independent
+        # and self-consistent with the gcal event side below.
         due_dates = {}
         for code, aid, aname, due in assignments:
             if due:
-                due_dates.setdefault(code, set()).add(due.date())
+                due_d, _, _ = get_zone_components(due, EXPECTED_TIMEZONE)
+                due_dates.setdefault(code, set()).add(due_d)
 
-        # Check each event start date matches some due_at
+        # Check each event start date (in ET) matches some due_at.
         match_count = 0
         for summary, st, code in course_events:
             if st and code in due_dates:
-                ev_date = st.date() if hasattr(st, 'date') else None
+                ev_date, _, _ = get_zone_components(st, EXPECTED_TIMEZONE)
                 if ev_date in due_dates[code]:
                     match_count += 1
         ratio = match_count / len(course_events) if course_events else 0

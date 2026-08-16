@@ -4,13 +4,31 @@ import os
 import sys
 
 import psycopg2
+from zoneinfo import ZoneInfo
+
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime / end_datetime are TIMESTAMPTZ storing the UTC
+# instant. psycopg2 returns a tz-aware datetime whose display tz follows the
+# PG session TimeZone (case-study: compute node default Asia/Shanghai), so
+# bare sd.hour / sd.date() silently compares against the wrong wall-clock.
+# Use utils.evaluation.gcal_helpers (session-tz-independent, DST-aware).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 15: portfolio review meeting on March 15, 2026 from 2:00 PM
+# to 3:00 PM (portfolio / financial context → America/New_York / ET).
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+EXPECTED_REVIEW_DATE = "2026-03-15"
+EXPECTED_REVIEW_HOUR = 14   # 2:00 PM ET
+EXPECTED_REVIEW_MINUTE = 0
 
 def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
     return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
 
 from pptx import Presentation
 
-DB = {"host": os.environ.get("PGHOST", "localhost"), "port": 5432, "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
+DB = {"host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")), "dbname": "toolathlon_gym", "user": "eigent", "password": "camel"}
 
 
 def main():
@@ -147,10 +165,15 @@ def main():
                 try:
                     if start_dt is None:
                         continue
-                    date_match = str(start_dt)[:10] == "2026-03-15"
-                    hour_match = hasattr(start_dt, 'hour') and start_dt.hour == 14
+                    # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant);
+                    # bare start_dt.hour / str(start_dt)[:10] follow the PG session
+                    # TimeZone (case-study: Asia/Shanghai), so go through the
+                    # session-tz-independent helper anchored to task.md's ET.
+                    ev_date, ev_hour, ev_minute = get_zone_components(start_dt, EXPECTED_TIMEZONE)
+                    date_match = ev_date is not None and ev_date.isoformat() == EXPECTED_REVIEW_DATE
+                    hour_match = ev_hour == EXPECTED_REVIEW_HOUR and ev_minute == EXPECTED_REVIEW_MINUTE
                     duration_match = False
-                    if hasattr(start_dt, 'hour') and end_dt is not None and hasattr(end_dt, 'hour'):
+                    if end_dt is not None:
                         duration_min = (end_dt - start_dt).total_seconds() / 60
                         duration_match = 55 <= duration_min <= 75
                     loc_match = location and "conference room a" in str(location).lower()

@@ -63,7 +63,7 @@ def _get_valid_paper_titles():
     try:
         import psycopg2
         conn = psycopg2.connect(
-            host=os.environ.get("PGHOST", "localhost"), port=5432,
+            host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")),
             dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
             user=os.environ.get("PGUSER", "eigent"),
             password=os.environ.get("PGPASSWORD", "camel"),
@@ -314,16 +314,20 @@ def check_notion():
         import psycopg2, json
         conn = psycopg2.connect(
             host=os.environ.get("PGHOST", "localhost"),
-            port=5432,
+            port=int(os.environ.get("PGPORT", "5432")),
             dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
             user=os.environ.get("PGUSER", "eigent"),
             password=os.environ.get("PGPASSWORD", "camel"),
         )
         cur = conn.cursor()
         # Find the agent's "Accreditation Review Report" page (NOT the preprocess parent "Accreditation Documents")
-        cur.execute("SELECT id, properties FROM notion.pages")
+        # Skip trashed/archived pages: agent may create multiple pages with the same title
+        # and trash earlier ones (e.g. after schema validation failures).
+        cur.execute("SELECT id, properties, in_trash, archived FROM notion.pages")
         target_page = None
-        for pid, props in cur.fetchall():
+        for pid, props, in_trash, archived in cur.fetchall():
+            if in_trash or archived:
+                continue
             if props is None:
                 continue
             try:

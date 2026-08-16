@@ -309,16 +309,35 @@ def check_memory(agent_workspace):
 
     check("Memory has content", True)
 
+    # The memory MCP server can emit either a single JSON object/array or
+    # newline-delimited JSON (JSONL, one entity/record per line). Parse both
+    # (audit §B.1.5): first try a single-document parse; on failure, fall back
+    # to line-by-line parsing and merge into one entity list.
+    memory_data = None
     try:
         memory_data = json.loads(content)
     except json.JSONDecodeError:
-        check("Memory is valid JSON", False, "Cannot parse memory.json")
-        return
+        parsed_lines = []
+        ok = True
+        for ln in content.splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                parsed_lines.append(json.loads(ln))
+            except json.JSONDecodeError:
+                ok = False
+                break
+        if ok and parsed_lines:
+            memory_data = parsed_lines
+        else:
+            check("Memory is valid JSON", False, "Cannot parse memory.json (tried JSON and JSONL)")
+            return
 
     check("Memory is valid JSON", True)
 
     # Check for entities
-    entities = memory_data.get("entities", [])
+    entities = memory_data.get("entities", []) if isinstance(memory_data, dict) else []
     if isinstance(memory_data, list):
         entities = memory_data
 

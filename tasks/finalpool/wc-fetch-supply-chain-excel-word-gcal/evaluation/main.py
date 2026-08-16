@@ -3,12 +3,20 @@ import os
 import argparse, json, os, sys
 import openpyxl
 
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# gcal.events.start_datetime is TIMESTAMPTZ; bare r[1].hour silently compares
+# wrong in non-UTC PG sessions. Use gcal_helpers.
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 11: "9:00 AM to 10:30 AM UTC" → UTC target
+from utils.evaluation.gcal_helpers import get_utc_components  # noqa: E402
+
 def num_close(a, b, rel_tol=0.15, abs_tol=0.5):
     return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel_tol)
 
 
 DB_CONFIG = {
-    "host": os.environ.get("PGHOST", "localhost"), "port": 5432,
+    "host": os.environ.get("PGHOST", "localhost"), "port": int(os.environ.get("PGPORT", "5432")),
     "dbname": os.environ.get("PGDATABASE", "toolathlon_gym"),
     "user": "eigent", "password": "camel"
 }
@@ -133,12 +141,13 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         if rows:
             time_ok = False
             for r in rows:
-                try:
-                    if r[1].hour == 9 and r[2].hour == 10 and r[2].minute == 30:
-                        time_ok = True
-                        break
-                except Exception:
-                    pass
+                # gcal.events.start_datetime is TIMESTAMPTZ; use session-tz-
+                # independent helper to extract UTC hour.
+                _sd, sh = get_utc_components(r[1])[:2]
+                _ed, eh, em = get_utc_components(r[2])
+                if sh == 9 and eh == 10 and em == 30:
+                    time_ok = True
+                    break
             check("Meeting at 09:00-10:30", time_ok, f"Times: {[(r[1],r[2]) for r in rows]}")
         # Reverse verification: noise events should not match task keyword
         cur.execute("SELECT COUNT(*) FROM gcal.events WHERE summary ILIKE '%standup%' OR summary ILIKE '%lunch%'")

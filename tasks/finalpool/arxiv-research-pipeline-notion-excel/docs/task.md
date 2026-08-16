@@ -2,7 +2,7 @@ I need to build a comprehensive research knowledge base for our team studying la
 
 Then use the paper repository to download and read the full content of the most relevant papers. Analyze their LaTeX source when available to extract detailed methodology sections.
 
-Write and run a Python script called research_synthesizer.py in the workspace that reads papers_metadata.json and paper_contents.json (create both first), extracts key methods, creates a citation network map, calculates relevance scores, and outputs research_synthesis.json.
+Write and run a Python script called research_synthesizer.py in the workspace that reads papers_metadata.json and papers_contents.json (create both first), extracts key methods, creates a citation network map, calculates relevance scores, and outputs research_synthesis.json.
 
 Create an Excel file called Research_Knowledge_Base.xlsx with three sheets. The first sheet Paper_Catalog should have columns Paper_ID, Title, Authors, Year, Category, and Citation_Count, sorted by Citation_Count descending. The second sheet Method_Comparison should have columns Method_Name, Paper_Source, Key_Innovation, Benchmark_Result, and Applicability ("High", "Medium", "Low"). The third sheet Research_Gaps should have Gap_Area, Current_State, Opportunity, and Priority ("Critical", "Important", "Nice-to-have") columns with at least 4 identified gaps. In the Excel file, write all values as literal text/numbers directly into the cells; do not use Excel formulas.
 

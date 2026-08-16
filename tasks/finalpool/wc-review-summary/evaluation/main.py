@@ -31,7 +31,7 @@ def check_notion():
     import json as _json
     try:
         conn = psycopg2.connect(
-            host=os.environ.get("PGHOST", "localhost"), port=5432,
+            host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")),
             dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
             user="eigent", password="camel",
         )
@@ -325,7 +325,7 @@ def main():
                     valid_top_rated = set()
                     try:
                         with psycopg2.connect(
-                            host=os.environ.get("PGHOST", "localhost"), port=5432,
+                            host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")),
                             dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
                             user="eigent", password="camel",
                         ) as _c:

@@ -28,7 +28,7 @@ import openpyxl
 PASS_COUNT = 0
 FAIL_COUNT = 0
 
-DB_CONFIG = dict(host=os.environ.get('PGHOST', 'localhost'), port=5432, database='toolathlon_gym',
+DB_CONFIG = dict(host=os.environ.get('PGHOST', 'localhost'), port=int(os.environ.get("PGPORT", "5432")), database='toolathlon_gym',
                  user=os.environ.get('PGUSER', 'eigent'), password=os.environ.get('PGPASSWORD', 'camel'))
 
 # Valid HowToCook categories (Chinese)
@@ -88,11 +88,19 @@ def compute_expected_from_db():
         return None
 
     # --- Home Appliances products ---
+    # task.md asks for the REGULAR price; `price` is the (possibly promotional)
+    # sale price and regular_price the list price. Both columns are NUMERIC, so
+    # prefer regular_price with a plain COALESCE fallback to price for rows
+    # where the list price is null (products without a sale).
+    # (c4 case-study 2026-08-15: evaluator read `price`=3.00 promo while the
+    # agent correctly reported regular_price=12.04.)
     cur.execute("""
-        SELECT name, price, stock_quantity
+        SELECT name,
+               COALESCE(regular_price, price) AS price,
+               stock_quantity
         FROM wc.products
         WHERE categories::text LIKE '%%Home Appliances%%'
-        ORDER BY price::numeric ASC
+        ORDER BY COALESCE(regular_price, price) ASC
     """)
     products = cur.fetchall()
     if not products:

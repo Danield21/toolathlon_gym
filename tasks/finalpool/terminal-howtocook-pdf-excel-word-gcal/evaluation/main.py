@@ -2,11 +2,31 @@
 import argparse
 import os
 import sys
+from zoneinfo import ZoneInfo
 
 import openpyxl
 import psycopg2
 
-DB = dict(host=os.environ.get("PGHOST", "localhost"), port=5432,
+# ──────────────────────────────────────────────────────────────────────────
+# EVALUATION GROUND TRUTH SPEC (gcal tz root-fix v3, case-study 2026-08-13)
+# Source of truth: docs/task.md. The Calendar MCP writes events as UTC
+# instants into the DB (`TIMESTAMPTZ`), so all comparisons anchor to the
+# timezone that task.md declares for the event's wall-clock semantics.
+# Never use bare `sd.hour` / `sd.day` on rows read from `gcal.events`:
+# psycopg2 returns them in the PG session `TimeZone` (case-study: compute
+# node default was Asia/Shanghai). Use `utils.evaluation.gcal_helpers`
+# instead (session-tz-independent).
+# ──────────────────────────────────────────────────────────────────────────
+# task.md line 5: "Food Festival Prep" campus dining event. task.md line 17:
+# "scheduled from 7:00 AM to 10:00 AM". howtocook series default ET (case-study
+# 2026-08-13: howtocook 默认 ET 一致). -> America/New_York (ET).
+EXPECTED_TIMEZONE = ZoneInfo("America/New_York")
+
+# Evaluator runs as `python -m tasks.finalpool.<task>.evaluation.main` with
+# cwd = /workspace (toolathlon_gym root), so `utils/` is importable directly.
+from utils.evaluation.gcal_helpers import get_zone_components  # noqa: E402
+
+DB = dict(host=os.environ.get("PGHOST", "localhost"), port=int(os.environ.get("PGPORT", "5432")),
           dbname=os.environ.get("PGDATABASE", "toolathlon_gym"),
           user="eigent", password="camel")
 
@@ -183,21 +203,24 @@ def check_gcal():
             """)
             events = cur.fetchall()
 
-            # Check date range (March 9-13, 2026)
+            # Check date range (March 9-13, 2026) and times (7:00 AM start).
+            # gcal.events.start_datetime is TIMESTAMPTZ (UTC instant); extract
+            # components in EXPECTED_TIMEZONE (ET) so a 7 AM ET event stored
+            # as 12:00Z is not misread by a non-UTC PG session tz
+            # (case-study 2026-08-13).
             for ev in events:
                 start = ev[1]
-                if start:
-                    check(f"Event '{ev[0]}' in March 9-13",
-                          start.month == 3 and 9 <= start.day <= 13,
-                          f"Date: {start}")
-
-            # Check times (7:00 AM start)
-            for ev in events:
-                start = ev[1]
-                if start:
-                    check(f"Event '{ev[0]}' starts at 7 AM",
-                          start.hour == 7,
-                          f"Hour: {start.hour}")
+                if start is None:
+                    continue
+                ev_date, ev_hour, ev_minute = get_zone_components(start, EXPECTED_TIMEZONE)
+                if ev_date is None:
+                    continue
+                check(f"Event '{ev[0]}' in March 9-13",
+                      ev_date.month == 3 and 9 <= ev_date.day <= 13,
+                      f"Date: {ev_date}")
+                check(f"Event '{ev[0]}' starts at 7 AM",
+                      ev_hour == 7,
+                      f"Hour: {ev_hour} (ET)")
 
             # Check descriptions have content
             with_desc = [ev for ev in events if ev[3] and len(ev[3]) > 10]
