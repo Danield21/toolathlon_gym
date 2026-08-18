@@ -155,9 +155,15 @@ class PgCalendar {
                 // (case-study 2026-08-12, case #2). Store the UTC ISO string.
                 const startUtc = toUtcIso(startDateTime, startTimeZone);
                 const endUtc = toUtcIso(endDateTime, endTimeZone);
+                // recurrence is a real column (gcal.events.recurrence jsonb); the
+                // old INSERT never wrote it, silently dropping the agent's RRULE
+                // (2026-08-16 fix4 case study: yt-fireship "recurrence" FAIL).
+                const recurrenceJson = requestBody.recurrence
+                    ? JSON.stringify(requestBody.recurrence)
+                    : null;
                 const result = await pool.query(
-                    `INSERT INTO gcal.events (summary, description, location, start_datetime, start_timezone, end_datetime, end_timezone)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    `INSERT INTO gcal.events (summary, description, location, start_datetime, start_timezone, end_datetime, end_timezone, attendees, recurrence)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)
                      RETURNING *`,
                     [
                         requestBody.summary || null,
@@ -167,6 +173,8 @@ class PgCalendar {
                         startTimeZone,
                         endUtc,
                         endTimeZone,
+                        requestBody.attendees ? JSON.stringify(requestBody.attendees) : '[]',
+                        recurrenceJson,
                     ]
                 );
                 return { data: formatEvent(result.rows[0]) };
@@ -215,6 +223,11 @@ class PgCalendar {
                 if (requestBody.end?.timeZone !== undefined) {
                     setClauses.push(`end_timezone = $${paramIndex++}`);
                     values.push(requestBody.end.timeZone);
+                }
+                // recurrence: an explicit [] clears it; a non-empty array sets the RRULE.
+                if (requestBody.recurrence !== undefined) {
+                    setClauses.push(`recurrence = $${paramIndex++}::jsonb`);
+                    values.push(requestBody.recurrence ? JSON.stringify(requestBody.recurrence) : null);
                 }
 
                 // Always update the updated timestamp

@@ -710,6 +710,55 @@ export class CanvasClient {
     return response.data;
   }
 
+  /**
+   * Official Canvas bulk endpoint: GET /courses/:course_id/students/submissions
+   * Supports student_ids[]=all, assignment_ids[], grouped=true, per_page.
+   */
+  async listStudentsSubmissions(
+    courseId: number,
+    opts: {
+      page?: number;
+      perPage?: number;
+      studentIds?: (string | number)[];
+      assignmentIds?: (string | number)[];
+      grouped?: boolean;
+    } = {},
+  ): Promise<any> {
+    const page = Math.max(1, Math.floor(opts.page || 1));
+    const perPage = Math.min(100, Math.max(1, Math.floor(opts.perPage || 100)));
+    const params: Record<string, any> = {
+      page,
+      per_page: perPage,
+    };
+    if (opts.studentIds && opts.studentIds.length > 0) {
+      params.student_ids = opts.studentIds.map(String);
+    }
+    if (opts.assignmentIds && opts.assignmentIds.length > 0) {
+      params.assignment_ids = opts.assignmentIds.map(String);
+    }
+    if (opts.grouped) {
+      params.grouped = true;
+    }
+    const response = await this.client.get(`/courses/${courseId}/students/submissions`, {
+      params,
+    });
+    // Backward compat: bare array from an old router means unpaginated dump.
+    if (Array.isArray(response.data)) {
+      const rows = response.data;
+      return {
+        submissions: rows,
+        pagination: {
+          page,
+          per_page: perPage,
+          total_count: rows.length,
+          total_pages: 1,
+          has_more: false,
+        },
+      };
+    }
+    return response.data;
+  }
+
   // ---------------------
   // USER PROFILE (Enhanced)
   // ---------------------

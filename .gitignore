@@ -12,8 +12,10 @@ dumps/
 _test_workspace/
 logs/
 
-# Local eval secrets / API keys
+# Local eval secrets / API keys (incl. per-run config.<name>.env with live
+# relay keys / internal URLs — keep these local-only)
 run_sh/**/config.env
+run_sh/**/config.*.env
 run_sh/**/.env
 *.secret
 

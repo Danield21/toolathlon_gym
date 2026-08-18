@@ -15,7 +15,11 @@ import sys
 from pathlib import Path
 
 DELEGATION_TOOLS = {"Agent", "AgentSwarm"}
-RUN_DIR_RE = re.compile(r"^\d{8}-\d{6}(?:[-_][A-Za-z0-9_.-]+)?_slot\d+$")
+# Slot dir names are "<RUN_ID>_slot<N>" where RUN_ID may be a bare timestamp
+# (20260817-002742) or carry a prefix (rerun-fix6-20260817-102737,
+# subagent-20260817-120650). Accept an optional alphanumeric prefix before
+# the timestamp so prefixed runs still match.
+RUN_DIR_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9_.-]*[-_])?\d{8}-\d{6}(?:[-_][A-Za-z0-9_.-]+)?_slot\d+$")
 
 
 def load_json(p: Path):
@@ -159,8 +163,20 @@ def parse_wire(wire_path: Path) -> dict:
                 cur_step = {"step": sn, "calls": [], "content": ""}
                 steps[sn] = cur_step
             elif et == "tool.call":
-                call = {"name": ev.get("name"), "args": ev.get("args") or {},
-                        "id": ev.get("toolCallId"), "result": None, "is_error": False}
+                raw_args = ev.get("args")
+                if isinstance(raw_args, str):
+                    try:
+                        parsed = json.loads(raw_args)
+                        call = {"name": ev.get("name"), "args": parsed if isinstance(parsed, dict) else {},
+                                "args_text": raw_args,
+                                "id": ev.get("toolCallId"), "result": None, "is_error": False}
+                    except Exception:
+                        call = {"name": ev.get("name"), "args": {},
+                                "args_text": raw_args,
+                                "id": ev.get("toolCallId"), "result": None, "is_error": False}
+                else:
+                    call = {"name": ev.get("name"), "args": raw_args or {},
+                            "id": ev.get("toolCallId"), "result": None, "is_error": False}
                 if cur_step is not None:
                     cur_step["calls"].append(call)
             elif et == "tool.result":
@@ -232,6 +248,53 @@ def compute_critical_steps(main_wire: dict, sub_wires: list[dict]) -> dict:
             "main_steps": total_main}
 
 
+def compute_plan_first_metrics(main_wire: dict) -> dict:
+    """Compliance metrics for the plan-first arm (monitoring only, no gating).
+
+    plan_first_ok   : the first Agent/AgentSwarm dispatch on the main wire was
+                      an Agent call with subagent_type == 'plan'.
+    pre_plan_actions: number of main-agent tool calls before that plan dispatch
+                      (0 = planned immediately; large = worked solo first).
+    n_plan_dispatches: how many plan-sub-agent dispatches happened in total.
+    """
+    out = {"plan_first_ok": None, "pre_plan_actions": None,
+           "n_plan_dispatches": 0, "first_dispatch": None}
+    actions_before = 0
+    for st in main_wire.get("steps", []):
+        for call in st.get("calls", []):
+            name = call.get("name")
+            if name == "Agent":
+                sub_type = (call.get("args") or {}).get("subagent_type")
+                if sub_type == "plan":
+                    out["n_plan_dispatches"] += 1
+                    if out["plan_first_ok"] is None:
+                        out["plan_first_ok"] = True
+                        out["pre_plan_actions"] = actions_before
+                        out["first_dispatch"] = sub_type
+                    actions_before += 1
+                    continue
+                if out["plan_first_ok"] is None:
+                    out["plan_first_ok"] = False
+                    out["pre_plan_actions"] = actions_before
+                    out["first_dispatch"] = sub_type
+            elif name == "AgentSwarm":
+                items = (call.get("args") or {}).get("items") or []
+                if isinstance(items, list):
+                    for it in items:
+                        if isinstance(it, dict) and it.get("subagent_type") == "plan":
+                            out["n_plan_dispatches"] += 1
+                if out["plan_first_ok"] is None:
+                    out["plan_first_ok"] = False
+                    out["pre_plan_actions"] = actions_before
+                    out["first_dispatch"] = "AgentSwarm"
+            else:
+                actions_before += 1
+    if out["plan_first_ok"] is None and main_wire.get("n_steps"):
+        # delegated but never dispatched a plan sub-agent
+        out["plan_first_ok"] = False
+    return out
+
+
 def parse_tools_inventory(inner: Path) -> dict:
     out: dict = {"mcp_servers": [], "subagents": []}
     mcp = load_json(inner / ".kimi_home" / "mcp.json")
@@ -297,12 +360,21 @@ _PY_STRING_RE = re.compile(
 _PY_COMMENT_RE = re.compile(r'#(?!\\).*$', re.M)
 
 
+# Cap rendered code/JSON so a single pathological call cannot balloon the
+# audit page into tens of MB.
+_MAX_CODE_CHARS = 8000
+_MAX_JSON_CHARS = 6000
+_MAX_PLAIN_RESULT_CHARS = 3000
+
+
 def _render_python_block(code: str) -> str:
     """Render Python source with light syntax highlighting (no deps).
 
     Tokenize first (strings/comments), then escape each segment and wrap in
     spans so we never run keyword regex over already-escaped HTML.
     """
+    if len(code) > _MAX_CODE_CHARS:
+        code = code[:_MAX_CODE_CHARS] + "\n… (truncated)"
     # find all strings first
     spans: list[tuple[int, int, str]] = []  # (start, end, css_class)
     for m in _PY_STRING_RE.finditer(code):
@@ -340,6 +412,103 @@ def _render_shell_block(cmd: str) -> str:
     esc = html.escape(cmd)
     esc = re.sub(r'(?m)^(\s*[$#]\s+)', r'<span class="sh-prompt">\1</span>', esc)
     return f'<pre class="code-block sh">{esc}</pre>'
+
+
+_EMBEDDED_JSON_RE = re.compile(
+    r'(\{(?:[^{}"]|"(?:[^"\\]|\\.)*"|"(?:[^"\\]|\\.)*"\s*:\s*\{(?:[^{}]|\{(?:[^{}])*\})*\})*\})')
+
+
+def _split_embedded_json(text: str):
+    """Split mixed text like 'prose <mcp-structured-result>{json}</mcp-structured-result>'
+    into segments; returns list of (kind, value) where kind is 'text' or 'json'."""
+    segments = []
+    pos = 0
+    for m in re.finditer(r'\{[\s\S]*\}', text):
+        start, end = m.start(), m.end()
+        if pos < start:
+            segments.append(("text", text[pos:start]))
+        segments.append(("json", text[start:end]))
+        pos = end
+    if pos < len(text):
+        segments.append(("text", text[pos:]))
+    # keep only well-formed JSON segments as json; others stay text
+    out = []
+    for kind, val in segments:
+        if kind == "json":
+            try:
+                json.loads(val)
+                out.append(("json", val))
+                continue
+            except Exception:
+                pass
+        out.append(("text", val))
+    return out
+
+
+def _render_json_block(text: str, cls: str = "code-block js") -> str:
+    """Pretty-print JSON-ish text with key/string/number highlighting.
+
+    Tries a real json.loads round-trip first (handles objects, arrays and
+    top-level scalars); on failure falls back to best-effort bracket/quote
+    highlighting so the block still reads better than one raw line.
+    """
+    raw = text.strip()
+    if not raw:
+        return ""
+    truncated = len(raw) > _MAX_JSON_CHARS
+    raw = raw[:_MAX_JSON_CHARS]
+    pretty = None
+    try:
+        obj = json.loads(raw)
+        pretty = json.dumps(obj, ensure_ascii=False, indent=2)
+    except Exception:
+        # String args are often single-quoted Python dicts; try ast.literal_eval
+        try:
+            import ast
+            obj = ast.literal_eval(raw)
+            pretty = json.dumps(obj, ensure_ascii=False, indent=2, default=str)
+        except Exception:
+            pretty = None
+    if truncated:
+        pretty = None  # don't re-format a truncated document
+    if pretty is not None:
+        esc = html.escape(pretty)
+        # html.escape turns " into &quot;. String literals may contain escaped
+        # quotes (\"), which escape() renders as \&quot;. Match a full quoted
+        # literal including inner escapes so nested quotes stay one span.
+        esc = re.sub(r'&quot;(?:[^&\\]|\\.|&(?!quot;))*?&quot;(?=\s*:)', lambda m: f'<span class="js-key">{m.group(0)}</span>', esc)
+        esc = re.sub(r'(?<=[:\[,])(\s*)(&quot;(?:[^&\\]|\\.|&(?!quot;))*?&quot;)', lambda m: f'{m.group(1)}<span class="js-str">{m.group(2)}</span>', esc)
+        esc = re.sub(r':\s*(-?\b\d+(?:\.\d+)?\b)', r': <span class="js-num">\1</span>', esc)
+        esc = re.sub(r':\s*\b(true|false|null)\b', r': <span class="js-kw">\1</span>', esc)
+        return f'<pre class="{cls}">{esc}</pre>'
+    # Mixed prose + embedded JSON (e.g. MCP results wrapped in
+    # <mcp-structured-result>...</mcp-structured-result>): render each part
+    # in its own style so the JSON payload is still readable.
+    parts = _split_embedded_json(raw)
+    if len(parts) > 1 or (parts and parts[0][0] == "json"):
+        rendered = []
+        for kind, val in parts:
+            if kind == "json":
+                rendered.append(_render_json_block(val, cls))
+            else:
+                t = html.escape(val)
+                if truncated and val is parts[-1][1]:
+                    t += "\n… (truncated)"
+                rendered.append(f'<pre class="code-block mixed">{t}</pre>')
+        return "".join(rendered)
+    esc = html.escape(raw)
+    if truncated:
+        esc += "\n… (truncated)"
+    return f'<pre class="{cls}">{esc}</pre>'
+
+
+def _json_block_from_value(value, cls: str = "code-block js") -> str:
+    """Pretty-print an already-parsed Python value as highlighted JSON."""
+    try:
+        pretty = json.dumps(value, ensure_ascii=False, indent=2)
+    except Exception:
+        return _render_json_block(str(value), cls)
+    return _render_json_block(pretty, cls)
 
 
 def _is_python_tool(name: str) -> bool:
@@ -384,14 +553,20 @@ def render_call(call: dict) -> str:
         other_args = {k: v for k, v in call["args"].items()
                       if k not in ("code", "command", "cmd")}
         if other_args:
-            other_json = json.dumps(other_args, ensure_ascii=False, indent=2)
             parts.append(f'<details class="args"><summary>other args</summary>'
-                         f'<div class="md-pre">{html.escape(other_json)}</div></details>')
+                         f'{_json_block_from_value(other_args)}</details>')
     else:
-        full_args = json.dumps(call["args"], ensure_ascii=False, indent=2)
-        if len(full_args) > len(oneline) + 40:
+        # Prefer a real JSON parse so nested structures render as a readable
+        # tree instead of one long line; _render_json_block handles the
+        # fallback path (plain strings, numbers, malformed text).
+        arg_text = call.get("args_text")
+        has_args = bool(call["args"]) or bool(arg_text and arg_text.strip() not in ("{}", ""))
+        if has_args and isinstance(call["args"], dict) and not arg_text:
             parts.append(f'<details class="args"><summary>arguments</summary>'
-                         f'<div class="md-pre">{html.escape(full_args)}</div></details>')
+                         f'{_json_block_from_value(call["args"])}</details>')
+        elif has_args and arg_text:
+            parts.append(f'<details class="args"><summary>arguments</summary>'
+                         f'{_render_json_block(arg_text)}</details>')
 
     # structured delegation
     if name == "Agent":
@@ -412,10 +587,15 @@ def render_call(call: dict) -> str:
 
     if call["result"] is not None:
         res = call["result"]
-        short = res if len(res) <= 800 else res[:800] + "\n… (truncated)"
-        res_cls = "call-r err" if call["is_error"] else "call-r"
-        parts.append(f'<details class="res"><summary>result</summary>'
-                     f'<div class="{res_cls} md-pre">{html.escape(short)}</div></details>')
+        if len(res) <= _MAX_PLAIN_RESULT_CHARS:
+            res_cls = "call-r err" if call["is_error"] else "call-r"
+            parts.append(f'<details class="res"><summary>result</summary>'
+                         f'<div class="{res_cls}">{_render_json_block(res, "code-block js res-js")}</div></details>')
+        else:
+            short = res[:_MAX_PLAIN_RESULT_CHARS] + "\n… (truncated)"
+            res_cls = "call-r err" if call["is_error"] else "call-r"
+            parts.append(f'<details class="res"><summary>result ({len(res)} chars)</summary>'
+                         f'<div class="{res_cls} md-pre">{html.escape(short)}</div></details>')
     parts.append("</div>")
     return "".join(parts)
 
@@ -529,6 +709,8 @@ details.args summary,details.res summary,details.think summary{color:var(--mut);
 .deleg-box{margin:8px 0;padding:8px;border:1px dashed #d8c8e6;border-radius:8px}
 .deleg-meta{font-size:12px;color:var(--mut);margin-bottom:4px}
 .call-r{background:#f6f6f4}.call-r.err{background:#fbeaea;color:var(--bad)}
+.call-r{border:1px solid var(--bd);border-radius:8px;padding:4px}
+.call-r.err{color:var(--bad)}
 details.sub{border:1px solid var(--bd);border-radius:10px;background:#fdfcfb;margin:10px 0;padding:0}
 details.sub>summary{padding:12px 16px;font-weight:600;font-size:14px;color:var(--fg)}
 details.sub[open]>summary{border-bottom:1px solid var(--bd)}
@@ -554,6 +736,15 @@ tab-size:4;-moz-tab-size:4}
 .code-block.py .py-com{color:#7f849c;font-style:italic}
 .code-block.sh{background:#1b2327;border-color:#233038}
 .code-block.sh .sh-prompt{color:#7aa2f7;font-weight:600}
+.code-block.js{background:#161b26;border-color:#232a3a}
+.code-block.mixed{background:#1d222c;border-color:#2a3040;color:#c8ccd4}
+.code-block.js .js-key{color:#7aa2f7}
+.code-block.js .js-str{color:#a6e3a1}
+.code-block.js .js-num{color:#fab387}
+.code-block.js .js-kw{color:#cba6f7;font-weight:600}
+.call-r .code-block.js{background:#20261d;border-color:#2c3526}
+.call-r.err .code-block.js{background:#2a1d1d;border-color:#3a2626}
+div.call-r:has(> .code-block), div.call-r.err:has(> .code-block){background:transparent;border:none;padding:0;margin:0;max-height:none;overflow:visible}
 details.code-args summary{color:var(--mut);font-size:12px}
 details.code-args[open] summary{margin-bottom:4px}
 .btn-code{cursor:pointer;border:1px solid var(--bd);background:var(--card);color:var(--acc);
@@ -614,6 +805,8 @@ def build_case_html(case_dir: Path) -> dict | None:
                 sub_wires.append(parse_wire(sub_dir / "wire.jsonl"))
 
     crit = compute_critical_steps(main_wire, sub_wires)
+    pf = compute_plan_first_metrics(main_wire)
+    plan_first_arm = "Plan-First Protocol" in agent_main_text
 
     ck_pass, ck_total = runlog.get("ckpt_pass"), runlog.get("ckpt_total")
     ck_fail = None
@@ -646,6 +839,22 @@ def build_case_html(case_dir: Path) -> dict | None:
         n_mcp = len(inv.get("mcp_servers") or [])
     tier = tier_from_mcp_count(n_mcp)
 
+    if plan_first_arm:
+        if pf["plan_first_ok"] is True:
+            pf_pill = (f'<span class="pill ok">OK</span> <span class="muted">'
+                       f'{pf["pre_plan_actions"]} pre-action(s) · '
+                       f'{pf["n_plan_dispatches"]} plan dispatch(es)</span>')
+        elif pf["plan_first_ok"] is False:
+            first_disp = pf.get("first_dispatch") or "none"
+            pf_pill = (f'<span class="pill bad">VIOLATED</span> <span class="muted">'
+                       f'first dispatch: {html.escape(str(first_disp))} · '
+                       f'{pf["pre_plan_actions"] if pf["pre_plan_actions"] is not None else "—"} '
+                       f'pre-action(s) before any plan dispatch</span>')
+        else:
+            pf_pill = '<span class="pill">n/a</span> <span class="muted">no dispatch observed</span>'
+    else:
+        pf_pill = ""
+
     body = []
     body.append(f"""<section id="summary"><h2>Run Summary</h2>
 <div class="kv">
@@ -658,6 +867,7 @@ def build_case_html(case_dir: Path) -> dict | None:
 <div><b>Main steps</b>{crit['main_steps']}</div>
 <div><b>Critical Steps</b><span style="color:var(--acc);font-weight:700;font-size:17px">{crit['critical_steps']}</span> <span class="muted">(serial {crit['serial_steps']})</span></div>
 <div><b>Sub-agents</b>{len(sub_wires)} — {crit['n_parallel_subs']} parallel / {crit['n_sequential_subs']} sequential</div>
+{f'<div><b>Plan-first</b>{pf_pill}</div>' if plan_first_arm else ''}
 </div></section>""")
 
     rows = []
@@ -751,20 +961,40 @@ Python code is rendered with syntax highlighting inside a dedicated block.</p>
             "duration_s": duration, "critical_steps": crit["critical_steps"],
             "serial_steps": crit["serial_steps"], "main_steps": crit["main_steps"],
             "n_subs": len(sub_wires), "n_parallel": crit["n_parallel_subs"],
-            "n_sequential": crit["n_sequential_subs"], "claim_done": runlog.get("claim_done")}
+            "n_sequential": crit["n_sequential_subs"], "claim_done": runlog.get("claim_done"),
+            "plan_first_arm": plan_first_arm,
+            "plan_first_ok": pf["plan_first_ok"] if plan_first_arm else None,
+            "pre_plan_actions": pf["pre_plan_actions"] if plan_first_arm else None,
+            "n_plan_dispatches": pf["n_plan_dispatches"] if plan_first_arm else None}
 
 
 def write_dump_index(dump_root: Path, records: list[dict]) -> None:
     rows = []
+    has_pf = any(r.get("plan_first_arm") for r in records)
+    pf_stat = ""
+    if has_pf:
+        arm = [r for r in records if r.get("plan_first_arm")]
+        ok = sum(1 for r in arm if r.get("plan_first_ok") is True)
+        pf_stat = (f"<p>Plan-first arm: {len(arm)} run(s) · compliance {ok}/{len(arm)}"
+                   f" ({100 * ok / max(1, len(arm)):.0f}%)</p>")
     for r in sorted(records, key=lambda x: (x["task"], x["run"])):
         rel = f"{r['task']}/{r['run']}/audit.html"
         pill = ("ok'>PASS" if r["pass"] is True else "bad'>FAIL") if r["pass"] is not None else "bad'>N/A"
         ck = f"{r['ckpt_pass']}/{r['ckpt_total']}" if r.get("ckpt_pass") is not None else "—"
         dur = f"{r['duration_s']}s" if r.get("duration_s") else "—"
+        pf_cell = ""
+        if has_pf:
+            if r.get("plan_first_arm"):
+                pf_cell = ("<td><span class='pill ok'>OK</span></td>" if r.get("plan_first_ok") is True
+                           else f"<td><span class='pill bad'>VIOLATED</span>"
+                                f"<div style='color:#6b6862;font-size:11px'>{r.get('pre_plan_actions') if r.get('pre_plan_actions') is not None else '—'} pre</div></td>")
+            else:
+                pf_cell = "<td>—</td>"
         rows.append(f"<tr><td><a href='{rel}'>{r['task']}</a></td><td>{r['run']}</td>"
                     f"<td><span class='pill {pill}</span></td><td>{ck}</td><td>{dur}</td>"
                     f"<td>{r['critical_steps']}</td><td>{r['serial_steps']}</td>"
-                    f"<td>{r['n_subs']} ({r['n_parallel']}p/{r['n_sequential']}s)</td></tr>")
+                    f"<td>{r['n_subs']} ({r['n_parallel']}p/{r['n_sequential']}s)</td>{pf_cell}</tr>")
+    pf_head = "<th>Plan-first</th>" if has_pf else ""
     doc = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width,initial-scale=1'>
 <title>Audit Index — {dump_root.name}</title>
@@ -776,8 +1006,8 @@ a{{color:#b4552d;text-decoration:none}}a:hover{{text-decoration:underline}}
 .pill{{padding:3px 12px;border-radius:14px;font-size:12.5px;font-weight:600}}
 .pill.ok{{background:#e6f3ec;color:#2a7d4f}}.pill.bad{{background:#fbeaea;color:#c13434}}
 h1{{font-size:20px}}p{{color:#6b6862}}</style></head><body>
-<h1>Audit Index — {dump_root.name}</h1><p>{len(records)} case(s)</p>
-<table><tr><th>Task</th><th>Run</th><th>Pass</th><th>Checkpoints</th><th>Duration</th><th>Critical</th><th>Serial</th><th>Subs</th></tr>
+<h1>Audit Index — {dump_root.name}</h1><p>{len(records)} case(s)</p>{pf_stat}
+<table><tr><th>Task</th><th>Run</th><th>Pass</th><th>Checkpoints</th><th>Duration</th><th>Critical</th><th>Serial</th><th>Subs</th>{pf_head}</tr>
 {''.join(rows)}</table></body></html>"""
     (dump_root / "audit_index.html").write_text(doc)
 

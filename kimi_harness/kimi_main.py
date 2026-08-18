@@ -259,6 +259,27 @@ def _coordination_section() -> str:
         return raw
     return "Specified Sub-Agent Coordination (Mandatory):\n\n" + raw
 
+
+def _plan_first_enabled() -> bool:
+    """Plan-first arm switch (ablation-ready).
+
+    Unset / empty / 0 → off (baseline subagent arm).
+    Any other value → inject the plan-first section into the main prompt.
+    Requires sub-agents (plan must be active); silently off otherwise.
+    """
+    val = os.environ.get("KIMI_PLAN_FIRST", "").strip().lower()
+    return val not in ("", "0", "false", "no", "off")
+
+
+def _plan_first_section(subagents: list) -> str:
+    """Load the plan-first mandate section; '' when disabled or inapplicable."""
+    if not _plan_first_enabled():
+        return ""
+    if not subagents or "plan" not in subagents:
+        return ""
+    fname = os.environ.get("KIMI_PLAN_FIRST_FILE", "plan_first_default.md")
+    return _load_section(fname)
+
 # Read-only tool selection for `explore` / `plan` sub-agents.
 #
 # kimi matches MCP tool entries with picomatch, so `mcp__<server>__read_*`
@@ -490,6 +511,10 @@ def render_system_prompt(task_config) -> str:
         coord_sec = _coordination_section()
         if coord_sec:
             sections += ["", coord_sec]
+    plan_first_sec = _plan_first_section(subagents)
+    if plan_first_sec:
+        sections += ["", plan_first_sec]
+        print_color("[plan-first] section injected (KIMI_PLAN_FIRST=1)", "cyan")
     sections += ["", CLAIM_DONE_PROTOCOL]
     return "\n".join(sections)
 
