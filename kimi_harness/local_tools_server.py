@@ -36,10 +36,15 @@ ENABLED = set()
 # to debug infra or reverse-engineer the harness is out of the task boundary.
 # This is a read-guard only: it never blocks execution, so MCP tools and the
 # interpreter keep working — only agent-driven reads of these paths error out.
-_BLOCKED_READ_PREFIXES = (
+#
+# `.kimi_home` (a sibling of the workspace under task_root) is also blocked:
+# it holds session internals (wire.jsonl LLM transcripts, MCP config, other
+# agents' tool-result offloads) that are outside the declared workspace
+# boundary. See dev_docs/2026-08-13-c2-tz-fix-design.md §1 (P0-1).
+_BLOCKED_READ_PREFIXES = [
     "/opt/local_servers",
     "/opt/kimi-code",
-)
+]
 _BLOCKED_READ_MSG = (
     "Reading this path is outside your task boundary. The directory holds "
     "tool/harness implementation source, which you may use via the granted "
@@ -49,18 +54,27 @@ _BLOCKED_READ_MSG = (
 
 # Runtime guard prepended to user code: hooks open() so reads of the blocked
 # source trees raise, while everything else (including normal execution and
-# MCP subprocess spawns) is untouched.
+# MCP subprocess spawns) is untouched. The guard normalizes both str and bytes
+# paths and resolves symlinks/`..` so an agent cannot escape the block by
+# writing `../.kimi_home/...` or `/proc/self/cwd/../.kimi_home`.
 _READ_GUARD = (
     "import builtins as _bi, os as _os\n"
     "_BLK = {blocked!r}\n"
     "_MSG = {msg!r}\n"
     "_orig_open = _bi.open\n"
-    "def _g(file, mode='r', *a, **k):\n"
+    "def _norm(file):\n"
     "    try:\n"
-    "        p = _os.path.normpath(_os.fspath(file)) if isinstance(file, (str, bytes, _os.PathLike)) else ''\n"
+    "        if isinstance(file, bytes):\n"
+    "            s = _os.fsdecode(file)\n"
+    "        else:\n"
+    "            s = _os.fspath(file)\n"
+    "        return _os.path.realpath(_os.path.normpath(s))\n"
     "    except Exception:\n"
-    "        p = ''\n"
-    "    if p and any(p.startswith(b) for b in _BLK) and any(m in mode for m in ('r', '+')):\n"
+    "        return ''\n"
+    "def _g(file, mode='r', *a, **k):\n"
+    "    p = _norm(file)\n"
+    "    if p and any(p == b or p.startswith(b + _os.sep) for b in _BLK) "
+    "and any(m in mode for m in ('r', '+')):\n"
     "        raise PermissionError(_MSG + ' [' + p + ']')\n"
     "    return _orig_open(file, mode, *a, **k)\n"
     "_bi.open = _g\n"
@@ -93,11 +107,29 @@ def _python_execute(code: str, filename: str = "", timeout: int = 30) -> str:
 
     python_bin = os.environ.get("PYTHON_EXECUTE_BIN") or sys.executable
     cmd = [python_bin, file_path]
+    # Credential isolation (audit §A.3 / security-boundary): agent-authored
+    # Python runs here as a child of the kimi-code CLI and would otherwise
+    # inherit MODEL_API_KEY/MODEL_API_URL (the CLI needs them to call the
+    # model, but the evaluated code must not). PG* are also stripped again
+    # as defense-in-depth — launch_kimi already removes them from the agent
+    # env, but if a future launcher re-adds them this tool stays safe.
+    child_env = dict(os.environ)
+    if os.environ.get("KIMI_DISABLE_BOUNDARY") != "1":
+        for _secret in ("MODEL_API_KEY", "MODEL_API_URL",
+                        "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+            child_env.pop(_secret, None)
+        for _k in list(child_env.keys()):
+            if _k.upper().startswith("PG") and _k.upper() in (
+                "PGHOST", "PG_HOST", "PGPORT", "PG_PORT",
+                "PGUSER", "PG_USER", "PGPASSWORD", "PG_PASSWORD",
+                "PGDATABASE", "PG_DATABASE",
+            ):
+                child_env.pop(_k, None)
     start = time.time()
     try:
         result = subprocess.run(
             cmd, cwd=workspace, capture_output=True, text=True,
-            encoding="utf-8", timeout=timeout,
+            encoding="utf-8", timeout=timeout, env=child_env,
         )
     except subprocess.TimeoutExpired:
         return f"=== TIMEOUT ===\nExceeded {timeout}s limit."
@@ -296,6 +328,37 @@ def _handle(msg: dict):
         _error(msg_id, -32601, f"Method not found: {method}")
 
 
+def _compute_blocked_read_prefixes(workspace: str) -> None:
+    """Extend the read block-list with workspace-external session internals.
+
+    kimi_main.py lays out a task as ``<task_root>/workspace`` (the agent's
+    declared boundary, and the cwd kimi-code runs under) alongside
+    ``<task_root>/.kimi_home`` (session internals: wire.jsonl LLM transcripts,
+    MCP config, per-agent tool-result offloads, etc.). The agent must never
+    read outside its workspace. We block the kimi_home resolved from
+    KIMI_CODE_HOME (set by the harness) plus the workspace's sibling/parent
+    .kimi_home to cover both the standard and custom layouts.
+    """
+    global _BLOCKED_READ_PREFIXES
+    seen = set(_BLOCKED_READ_PREFIXES)
+
+    def _add(candidate: str) -> None:
+        c = os.path.realpath(os.path.normpath(candidate))
+        if c and c != workspace and not workspace.startswith(c + os.sep) and c not in seen:
+            _BLOCKED_READ_PREFIXES.append(c)
+            seen.add(c)
+
+    env_home = os.environ.get("KIMI_CODE_HOME")
+    if env_home:
+        _add(env_home)
+    if workspace:
+        # Standard layout: .kimi_home is a sibling of workspace under task_root.
+        _add(os.path.join(os.path.dirname(workspace), ".kimi_home"))
+        # Defense-in-depth: a stray .kimi_home inside the workspace (should not
+        # exist, but if it does it is not a legitimate deliverable).
+        _add(os.path.join(workspace, ".kimi_home"))
+
+
 def main():
     global WORKSPACE, MARKER, ENABLED
     ap = argparse.ArgumentParser()
@@ -312,6 +375,7 @@ def main():
         print(f"[local_tools] ignoring unknown tools: {sorted(unknown)}", file=sys.stderr)
 
     os.makedirs(WORKSPACE, exist_ok=True)
+    _compute_blocked_read_prefixes(WORKSPACE)
 
     for line in sys.stdin:
         line = line.strip()

@@ -1,6 +1,6 @@
 """
 Preprocess script for canvas-at-risk-intervention task.
-Clears email data and starts mock HTTP server on port 30216.
+Clears email data and starts mock HTTP server on port 30430.
 Canvas is read-only.
 """
 import argparse
@@ -17,7 +17,7 @@ DB_CONFIG = {
     "password": "camel",
 }
 
-PORT = 30216
+PORT = 30430
 
 
 async def main():
@@ -52,7 +52,7 @@ async def main():
     # The previous version used `lsof -ti:PORT` to kill any prior listener, then
     # started `python -m http.server` and slept 1s before declaring success.
     # That was doubly fragile: (1) the image may not ship lsof, leaving a stale
-    # listener from a different task on 30216 (we observed the Competitor Portal
+    # listener from a different task on 30430 (we observed the Competitor Portal
     # served there instead of support_resources.json); (2) if our bind failed
     # because the port was taken, the script still printed "running" and the
     # model then hit 404s for the whole run.

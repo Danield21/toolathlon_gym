@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y \
     libx11-6 libxcomposite1 libxdamage1 libxext6 \
     libxfixes3 libxrandr2 libgbm1 libxcb1 \
     libxkbcommon0 libpango-1.0-0 libcairo2 libasound2 \
+    poppler-utils qpdf \
+    bubblewrap libseccomp2 libseccomp-dev \
+    fonts-liberation fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 # uv

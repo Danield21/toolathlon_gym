@@ -23,31 +23,64 @@
     "parameters": {},
     "schemas": {
       "NotionParent": {
-        "description": "Parent for a new page. Use page_id for a child page or database_id for a database entry.",
+        "description": "Parent for a new page. Use page_id for a child page or database_id for a database entry. The object MAY also include a `type` discriminator; validation is intentionally permissive to accept any current or future Notion parent shape.",
         "oneOf": [
           {
             "type": "object",
             "properties": {
               "page_id": {
                 "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "page_id"
+                ]
               }
             },
             "required": [
               "page_id"
             ],
-            "additionalProperties": false
+            "additionalProperties": true
           },
           {
             "type": "object",
             "properties": {
               "database_id": {
                 "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "database_id"
+                ]
               }
             },
             "required": [
               "database_id"
             ],
-            "additionalProperties": false
+            "additionalProperties": true
+          },
+          {
+            "type": "object",
+            "properties": {
+              "workspace": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "workspace"
+                ]
+              }
+            },
+            "required": [
+              "workspace"
+            ],
+            "additionalProperties": true
           }
         ]
       },
@@ -1006,134 +1039,32 @@
                 "properties": {
                   "children": {
                     "type": "array",
+                    "description": "Child content to append to a container block as an array of [block objects](https://developers.notion.com/reference/block). Each block is an object that MUST include a `type` string; the remaining fields are type-specific (e.g. `paragraph.rich_text`, `heading_1.rich_text`, `to_do.checked`, `code.text`, `code.language`).",
                     "items": {
                       "type": "object",
+                      "description": "A Notion block object. Must include a `type` string naming the block type; the block-type-specific payload lives under a key matching the type name (e.g. for type=paragraph, the payload is under `paragraph`). Any other Notion block field (id, parent, has_children, created_time, etc.) is also accepted.",
                       "properties": {
-                        "paragraph": {
-                          "type": "object",
-                          "properties": {
-                            "rich_text": {
-                              "type": "array",
-                              "items": {
-                                "type": "object",
-                                "properties": {
-                                  "text": {
-                                    "type": "object",
-                                    "properties": {
-                                      "content": {
-                                        "type": "string"
-                                      },
-                                      "link": {
-                                        "type": [
-                                          "object",
-                                          "null"
-                                        ],
-                                        "properties": {
-                                          "url": {
-                                            "type": "string"
-                                          }
-                                        },
-                                        "required": [
-                                          "url"
-                                        ]
-                                      }
-                                    },
-                                    "additionalProperties": false,
-                                    "required": [
-                                      "content"
-                                    ]
-                                  },
-                                  "type": {
-                                    "enum": [
-                                      "text"
-                                    ],
-                                    "type": "string"
-                                  }
-                                },
-                                "additionalProperties": false,
-                                "required": [
-                                  "text"
-                                ]
-                              },
-                              "maxItems": 100
-                            }
-                          },
-                          "additionalProperties": false,
-                          "required": [
-                            "rich_text"
-                          ]
-                        },
-                        "bulleted_list_item": {
-                          "type": "object",
-                          "properties": {
-                            "rich_text": {
-                              "type": "array",
-                              "items": {
-                                "type": "object",
-                                "properties": {
-                                  "text": {
-                                    "type": "object",
-                                    "properties": {
-                                      "content": {
-                                        "type": "string"
-                                      },
-                                      "link": {
-                                        "type": [
-                                          "object",
-                                          "null"
-                                        ],
-                                        "properties": {
-                                          "url": {
-                                            "type": "string"
-                                          }
-                                        },
-                                        "required": [
-                                          "url"
-                                        ]
-                                      }
-                                    },
-                                    "additionalProperties": false,
-                                    "required": [
-                                      "content"
-                                    ]
-                                  },
-                                  "type": {
-                                    "enum": [
-                                      "text"
-                                    ],
-                                    "type": "string"
-                                  }
-                                },
-                                "additionalProperties": false,
-                                "required": [
-                                  "text"
-                                ]
-                              },
-                              "maxItems": 100
-                            }
-                          },
-                          "additionalProperties": false,
-                          "required": [
-                            "rich_text"
-                          ]
-                        },
                         "type": {
-                          "enum": [
-                            "paragraph",
-                            "bulleted_list_item"
-                          ],
+                          "type": "string",
+                          "description": "The block type, e.g. paragraph, heading_1, heading_2, heading_3, bulleted_list_item, numbered_list_item, to_do, toggle, code, quote, callout, divider, table_of_contents, embed, image, video, file, pdf, bookmark, link_preview, equation, breadcrumb, column_list, column, table, table_row, synced_block, template, link_to_page, unsupported."
+                        },
+                        "object": {
                           "type": "string"
                         }
                       },
-                      "additionalProperties": false
+                      "required": [
+                        "type"
+                      ],
+                      "additionalProperties": true
                     },
-                    "description": "Child content to append to a container block as an array of [block objects](ref:block)"
+                    "maxItems": 100
                   },
                   "after": {
                     "type": "string",
                     "description": "The ID of the existing block that the new block should be appended after."
                   }
-                }
+                },
+                "description": "Append block children. The `children` array accepts any Notion block object (paragraph, heading_1/2/3, bulleted_list_item, numbered_list_item, to_do, toggle, code, quote, callout, divider, table_of_contents, embed, image, video, file, pdf, bookmark, link_preview, equation, breadcrumb, column_list, table, table_row, synced_block, template, link_to_page, etc.). Validation is intentionally permissive so any current or future Notion block type and its type-specific fields are accepted."
               }
             }
           }
@@ -1360,7 +1291,16 @@
                     "type": "array",
                     "description": "The content to be rendered on the new page, represented as an array of [block objects](https://developers.notion.com/reference/block).",
                     "items": {
-                      "type": "string"
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "description": "Plain text paragraph (auto-wrapped)"
+                        },
+                        {
+                          "type": "object",
+                          "description": "A Notion block object with type + payload"
+                        }
+                      ]
                     }
                   },
                   "icon": {
@@ -1420,29 +1360,19 @@
                   },
                   "properties": {
                     "type": "object",
-                    "description": "Property schema of database. The keys are the names of properties as they appear in Notion and the values are [property schema objects](https://developers.notion.com/reference/property-schema-object).",
+                    "description": "Property schema of database, keyed by property name. Values are [property schema objects](https://developers.notion.com/reference/property-schema-object) and are merged into the existing schema by name. Accepted property types include title, rich_text, number, select, multi_select, status, date, people, files, checkbox, url, email, phone_number, formula, relation, rollup, created_time, created_by, last_edited_time, last_edited_by and unique_id.",
                     "additionalProperties": {
-                      "oneOf": [
-                        {
-                          "type": "object",
-                          "properties": {
-                            "title": {
-                              "type": "object",
-                              "properties": {},
-                              "additionalProperties": false
-                            },
-                            "description": {
-                              "type": "string",
-                              "maxLength": 280,
-                              "minLength": 1
-                            }
-                          },
-                          "additionalProperties": false,
-                          "required": [
-                            "title"
-                          ]
+                      "type": "object",
+                      "description": "A Notion property schema. Must include a `type` string; remaining fields are type-specific configuration (e.g. number.format, select.options, relation.database_id). Validation is intentionally permissive so any current or future Notion property type is accepted.",
+                      "properties": {
+                        "type": {
+                          "type": "string"
                         }
-                      ]
+                      },
+                      "required": [
+                        "type"
+                      ],
+                      "additionalProperties": true
                     }
                   },
                   "title": {
@@ -1536,107 +1466,55 @@
                 "type": "object",
                 "properties": {
                   "title": {
-                    "description": "An array of [rich text objects](https://developers.notion.com/reference/rich-text) that represents the title of the database that is displayed in the Notion UI. If omitted, then the database title remains unchanged.",
                     "type": "array",
+                    "description": "An array of [rich text objects](https://developers.notion.com/reference/rich-text) that represents the title of the database. If omitted, the database title remains unchanged.",
                     "items": {
-                      "type": "object",
-                      "required": [
-                        "text"
-                      ],
-                      "properties": {
-                        "text": {
-                          "type": "object",
-                          "properties": {
-                            "content": {
-                              "type": "string"
-                            },
-                            "link": {
-                              "type": [
-                                "object",
-                                "null"
-                              ],
-                              "properties": {
-                                "url": {
-                                  "type": "string"
-                                }
-                              },
-                              "required": [
-                                "url"
-                              ]
-                            }
-                          },
-                          "additionalProperties": false,
-                          "required": [
-                            "content"
-                          ]
-                        },
-                        "type": {
-                          "enum": [
-                            "text"
-                          ],
-                          "type": "string"
-                        }
-                      },
-                      "additionalProperties": false
-                    }
+                      "type": "object"
+                    },
+                    "maxItems": 100
                   },
                   "description": {
                     "type": "array",
+                    "description": "An array of [rich text objects](https://developers.notion.com/reference/rich-text) that represents the description of the database. If omitted, the database description remains unchanged.",
                     "items": {
-                      "type": "object",
-                      "required": [
-                        "text"
-                      ],
-                      "properties": {
-                        "text": {
-                          "type": "object",
-                          "properties": {
-                            "content": {
-                              "type": "string"
-                            },
-                            "link": {
-                              "type": [
-                                "object",
-                                "null"
-                              ],
-                              "properties": {
-                                "url": {
-                                  "type": "string"
-                                }
-                              },
-                              "required": [
-                                "url"
-                              ]
-                            }
-                          },
-                          "additionalProperties": false,
-                          "required": [
-                            "content"
-                          ]
-                        },
-                        "type": {
-                          "enum": [
-                            "text"
-                          ],
-                          "type": "string"
-                        }
-                      },
-                      "additionalProperties": false
+                      "type": "object"
                     },
-                    "maxItems": 100,
-                    "description": "An array of [rich text objects](https://developers.notion.com/reference/rich-text) that represents the description of the database that is displayed in the Notion UI. If omitted, then the database description remains unchanged."
+                    "maxItems": 100
                   },
                   "properties": {
                     "type": "object",
-                    "description": "Property schema of database. The keys are the names of properties as they appear in Notion and the values are [property schema objects](https://developers.notion.com/reference/property-schema-object).",
-                    "properties": {
-                      "name": {
-                        "type": "string"
-                      }
+                    "description": "Property schema of database, keyed by property name. Values are [property schema objects](https://developers.notion.com/reference/property-schema-object) and are merged into the existing schema by name. Accepted property types include title, rich_text, number, select, multi_select, status, date, people, files, checkbox, url, email, phone_number, formula, relation, rollup, created_time, created_by, last_edited_time, last_edited_by and unique_id.",
+                    "additionalProperties": {
+                      "type": "object",
+                      "description": "A Notion property schema. Must include a `type` string; remaining fields are type-specific configuration (e.g. number.format, select.options, relation.database_id). Validation is intentionally permissive so any current or future Notion property type is accepted.",
+                      "properties": {
+                        "type": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "type"
+                      ],
+                      "additionalProperties": true
                     }
+                  },
+                  "icon": {
+                    "type": "object",
+                    "description": "An [emoji object](https://developers.notion.com/reference/emoji-object) or [external file object](https://developers.notion.com/reference/file-object)."
+                  },
+                  "cover": {
+                    "type": "object",
+                    "description": "A [file object](https://developers.notion.com/reference/file-object) for the cover image."
+                  },
+                  "archived": {
+                    "type": "boolean"
+                  },
+                  "is_inline": {
+                    "type": "boolean"
                   }
                 },
-                "additionalProperties": false
+                "additionalProperties": true,
+                "description": "Update a database. Any of title, description, icon, cover, properties, archived, or is_inline may be provided; omitted fields are left unchanged (merge semantics). The `properties` object is merged at the property-name level: new properties are added, same-name properties are replaced, and unmentioned properties are preserved."
               }
             }
           }

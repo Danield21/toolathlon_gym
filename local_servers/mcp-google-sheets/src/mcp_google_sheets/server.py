@@ -69,11 +69,11 @@ class SpreadsheetContext:
 async def spreadsheet_lifespan(server: FastMCP) -> AsyncIterator[SpreadsheetContext]:
     """Manage Google Spreadsheet API connection lifecycle"""
     # Use PostgreSQL-backed mock services instead of real Google APIs
-    db_name = os.environ.get("PGDATABASE", "toolathlon")
-    db_host = os.environ.get("PGHOST", "localhost")
-    db_port = os.environ.get("PGPORT", "5432")
-    db_user = os.environ.get("PGUSER", "postgres")
-    db_pass = os.environ.get("PGPASSWORD", "postgres")
+    db_name = os.environ.get("PGDATABASE") or os.environ.get("PG_DATABASE") or "toolathlon"
+    db_host = os.environ.get("PGHOST") or os.environ.get("PG_HOST") or "localhost"
+    db_port = os.environ.get("PGPORT") or os.environ.get("PG_PORT") or "5432"
+    db_user = os.environ.get("PGUSER") or os.environ.get("PG_USER") or "postgres"
+    db_pass = os.environ.get("PGPASSWORD") or os.environ.get("PG_PASSWORD") or "postgres"
 
     pool = psycopg2.pool.SimpleConnectionPool(
         1, 5,

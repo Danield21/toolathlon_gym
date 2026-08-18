@@ -295,14 +295,16 @@ const TOOLS: Tool[] = [
   },
   {
     name: "canvas_list_assignment_submissions",
-    description: "List submissions for an assignment (teacher/admin perspective). Results are paginated and include summary totals.",
+    description: "List submissions for an assignment (teacher/admin perspective). Results are paginated and include summary totals. Supports server-side filtering: pass workflow_state (e.g. 'late') or late=true to fetch only matching submissions instead of paging through all of them; the summary always covers the whole assignment.",
     inputSchema: {
       type: "object",
       properties: {
         course_id: { type: "number", description: "ID of the course" },
         assignment_id: { type: "number", description: "ID of the assignment" },
         page: { type: "number", description: "1-based page number (default: 1)", default: 1 },
-        per_page: { type: "number", description: "Submissions per page (default: 100, max: 100)", default: 100 }
+        per_page: { type: "number", description: "Submissions per page (default: 100, max: 100)", default: 100 },
+        workflow_state: { type: "string", description: "Optional: only return submissions with this workflow_state (e.g. 'late', 'submitted', 'graded')" },
+        late: { type: "boolean", description: "Optional: only return submissions marked late (true)" }
       },
       required: ["course_id", "assignment_id"]
     }
@@ -474,11 +476,23 @@ const TOOLS: Tool[] = [
   // Grades
   {
     name: "canvas_get_course_grades",
-    description: "Get grades for a course",
+    description: "Get grades/enrollments for a course. Supports pagination and filtering by enrollment type/state to avoid oversized outputs. Use per_page (max 100) and page to page through results; use type[] (e.g. StudentEnrollment, TeacherEnrollment, TaEnrollment) and enrollment_state[] (e.g. active, completed, invited) to filter. The response includes `pagination.has_more`; keep paging until it is false.",
     inputSchema: {
       type: "object",
       properties: {
-        course_id: { type: "number", description: "ID of the course" }
+        course_id: { type: "number", description: "ID of the course" },
+        page: { type: "number", description: "Page number (1-based). Default 1.", default: 1 },
+        per_page: { type: "number", description: "Items per page (1-100). Default 100.", default: 100 },
+        type: {
+          type: "array",
+          items: { type: "string" },
+          description: "Filter by enrollment type (e.g. StudentEnrollment, TeacherEnrollment, TaEnrollment, Observer)."
+        },
+        enrollment_state: {
+          type: "array",
+          items: { type: "string" },
+          description: "Filter by enrollment state (e.g. active, invited, completed, inactive, rejected)."
+        }
       },
       required: ["course_id"]
     }
@@ -1596,16 +1610,18 @@ class CanvasMCPServer {
           }
 
           case "canvas_list_assignment_submissions": {
-            const { course_id, assignment_id, page = 1, per_page = 100 } = args as {
+            const { course_id, assignment_id, page = 1, per_page = 100, workflow_state, late } = args as {
               course_id: number;
               assignment_id: number;
               page?: number;
               per_page?: number;
+              workflow_state?: string;
+              late?: boolean;
             };
             if (!course_id || !assignment_id) {
               throw new Error("Missing required fields: course_id and assignment_id");
             }
-            const submissions = await this.client.getSubmissions(course_id, assignment_id, page, per_page);
+            const submissions = await this.client.getSubmissions(course_id, assignment_id, page, per_page, workflow_state, late);
             return {
               content: [{ type: "text", text: JSON.stringify(submissions, null, 2) }]
             };
@@ -1766,12 +1782,22 @@ class CanvasMCPServer {
 
           // Grades
           case "canvas_get_course_grades": {
-            const { course_id } = args as { course_id: number };
+            const { course_id, page, per_page, type, enrollment_state } = args as {
+              course_id: number;
+              page?: number;
+              per_page?: number;
+              type?: string[];
+              enrollment_state?: string[];
+            };
             if (!course_id) throw new Error("Missing required field: course_id");
-            
-            const grades = await this.client.getCourseGrades(course_id);
+            const result = await this.client.getCourseGrades(course_id, {
+              page,
+              perPage: per_page,
+              type,
+              enrollmentState: enrollment_state,
+            });
             return {
-              content: [{ type: "text", text: JSON.stringify(grades, null, 2) }]
+              content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
             };
           }
 

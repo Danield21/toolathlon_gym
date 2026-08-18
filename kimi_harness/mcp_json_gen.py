@@ -63,11 +63,26 @@ def _pin_uv_env(final_env, args, cwd):
     project_dir = _uv_project_dir(args, cwd)
     venv = os.path.join(project_dir, ".venv")
     final_env["VIRTUAL_ENV"] = venv
-    # `--frozen`/`--offline` env equivalents (uv 0.5+). Frozen = honor uv.lock
-    # as-is (no re-resolve); offline = never hit the network. Together they
-    # make `uv run` reuse the built .venv deterministically.
+    # `--frozen`/`--offline`/`--no-sync` env equivalents (uv 0.5+). Frozen =
+    # honor uv.lock as-is (no re-resolve); offline = never hit the network;
+    # no-sync = skip the sync step entirely and run against the existing .venv.
+    # Together they make `uv run` reuse the image-build .venv deterministically.
+    #
+    # NO_SYNC is critical: without it, `uv run <package>` still executes a sync
+    # pass that *builds* the project from source (resolving build-system.requires
+    # like hatchling). On a no-egress compute node hatchling is not in the cache,
+    # the build fails, and the MCP server never starts — its tools silently
+    # become "not found" (root cause of excel/google_sheet failing in C.3 rerun
+    # 2026-08-13). NO_SYNC skips that build entirely.
     final_env["UV_FROZEN"] = "true"
     final_env["UV_OFFLINE"] = "true"
+    final_env["UV_NO_SYNC"] = "true"
+    # Pin the cache to the image-build location so any residual uv resolution
+    # (e.g. `--no-build-isolation` paths) finds the pre-populated wheels. The
+    # image bakes the cache at /root/.cache/uv; without this, a custom HOME or
+    # XDG_CACHE_HOME inside the container could hide it.
+    if "UV_CACHE_DIR" not in final_env and "UV_CACHE_DIR" not in os.environ:
+        final_env["UV_CACHE_DIR"] = "/root/.cache/uv"
     return final_env
 
 
@@ -108,12 +123,37 @@ def build_mcp_servers(
         yaml_env = {k: res(v) for k, v in params.get("env", {}).items()}
         cwd = res(params.get("cwd", agent_workspace))
 
+        # filesystem MCP: allow the sessions/ subtree so the agent can read
+        # full (untruncated) tool outputs from tool-oversize/. The exact
+        # path <task_root>/.kimi_home/sessions/<wd>/<sid>/tool-oversize/
+        # requires <wd> and <sid> which are not known at mcp.json generation
+        # time, so we allow the sessions/ root as a pragmatic compromise.
+        # wire.jsonl (under agents/) is protected by the terminal tool's
+        # DENIED_PATHS, not by filesystem MCP boundary. See audit doc §4.2.
+        if name == "filesystem":
+            task_root = os.path.dirname(agent_workspace)
+            sessions_dir = os.path.join(task_root, ".kimi_home", "sessions")
+            if sessions_dir not in args:
+                args.append(sessions_dir)
+
         # Boundary hardening: deny the terminal tool access to tool/harness
         # source trees (deny takes priority over ALLOWED_DIR). The agent runs
         # capability-masked, but this adds a second layer so `cat /opt/...`
         # and similar are refused at the tool boundary too.
+        #
+        # Also deny `.kimi_home` (a sibling of the workspace under task_root):
+        # it holds session internals (wire.jsonl LLM transcripts, MCP config,
+        # per-agent tool-result offloads) that are outside the declared
+        # workspace boundary. See dev_docs/2026-08-13-c2-tz-fix-design.md §1 (P0-1).
         if name == "terminal" and os.environ.get("KIMI_DISABLE_BOUNDARY") != "1":
-            yaml_env["DENIED_PATHS"] = "/opt/local_servers,/opt/kimi-code"
+            denied = ["/opt/local_servers", "/opt/kimi-code"]
+            kimi_home = os.environ.get("KIMI_CODE_HOME", "")
+            if not kimi_home:
+                kimi_home = os.path.join(os.path.dirname(os.path.abspath(agent_workspace)),
+                                         ".kimi_home")
+            if kimi_home:
+                denied.append(os.path.realpath(os.path.normpath(kimi_home)))
+            yaml_env["DENIED_PATHS"] = ",".join(denied)
 
         # toolathlon: full_env = {**yaml_env, **os.environ} — os.environ wins.
         # kimi merges process env underneath config env, so to reproduce the
