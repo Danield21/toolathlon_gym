@@ -48,10 +48,18 @@ export class PgCanvasRouter {
 
     try {
       const result = await this.routeGet(path, params);
+      if (result === null) {
+        // Unmatched route: surface a 404 instead of an empty 200 array.
+        // An empty-200 masquerades as "endpoint works, no data" and sends
+        // agents into wrong-world conclusions (2026-08-16 fix4 case study).
+        const err: any = new Error(`Not Found: GET /${path} is not implemented in the Canvas mock`);
+        err.response = { status: 404, data: { errors: [{ message: `Unknown endpoint GET /${path}` }] } };
+        throw err;
+      }
       return makeResponse(result);
     } catch (err: any) {
       console.error(`[PgCanvasRouter] GET ${path} error:`, err.message);
-      return makeResponse([], 200);
+      throw err;
     }
   }
 
@@ -564,6 +572,89 @@ export class PgCanvasRouter {
       };
     }
 
+    // GET /courses/:id/students/submissions — official Canvas bulk endpoint
+    // (student_ids[]=all, assignment_ids[], grouped, page, per_page).
+    // Previously this path fell through to "Unmatched GET" and was silently
+    // swallowed as [] + 200, which made agents believe courses had no
+    // submissions at all (2026-08-16 fix4 case study).
+    m = path.match(/^courses\/(\d+)\/students\/submissions$/);
+    if (m) {
+      const page = Math.max(1, parseInt(params.page, 10) || 1);
+      const perPage = Math.min(100, Math.max(1, parseInt(params.per_page, 10) || 100));
+      const offset = (page - 1) * perPage;
+      const assignmentFilter = paramToArray(params.assignment_ids)
+        .map((s) => parseInt(s, 10))
+        .filter((n) => Number.isFinite(n));
+      const studentFilter = paramToArray(params.student_ids).filter((s) => s !== 'all');
+
+      const values: unknown[] = [m[1]];
+      let idx = 2;
+      const conditions = ['a.course_id = $1'];
+      if (assignmentFilter.length > 0) {
+        conditions.push(`s.assignment_id = ANY($${idx++}::int[])`);
+        values.push(assignmentFilter);
+      }
+      if (studentFilter.length > 0) {
+        const studentIds = studentFilter
+          .map((s) => parseInt(s, 10))
+          .filter((n) => Number.isFinite(n));
+        if (studentIds.length > 0) {
+          conditions.push(`s.user_id = ANY($${idx++}::int[])`);
+          values.push(studentIds);
+        }
+      }
+      const where = conditions.join(' AND ');
+
+      const countRes = await this.pool.query(
+        `SELECT COUNT(*)::int AS total_count
+         FROM canvas.submissions s
+         JOIN canvas.assignments a ON a.id = s.assignment_id
+         WHERE ${where}`,
+        values,
+      );
+      const res = await this.pool.query(
+        `SELECT s.*, a.course_id AS course_id, a.id AS assignment_id, a.name AS assignment_name,
+                a.points_possible AS assignment_points_possible
+         FROM canvas.submissions s
+         JOIN canvas.assignments a ON a.id = s.assignment_id
+         WHERE ${where}
+         ORDER BY s.user_id, s.assignment_id, s.id
+         LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...values, perPage, offset],
+      );
+      const totalCount = countRes.rows[0]?.total_count || 0;
+      if (params.grouped) {
+        // grouped=true mirrors the official API: one entry per student with a
+        // submissions[] array, exactly what the bulk tool's description promises.
+        const byStudent = new Map<number, { user_id: number; submissions: any[] }>();
+        for (const row of res.rows) {
+          const entry = byStudent.get(row.user_id) || { user_id: row.user_id, submissions: [] as any[] };
+          entry.submissions.push(row);
+          byStudent.set(row.user_id, entry);
+        }
+        return {
+          submissions: [...byStudent.values()],
+          pagination: {
+            page,
+            per_page: perPage,
+            total_count: totalCount,
+            total_pages: Math.max(1, Math.ceil(totalCount / perPage)),
+            has_more: page * perPage < totalCount,
+          },
+        };
+      }
+      return {
+        submissions: res.rows,
+        pagination: {
+          page,
+          per_page: perPage,
+          total_count: totalCount,
+          total_pages: Math.max(1, Math.ceil(totalCount / perPage)),
+          has_more: page * perPage < totalCount,
+        },
+      };
+    }
+
     // GET /courses/:id/users
     m = path.match(/^courses\/(\d+)\/users$/);
     if (m) {
@@ -617,7 +708,7 @@ export class PgCanvasRouter {
     }
 
     console.error(`[PgCanvasRouter] Unmatched GET: ${path}`);
-    return [];
+    return null;
   }
 
   // ---- POST routing ----

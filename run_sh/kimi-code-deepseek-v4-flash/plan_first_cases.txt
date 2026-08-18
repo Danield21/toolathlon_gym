@@ -1,0 +1,15 @@
+budget-variance-analysis-quarterly
+canvas-late-submission-gcal
+canvas-quiz-item-analysis-word-gcal-email
+fetch-howtocook-catering-excel-gcal-email
+fetch-wc-yf-financial-excel-word-email
+supplier-contract-compliance-audit
+terminal-canvas-howtocook-gsheet-notion-email
+terminal-canvas-pdf-excel-notion-gcal
+terminal-canvas-wc-excel-ppt-email
+terminal-sf-wc-yf-excel-ppt
+canvas-at-risk-intervention
+canvas-scholarly-curriculum-review
+financial-audit-cross-system-reconciliation
+canvas-grade-equity-excel-word-gcal
+playwright-arxiv-review-criteria-word-gsheet

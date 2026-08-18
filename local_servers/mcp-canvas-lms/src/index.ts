@@ -310,6 +310,22 @@ const TOOLS: Tool[] = [
     }
   },
   {
+    name: "canvas_list_student_submissions",
+    description: "Bulk list submissions for all students in a course (official Canvas endpoint). Supports filtering by assignment_ids[], student_ids[] (default 'all'), and grouped=true to aggregate by student. Much more efficient than per-assignment pagination when you need submissions across a whole course; use per_page=100 and follow pagination.has_more.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        course_id: { type: "number", description: "ID of the course" },
+        assignment_ids: { type: "array", items: { type: "number" }, description: "Filter to specific assignment IDs (optional; default all)" },
+        student_ids: { type: "array", items: { type: "string" }, description: "Filter to specific student IDs, or ['all'] for all students (default: all)", default: ["all"] },
+        grouped: { type: "boolean", description: "Group results by student instead of flat list", default: false },
+        page: { type: "number", description: "1-based page number (default: 1)", default: 1 },
+        per_page: { type: "number", description: "Submissions per page (default: 100, max: 100)", default: 100 }
+      },
+      required: ["course_id"]
+    }
+  },
+  {
     name: "canvas_list_quiz_submissions",
     description: "List all quiz submissions for a quiz (teacher/admin perspective)",
     inputSchema: {
@@ -1624,6 +1640,30 @@ class CanvasMCPServer {
             const submissions = await this.client.getSubmissions(course_id, assignment_id, page, per_page, workflow_state, late);
             return {
               content: [{ type: "text", text: JSON.stringify(submissions, null, 2) }]
+            };
+          }
+
+          case "canvas_list_student_submissions": {
+            const { course_id, assignment_ids, student_ids, grouped, page = 1, per_page = 100 } = args as {
+              course_id: number;
+              assignment_ids?: number[];
+              student_ids?: string[];
+              grouped?: boolean;
+              page?: number;
+              per_page?: number;
+            };
+            if (!course_id) {
+              throw new Error("Missing required field: course_id");
+            }
+            const result = await this.client.listStudentsSubmissions(course_id, {
+              page,
+              perPage: per_page,
+              studentIds: student_ids,
+              assignmentIds: assignment_ids,
+              grouped,
+            });
+            return {
+              content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
             };
           }
 

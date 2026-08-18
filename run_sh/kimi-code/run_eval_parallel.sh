@@ -820,6 +820,12 @@ SQL
     [[ -n "${KIMI_EXAMPLES_FILE:-}" ]] && ENV_ARGS+=(-e "KIMI_EXAMPLES_FILE=${KIMI_EXAMPLES_FILE}")
     [[ -n "${KIMI_COORDINATION_FILE:-}" ]] && ENV_ARGS+=(-e "KIMI_COORDINATION_FILE=${KIMI_COORDINATION_FILE}")
     [[ -n "${MODEL_N:-}" ]] && ENV_ARGS+=(-e "MODEL_N=${MODEL_N}")
+    # Optional reasoning-effort override (e.g. high) → request-body
+    # reasoning_effort for vLLM-style backends (deepseek-v4-flash-wl).
+    [[ -n "${KIMI_MODEL_THINKING_EFFORT:-}" ]] && ENV_ARGS+=(-e "KIMI_MODEL_THINKING_EFFORT=${KIMI_MODEL_THINKING_EFFORT}")
+    # Plan-first arm switch: injects the plan-first mandate section into the
+    # main agent prompt (kimi_main.py reads it; needs plan sub-agent active).
+    [[ -n "${KIMI_PLAN_FIRST:-}" ]] && ENV_ARGS+=(-e "KIMI_PLAN_FIRST=${KIMI_PLAN_FIRST}")
     # Note: no http_proxy passthrough — the eval endpoint is reached directly
     # (no_proxy covers it) and MCP servers stay fully local.
 
