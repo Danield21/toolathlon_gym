@@ -21,7 +21,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-export KIMI_CONFIG_ENV="${SCRIPT_DIR}/config.env"
+# Use KIMI_CONFIG_ENV if already set (e.g. by run_slurm_rerun_c2.sh for the C2
+# rerun with model_name=deepseek-v4-flash-linslab); otherwise default to this
+# batch's config.env. Previously this unconditionally exported config.env,
+# which clobbered the C2 rerun's config.c2.env and made every case use the
+# exhausted-quota model alias (503 auth_unavailable).
+export KIMI_CONFIG_ENV="${KIMI_CONFIG_ENV:-${SCRIPT_DIR}/config.env}"
 export DUMP_ROOT="${DUMP_ROOT:-${PROJECT_ROOT}/dumps/kimi-code_deepseek-v4-flash}"
 # Separate port range + lease dir so this batch can run alongside MiniMax-M3.
 export PG_PORT_BASE="${PG_PORT_BASE:-26432}"

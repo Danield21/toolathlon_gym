@@ -31,8 +31,11 @@ AUTO_AUDIT_HTML="${AUTO_AUDIT_HTML:-1}"
 
 # shellcheck disable=SC1091
 source "$RUNTIME_ROOT/env.sh"
+echo "[runner] KIMI_CONFIG_ENV=${KIMI_CONFIG_ENV:-<unset>}"
+echo "[runner] CONFIG_ENV will source: $CONFIG_ENV"
 # shellcheck disable=SC1091
 source "$CONFIG_ENV"
+echo "[runner] after source: MODEL_NAME=${MODEL_NAME:-<unset>}"
 
 export MODEL_NAME MODEL_API_KEY MODEL_API_URL
 export KIMI_MAX_CONTEXT KIMI_TASK_TIMEOUT_S KIMI_PROVIDER_NAME KIMI_MODEL_ALIAS
@@ -188,6 +191,83 @@ claim_task() {
   local safe
   safe="$(printf '%s' "$task" | tr -cs 'A-Za-z0-9_.-' '-')"
   mkdir "$TASK_LOCK_ROOT/$safe" 2>/dev/null
+}
+
+# ── mock-port conflict groups (P6, case-study 2026-08-14) ────────────────────
+# Some tasks hardcode a mock HTTP port in preprocess/main.py (e.g. 30216 is
+# shared by canvas-at-risk-intervention and playwright-sf-competitor-analysis-
+# notion-excel). When two such tasks run in parallel slots, the second mock
+# fails to bind and the task dies with preprocess_failed. fuser -k cannot fix
+# this across enroot instances, so serialize tasks that share a mock port.
+#
+# The port map is derived STATICALLY by scanning each task's preprocess for
+# `port = <n>` literals — no hand-maintained table to drift. Locks are held
+# for the LIFETIME OF THE WORKER (released in worker_exit), so the dispatch
+# loop blocks a slot until the previous holder's task finishes.
+MOCK_PORT_ROOT="/dev/shm/toolathlon_mock_ports_${UID}"
+mkdir -p "$MOCK_PORT_ROOT" 2>/dev/null || true
+mock_ports_of_task() {
+  local task="${1:-}"
+  local pp="$PROJECT_ROOT/tasks/finalpool/$task/preprocess/main.py"
+  [[ -f "$pp" ]] || return 0
+  # Match `PORT = 30216`, `port = 30216`, `port: 30216`, `_port = 30216` etc.
+  # (case-insensitive). Restrict to the mock-HTTP 30xxx range: PG fallback
+  # literals (5432/5433) in DB_CONFIG would otherwise serialize unrelated
+  # tasks on a phantom shared port, and no task uses a mock outside 30xxx.
+  grep -oiE '(^|[^a-z])_?port[^=]{0,3}=[[:space:]]*30[0-9]{3}' "$pp" 2>/dev/null \
+    | grep -oE '30[0-9]{3}' | sort -u
+}
+# Sets ACQUIRED_MOCK_LOCKS (space-separated list) on success.
+acquire_mock_ports() {
+  local task="${1:-}"
+  local port lock
+  ACQUIRED_MOCK_LOCKS=""
+  local taken=()
+  while read -r port; do
+    [[ -n "$port" ]] || continue
+    lock="$MOCK_PORT_ROOT/$port"
+    if ! mkdir "$lock" 2>/dev/null; then
+      # Stale-lock reclamation: if the holding pid is gone, take over.
+      local owner
+      owner="$(sed -n '1p' "$lock/owner" 2>/dev/null || true)"
+      if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+        rm -rf -- "$lock" 2>/dev/null || true
+        mkdir "$lock" 2>/dev/null || { return 1; }
+      else
+        local l
+        for l in "${taken[@]:-}"; do rmdir "$l" 2>/dev/null || true; done
+        return 1
+      fi
+    fi
+    echo "$$" >"$lock/owner"
+    taken+=("$lock")
+  done < <(mock_ports_of_task "$task")
+  ACQUIRED_MOCK_LOCKS="${taken[*]:-}"
+  return 0
+}
+release_mock_ports() {
+  local lock
+  for lock in $1; do
+    rm -f "$lock/owner" 2>/dev/null || true
+    rmdir "$lock" 2>/dev/null || true
+  done
+}
+
+# ── walltime-aware dispatch (P1, case-study 2026-08-14) ──────────────────────
+# The c3b batch was SIGKILLed at the 6.5h Slurm Timelimit with 6 tasks mid-run
+# and no summary rows written. Slurm gives no grace for in-flight work, so the
+# scheduler must simply STOP DISPATCHING when the remaining walltime can no
+# longer cover a full single-case budget (per-case cap + eval + cleanup margin).
+# Remaining tasks are logged as skipped, and the job exits cleanly before the
+# hard kill.
+DISPATCH_BUDGET_S="${DISPATCH_BUDGET_S:-$(( ${KIMI_TASK_TIMEOUT_S:-7200} + 1200 ))}"
+_walltime_remaining_s() {
+  # SLURM_JOB_END_TIME (epoch) is exported inside every srun allocation.
+  if [[ -n "${SLURM_JOB_END_TIME:-}" && "${SLURM_JOB_END_TIME}" =~ ^[0-9]+$ ]]; then
+    echo $(( SLURM_JOB_END_TIME - $(date +%s) ))
+  else
+    echo 999999999  # non-slurm (local) run: never block dispatch
+  fi
 }
 
 allocate_free_port() {
@@ -481,7 +561,7 @@ run_one_task() {
   local TASK="$1"
   local SLOT="$2"
   local PGPORT="$3"
-  local SAFE TASK_HASH TASK_ID PG_RUNTIME PGDATA PGSOCKET INST OUTDIR TASK_LOG START_TS END_TS RC STATUS probe_count ENROOT_LAUNCH_PID
+  local SAFE TASK_HASH TASK_ID PG_RUNTIME PGDATA PGSOCKET INST OUTDIR TASK_LOG START_TS END_TS RC STATUS probe_count ENROOT_LAUNCH_PID WCPORT
   SAFE="$(printf '%s' "$TASK" | tr -cs 'A-Za-z0-9_.-' '-')"
   TASK_HASH="$(echo -n "$TASK-$RUN_ID-$SLOT-$$" | md5sum | cut -c1-8)"
   TASK_ID="${SAFE}-${TASK_HASH}"
@@ -490,6 +570,7 @@ run_one_task() {
   PG_RUNTIME="${PG_RUNTIME_ROOT}/${RUN_ID}_${SLOT}_${TASK_HASH}"
   PGDATA="${PG_RUNTIME}/data"
   PGSOCKET="${PG_RUNTIME}/socket"
+  WCPORT=$((PGPORT + 10000))
   INST="agent-${RUN_ID}-${SLOT}-${TASK_HASH}-${SAFE}"
   OUTDIR="${DUMP_ROOT}/${TASK}/${RUN_ID}_slot${SLOT}"
   TASK_LOG="${OUTDIR}/run.log"
@@ -597,6 +678,9 @@ SQL
         "${ENROOT_DATA_PATH}/${INST}/workspace/utils/aux_tools/basic.py" \
       || ! cp -f "${PROJECT_ROOT}/utils/api_model/model_provider.py" \
         "${ENROOT_DATA_PATH}/${INST}/workspace/utils/api_model/model_provider.py" \
+      || ! mkdir -p "${ENROOT_DATA_PATH}/${INST}/workspace/utils/evaluation" \
+      || ! rsync -a --delete "${PROJECT_ROOT}/utils/evaluation/" \
+        "${ENROOT_DATA_PATH}/${INST}/workspace/utils/evaluation/" \
       || ! mkdir -p "${ENROOT_DATA_PATH}/${INST}/workspace/tasks/finalpool" \
       || ! rsync -a --delete "${PROJECT_ROOT}/tasks/finalpool/" \
         "${ENROOT_DATA_PATH}/${INST}/workspace/tasks/finalpool/" \
@@ -604,6 +688,10 @@ SQL
         "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/emails-mcp/src/emails_mcp/server.py" \
       || ! cp -f "${PROJECT_ROOT}/local_servers/excel-mcp-server/src/excel_mcp/__main__.py" \
         "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/excel-mcp-server/src/excel_mcp/__main__.py" \
+      || ! cp -f "${PROJECT_ROOT}/local_servers/mcp-google-sheets/src/mcp_google_sheets/server.py" \
+        "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/mcp-google-sheets/src/mcp_google_sheets/server.py" \
+      || ! cp -f "${PROJECT_ROOT}/local_servers/mcp-google-sheets/src/mcp_google_sheets/pg_services.py" \
+        "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/mcp-google-sheets/src/mcp_google_sheets/pg_services.py" \
       || ! cp -f "${PROJECT_ROOT}/local_servers/mcp-canvas-lms/build/index.js" \
         "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/mcp-canvas-lms/build/index.js" \
       || ! cp -f "${PROJECT_ROOT}/local_servers/mcp-canvas-lms/build/client.js" \
@@ -612,15 +700,46 @@ SQL
         "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/mcp-canvas-lms/build/pg-canvas-router.js" \
       || ! cp -f "${PROJECT_ROOT}/local_servers/notion-mcp-server/scripts/notion-openapi.json" \
         "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/notion-mcp-server/scripts/notion-openapi.json" \
+      || ! cp -f "${PROJECT_ROOT}/local_servers/notion-mcp-server/bin/cli.mjs" \
+        "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/notion-mcp-server/bin/cli.mjs" \
+      || ! cp -f "${PROJECT_ROOT}/local_servers/notion-mcp-server/build/src/openapi-mcp-server/client/pg-client.js" \
+        "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/notion-mcp-server/build/src/openapi-mcp-server/client/pg-client.js" \
+      || ! cp -f "${PROJECT_ROOT}/local_servers/Calendar-Autoauth-MCP-Server/build/pg-calendar.js" \
+        "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/Calendar-Autoauth-MCP-Server/build/pg-calendar.js" \
+      || ! cp -f "${PROJECT_ROOT}/local_servers/Calendar-Autoauth-MCP-Server/build/index.js" \
+        "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/Calendar-Autoauth-MCP-Server/build/index.js" \
+      || ! mkdir -p "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/google-forms-mcp/build" \
+      || ! cp -f "${PROJECT_ROOT}/local_servers/google-forms-mcp/build/index.js" \
+        "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/google-forms-mcp/build/index.js" \
+      || ! cp -f "${PROJECT_ROOT}/local_servers/google-forms-mcp/build/pg-forms.js" \
+        "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/google-forms-mcp/build/pg-forms.js" \
       || ! cp -f "${PROJECT_ROOT}/local_servers/Office-Word-MCP-Server/word_document_server/main.py" \
         "${ENROOT_DATA_PATH}/${INST}/opt/local_servers/Office-Word-MCP-Server/word_document_server/main.py" \
       || ! cp -f "${PROJECT_ROOT}/configs/mcp_servers/word.yaml" \
         "${ENROOT_DATA_PATH}/${INST}/workspace/configs/mcp_servers/word.yaml" \
       || ! cp -f "${PROJECT_ROOT}/configs/mcp_servers/yahoo-finance.yaml" \
-        "${ENROOT_DATA_PATH}/${INST}/workspace/configs/mcp_servers/yahoo-finance.yaml"; then
+        "${ENROOT_DATA_PATH}/${INST}/workspace/configs/mcp_servers/yahoo-finance.yaml" \
+      || ! cp -f "${PROJECT_ROOT}/configs/mcp_servers/terminal.yaml" \
+        "${ENROOT_DATA_PATH}/${INST}/workspace/configs/mcp_servers/terminal.yaml"; then
       echo "[error] failed to refresh Enroot runtime harness"
       append_summary "${TASK},rootfs_fail,1,${OUTDIR},${PGPORT},$(( $(date +%s) - START_TS ))"
       return 1
+    fi
+    # Stage the pre-downloaded cpython interpreters (3.11/3.12/3.13) so the uv
+    # MCP server .venvs' python symlinks resolve. The image build creates .venvs
+    # whose `python` symlinks point at /opt/uv_python_cache/cpython-<ver>/...;
+    # if that cache is absent at runtime (it was stripped from the sqsh to keep
+    # the image small, case-study 2026-08-12), every uv-based MCP server fails
+    # to start with "bad interpreter". rsync the host-side cache in here.
+    UV_PY_HOST_CACHE="${TOOLATHLON_EVAL_DOCKER_ROOT:-/lintaoLab2/bowending/project_agent_swarm_benchmark/toolathlon_gym_eval_dockers}/uv_python_cache"
+    if [[ -d "$UV_PY_HOST_CACHE" ]] && [[ ! -d "${ENROOT_DATA_PATH}/${INST}/opt/uv_python_cache" ]]; then
+      mkdir -p "${ENROOT_DATA_PATH}/${INST}/opt/uv_python_cache"
+      rsync -a "$UV_PY_HOST_CACHE/" "${ENROOT_DATA_PATH}/${INST}/opt/uv_python_cache/" \
+        || echo "[warn] failed to stage uv_python_cache (uv MCP servers may not start)"
+    fi
+    if grep -q '"woocommerce"' "${PROJECT_ROOT}/tasks/finalpool/${TASK}/task_config.json"; then
+      sed -i "s#http://localhost:8081#http://localhost:${WCPORT}#g" \
+        "${ENROOT_DATA_PATH}/${INST}/workspace/configs/mcp_servers/woocommerce.yaml" || true
     fi
     # kimi harness + CLI distribution (excl. host pycache)
     if ! rm -rf "${ENROOT_DATA_PATH}/${INST}/workspace/kimi_harness" \
@@ -633,7 +752,14 @@ SQL
       append_summary "${TASK},rootfs_fail,1,${OUTDIR},${PGPORT},$(( $(date +%s) - START_TS ))"
       return 1
     fi
-    printf '#!/bin/bash\nexec /usr/bin/node /opt/kimi-code/dist/main.mjs "$@"\n' \
+    # Resolve the container's node binary. The node22 image installs node to
+    # /usr/local/bin/node (tarball layout); the old apt-based image used
+    # /usr/bin/node. Prefer whichever exists in this instance's rootfs so the
+    # wrapper works against both layouts (hardcoding /usr/bin/node breaks every
+    # task on the new image: "kimi: No such file or directory").
+    _node_bin="/usr/local/bin/node"
+    [[ -x "${ENROOT_DATA_PATH}/${INST}/usr/local/bin/node" ]] || _node_bin="/usr/bin/node"
+    printf '#!/bin/bash\nexec %s /opt/kimi-code/dist/main.mjs "$@"\n' "$_node_bin" \
       > "${ENROOT_DATA_PATH}/${INST}/usr/local/bin/kimi"
     chmod +x "${ENROOT_DATA_PATH}/${INST}/usr/local/bin/kimi"
 
@@ -686,6 +812,7 @@ SQL
       -e "no_proxy=${no_proxy}"
       -e "NO_PROXY=${NO_PROXY}"
       -e "MCP_STDIO_TIMEOUT_MIN=${MCP_STDIO_TIMEOUT_MIN:-90}"
+      -e "WC_REST_PORT=${WCPORT}"
     )
     if [[ -v KIMI_SUBAGENTS ]]; then
       ENV_ARGS+=(-e "KIMI_SUBAGENTS=${KIMI_SUBAGENTS}")
@@ -702,17 +829,18 @@ SQL
     # another task's (or a dead smoke) Postgres. Always (re)bind to THIS task's PG.
     # NOTE: do NOT use `pkill -f pg-rest-server` here — the pattern appears in
     # this bash -c cmdline and would SIGTERM ourselves (exit 143).
-    WC_START='
-if [[ -f /opt/local_servers/woocommerce-mcp/dist/services/pg-rest-server.js ]]; then
-  # Free :8081 via port only (safe; does not match this shell cmdline).
-  fuser -k 8081/tcp >/dev/null 2>&1 || true
+WC_START='
+if [[ -n "${TASK_NAME:-}" ]] && grep -q "\"woocommerce\"" "/workspace/tasks/finalpool/${TASK_NAME}/task_config.json" && [[ -f /opt/local_servers/woocommerce-mcp/dist/services/pg-rest-server.js ]]; then
+  WC_REST_PORT="${WC_REST_PORT:-8081}"
+  # Free this worker-specific port only (safe; does not match this shell cmdline).
+  fuser -k "${WC_REST_PORT}/tcp" >/dev/null 2>&1 || true
   sleep 0.3
   # Prefer TCP to the isolated PG: unix socket path differs across namespaces,
   # but host-network 127.0.0.1:$PG_PORT is unambiguous.
   nohup env PG_HOST=127.0.0.1 node /opt/local_servers/woocommerce-mcp/dist/services/pg-rest-server.js >/tmp/wc-rest.log 2>&1 &
   for i in $(seq 1 25); do
-    if curl -fsS -m 2 http://127.0.0.1:8081/health >/dev/null 2>&1; then
-      echo "[wc-rest] up on :8081 -> PG 127.0.0.1:${PG_PORT}"
+    if curl -fsS -m 2 "http://127.0.0.1:${WC_REST_PORT}/health" >/dev/null 2>&1; then
+      echo "[wc-rest] up on :${WC_REST_PORT} -> PG 127.0.0.1:${PG_PORT}"
       break
     fi
     sleep 0.4
@@ -728,7 +856,7 @@ fi
     # cleanup_worker terminates the whole group before deleting the rootfs,
     # preventing orphan listeners and NFS .nfs* remnants.
     setsid enroot start -r -w -m "${PGSOCKET}:/run/toolathlon_pg" "${ENV_ARGS[@]}" "$INST" \
-      /bin/bash -c "${WC_START}cd /workspace && exec /opt/venv/bin/python3 kimi_harness/kimi_main.py --eval_config /workspace/scripts/eval_config.json --task_dir '${TASK}' --max_steps '${MAX_STEPS}' --debug" &
+      /bin/bash -c "TASK_NAME='${TASK}'; ${WC_START}cd /workspace && exec /opt/venv/bin/python3 kimi_harness/kimi_main.py --eval_config /workspace/scripts/eval_config.json --task_dir '${TASK}' --max_steps '${MAX_STEPS}' --debug" &
     ENROOT_LAUNCH_PID=$!
     WORKER_PGID="$(ps -o pgid= -p "$ENROOT_LAUNCH_PID" 2>/dev/null | tr -d ' ')"
     [[ -n "$WORKER_PGID" ]] || WORKER_PGID="$ENROOT_LAUNCH_PID"
@@ -737,18 +865,51 @@ fi
     RC=$?
     set -e
 
-    echo "=== sync dumps ==="
-    rsync -a "${ENROOT_DATA_PATH}/${INST}/workspace/dumps/" "$OUTDIR/" || true
-    generate_audit_html "$OUTDIR"
+	    echo "=== sync dumps ==="
+	    rsync -a "${ENROOT_DATA_PATH}/${INST}/workspace/dumps/" "$OUTDIR/" || true
 
-    echo "=== cleanup ==="
-    cleanup_worker
+	    END_TS=$(date +%s)
+	    # Audit §A.9: separate CASE_FAILED (model got the answer wrong — a valid,
+	    # expected outcome of an evaluation) from INFRA_FAILED (PG/rootfs/rsync/
+    # audit/worker-signal — a real system fault). A case that the agent simply
+    # answered wrong must NOT make the Slurm job exit non-zero, because that
+    # marks the whole batch FAILED and triggers premature external cleanup
+    # while tail-batch workers are still syncing dumps/audits.
+    # Preprocess fail-fast (case-study 2026-08-12, case #19): kimi_main.py exits
+    # 3 and writes .preprocess_failed when the task seed failed. Classify that as
+    # PREPROCESS_FAILED (infra), not a model CASE_FAILED, so it neither wastes a
+    # rerun nor pollutes the model-ability denominator.
+    # The markers (.preprocess_failed / .provider_invalid / .infra_failed) are
+    # written by kimi_main.py into task_root, which is INSIDE the container's
+    # /workspace/dumps/<model>/SingleUserTurn-<task>/. After rsync above, they
+    # land at $OUTDIR/kimi-code_deepseek-v4-flash/SingleUserTurn-<task>/.marker
+    # (not at $OUTDIR/.marker directly). Search the OUTDIR tree for them.
+    PREPROC_FAIL_MARKER="$(find "$OUTDIR" -maxdepth 4 -name '.preprocess_failed' -print -quit 2>/dev/null)"
+    PROVIDER_INVALID_MARKER="$(find "$OUTDIR" -maxdepth 4 -name '.provider_invalid' -print -quit 2>/dev/null)"
+    INFRA_FAIL_MARKER="$(find "$OUTDIR" -maxdepth 4 -name '.infra_failed' -print -quit 2>/dev/null)"
+    if [[ -n "$PREPROC_FAIL_MARKER" && -f "$PREPROC_FAIL_MARKER" ]]; then
+      STATUS=preprocess_failed
+    elif [[ -n "$PROVIDER_INVALID_MARKER" && -f "$PROVIDER_INVALID_MARKER" ]]; then
+      STATUS=provider_invalid
+    elif [[ -n "$INFRA_FAIL_MARKER" && -f "$INFRA_FAIL_MARKER" ]]; then
+      STATUS=infra_failed
+    elif [[ $RC -eq 0 ]]; then
+      STATUS=success
+    else
+      STATUS=case_failed
+    fi
+	    append_summary "${TASK},${STATUS},${RC},${OUTDIR},${PGPORT},$((END_TS - START_TS))"
+	    WORKER_SUMMARY_WRITTEN=1
+	    log "DONE   $TASK -> $STATUS (exit=$RC, $((END_TS - START_TS))s, port=$PGPORT)"
+	    generate_audit_html "$OUTDIR"
+	
+	    echo "=== cleanup ==="
+	    cleanup_worker
 
-    END_TS=$(date +%s)
-    if [[ $RC -eq 0 ]]; then STATUS=success; else STATUS=failed; fi
-    append_summary "${TASK},${STATUS},${RC},${OUTDIR},${PGPORT},$((END_TS - START_TS))"
-    log "DONE   $TASK -> $STATUS (exit=$RC, $((END_TS - START_TS))s, port=$PGPORT)"
-    return "$RC"
+	    # A completed evaluation (even a wrong answer) is NOT a worker failure.
+    # Return 0 so the parent does not count it as INFRA_FAILED. Only explicit
+    # infra-failure returns (pg_fail / rootfs_fail / etc. above) return non-zero.
+    return 0
   } >"$TASK_LOG" 2>&1
 }
 
@@ -819,19 +980,44 @@ done
 
 PIDS=()
 SLOT=0
-FAILED=0
+INFRA_FAILED=0
 NEXT_PG_PORT="$PG_PORT_BASE"
 ALLOCATED_PG_PORT=""
+UNPATCHED_SKIPPED=0
 for TASK in "${TASKS[@]}"; do
   read -u 3
+  # Walltime-aware dispatch: refuse new work once the remaining allocation
+  # cannot cover a full single-case budget (c3b lost 6 tasks to SIGKILL at the
+  # Timelimit because the scheduler dispatched to the last minute).
+  if (( $(_walltime_remaining_s) < DISPATCH_BUDGET_S )); then
+    log "[walltime] remaining $(_walltime_remaining_s)s < dispatch budget ${DISPATCH_BUDGET_S}s — not dispatching $TASK (job ends cleanly)"
+    UNPATCHED_SKIPPED=$((UNPATCHED_SKIPPED + 1))
+    append_summary "${TASK},walltime_skipped,0,,,$(( $(date +%s) - START_TS ))"
+    echo >&3
+    continue
+  fi
   if ! claim_task "$TASK"; then
     log "[skip] $TASK already claimed by another slot (duplicate dispatch)"
     echo >&3
     continue
   fi
+  # Mock-port mutual exclusion: block this slot until every hardcoded mock
+  # port the task needs is free. Tasks sharing a port (30216 collision,
+  # case-study 2026-08-14) serialize instead of dying with preprocess_failed.
+  _mock_wait=0
+  until acquire_mock_ports "$TASK"; do
+    sleep 20
+    _mock_wait=$((_mock_wait + 1))
+    if (( _mock_wait > 180 )); then  # 1h cap so a dead lock cannot wedge a slot
+      log "[mockport] $TASK gave up waiting for mock port; proceeding unlocked"
+      break
+    fi
+  done
+  MOCK_LOCKS_HELD="$ACQUIRED_MOCK_LOCKS"
   if ! allocate_free_port; then
     log "[error] unable to allocate an isolated PostgreSQL port for $TASK"
-    FAILED=$((FAILED + 1))
+    INFRA_FAILED=$((INFRA_FAILED + 1))
+    [[ -n "$MOCK_LOCKS_HELD" ]] && release_mock_ports "$MOCK_LOCKS_HELD"
     echo >&3
     break
   fi
@@ -846,6 +1032,7 @@ for TASK in "${TASKS[@]}"; do
     WORKER_PGPORT=""
     WORKER_START_TS=""
     WORKER_SUMMARY_WRITTEN=0
+    WORKER_MOCK_LOCKS="$MOCK_LOCKS_HELD"
     worker_exit() {
       rc=$?
       trap - EXIT
@@ -854,6 +1041,7 @@ for TASK in "${TASKS[@]}"; do
         start_ts="${WORKER_START_TS:-$now_ts}"
         append_summary "${WORKER_TASK},interrupted,${rc:-1},${WORKER_OUTDIR:-},${WORKER_PGPORT:-},$((now_ts - start_ts))"
       fi
+      [[ -n "${WORKER_MOCK_LOCKS:-}" ]] && release_mock_ports "$WORKER_MOCK_LOCKS"
       cleanup_worker
       echo >&3
       exit "$rc"
@@ -868,7 +1056,10 @@ for TASK in "${TASKS[@]}"; do
 done
 
 for pid in "${PIDS[@]}"; do
-  wait "$pid" || FAILED=$((FAILED + 1))
+  # Audit §A.9: a worker only returns non-zero for a genuine infra failure
+  # (PG/rootfs/rsync/audit/worker signal). A case the agent answered wrong
+  # returns 0 — it is a valid evaluation result, not an infrastructure fault.
+  wait "$pid" || INFRA_FAILED=$((INFRA_FAILED + 1))
 done
 cleanup_fifo
 release_port_leases
@@ -876,7 +1067,8 @@ cleanup_run_artifacts
 trap - EXIT HUP INT TERM
 
 log "=============================================="
-log "  Finished. Failed workers: $FAILED / ${#TASKS[@]}"
+log "  Finished. Infra-failed workers: $INFRA_FAILED / ${#TASKS[@]}"
+(( UNPATCHED_SKIPPED > 0 )) && log "  Walltime-skipped (not dispatched): $UNPATCHED_SKIPPED"
 log "  Summary: $SUMMARY"
 log "=============================================="
 # Print summary table
@@ -884,4 +1076,25 @@ if [[ -f "$SUMMARY" ]]; then
   column -t -s, "$SUMMARY" 2>/dev/null || cat "$SUMMARY"
 fi
 
-exit "$FAILED"
+# Audit §A.9: final reconciliation. Count how many tasks were dispatched vs
+# how many summary rows we actually got. Missing rows mean a worker died
+# before writing its summary (SIGINT/infra) — those are INFRA_FAILED too.
+DISPATCHED=${#TASKS[@]}
+SUMMARY_ROWS=0
+if [[ -f "$SUMMARY" ]]; then
+  # Subtract the header line.
+  SUMMARY_ROWS=$(( $(wc -l < "$SUMMARY") - 1 ))
+fi
+if (( SUMMARY_ROWS < DISPATCHED )); then
+  MISSING=$((DISPATCHED - SUMMARY_ROWS))
+  log "[warn] $MISSING task(s) missing from summary (dispatched=$DISPATCHED rows=$SUMMARY_ROWS) — counting as infra-failed"
+  INFRA_FAILED=$((INFRA_FAILED + MISSING))
+fi
+
+# Exit 2 only on genuine infrastructure failures; exit 0 when every dispatched
+# task produced a summary (even if some cases were answered wrong). This keeps
+# Slurm job state = COMPLETED for legitimate model failures.
+if (( INFRA_FAILED > 0 )); then
+  exit 2
+fi
+exit 0

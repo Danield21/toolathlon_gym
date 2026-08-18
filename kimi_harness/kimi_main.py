@@ -368,20 +368,88 @@ def setup_workspace(task_config) -> str:
     return workspace
 
 
-def run_preprocess(task_config, debug: bool):
+def run_preprocess(task_config, debug: bool) -> bool:
+    """Run the task preprocess. Returns True on success, False on failure.
+
+    On failure this writes a `.preprocess_failed` marker into the task root so the
+    outer runner can classify the run as INFRA (PREPROCESS_FAILED) rather than a
+    model CASE_FAILED, and the caller aborts before launching the model. Without
+    this fail-fast, a broken seed (e.g. a missing fixture file) silently leaves
+    the DB in a partial state and the model then burns its whole step budget on
+    an unwinnable task (case-study 2026-08-12, case #19 research-lab).
+    """
     init = task_config.initialization
-    if init and init.process_command:
-        cmd = init.process_command
-        cmd += f" --agent_workspace {task_config.agent_workspace}"
-        lt = task_config.launch_time or ""
-        lt_clean = " ".join(lt.split()[:2])
-        cmd += f" --launch_time \"{lt_clean}\""
-        print_color("[preprocess] running...", "yellow")
-        r = subprocess.run(cmd, shell=True, capture_output=not debug, text=True)
-        if r.returncode != 0:
-            print_color(f"[preprocess] failed: {(r.stderr or '')[:300]}", "red")
-        else:
-            print_color("[preprocess] done.", "green")
+    if not (init and init.process_command):
+        return True
+    cmd = init.process_command
+    cmd += f" --agent_workspace {task_config.agent_workspace}"
+    lt = task_config.launch_time or ""
+    lt_clean = " ".join(lt.split()[:2])
+    cmd += f" --launch_time \"{lt_clean}\""
+    print_color("[preprocess] running...", "yellow")
+    r = subprocess.run(cmd, shell=True, capture_output=not debug, text=True)
+    if r.returncode != 0:
+        msg = (r.stderr or "")[:300]
+        print_color(f"[preprocess] FAILED: {msg}", "red")
+        # Marker consumed by run_eval_parallel.sh to classify as PREPROCESS_FAILED.
+        try:
+            marker = os.path.join(task_config.task_root, ".preprocess_failed")
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write(msg + "\n")
+        except Exception:
+            pass
+        return False
+    print_color("[preprocess] done.", "green")
+    return True
+
+
+# Provider-error signals that indicate the model backend was unavailable, not
+# that the model produced a wrong answer. A run consisting ENTIRELY of these
+# (with no real model progress) is classified as provider_invalid / infra.
+_PROVIDER_ERR_PATTERNS = (
+    "provider.connection_error",
+    "provider.rate_limit",
+    "provider.auth_error",
+    "provider.overloaded",
+    "APITimeoutError",
+    "APIStatusError",
+    "auth_unavailable",
+    "insufficient_quota",
+    "insufficient balance",
+    "Request timed out",
+)
+# Indicators that the model actually made progress (so provider errors, if any,
+# were recoverable retries rather than the whole run being invalid).
+_MODEL_PROGRESS_PATTERNS = (
+    '"type":"tool"',
+    "tool_use",
+    '"role":"assistant"',
+    "function_call",
+)
+
+
+def _detect_provider_invalid(stream_path: str) -> str:
+    """Return a non-empty reason string if the run looks provider-invalid, else ''.
+
+    A run is provider-invalid when the raw stream contains provider-error signals
+    AND no genuine model progress (no tool calls, no assistant content). This
+    catches the "10 retries then die" failure mode without misclassifying a run
+    that recovered after a transient 503.
+    """
+    try:
+        text = Path(stream_path).read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    if not text:
+        return ""
+    err_hits = [p for p in _PROVIDER_ERR_PATTERNS if p in text]
+    if not err_hits:
+        return ""
+    progress = any(p in text for p in _MODEL_PROGRESS_PATTERNS)
+    if progress:
+        return ""
+    # No model progress + provider errors present -> invalid.
+    return f"provider errors ({', '.join(err_hits[:3])}) with no model progress"
 
 
 # Redundant sentence in task-provided agent_system_prompt.md that duplicates
@@ -535,6 +603,140 @@ startup_timeout_ms = {int(float(os.environ.get('MCP_STDIO_TIMEOUT_MIN', '90')) *
 """
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as f:
         f.write(config)
+
+
+def _check_mcp_servers_health(mcp_json_path: str) -> list:
+    """Pre-flight health check for every declared MCP server.
+
+    Returns a list of human-readable failure reasons. An empty list means every
+    server passed.
+
+    This catches the most common image-build/runtime defects WITHOUT spawning
+    the servers (which kimi-code owns):
+      - the launch ``command`` binary is missing/not executable (e.g. ``uv``,
+        ``node`` not on PATH inside the rootfs);
+      - for ``uv``-launched servers, the project's ``.venv/bin/python`` (built
+        at image time) is missing — the exact failure mode that silently dropped
+        the ``google_sheet`` MCP in the §C.2 rerun (canvas-course-comparison /
+        arxiv-latex-review-notion-word). A missing .venv cannot be recovered at
+        runtime on the no-egress compute node, so we fail-fast as infra.
+      - for ``node``/``npx``-launched servers, the entry script (first arg) is
+        missing.
+
+    See dev_docs/2026-08-13-c2-tz-fix-design.md §2 (P0-2).
+    """
+    failures = []
+    try:
+        with open(mcp_json_path, encoding="utf-8") as f:
+            spec = json.load(f)
+    except Exception as e:
+        return [f"cannot read mcp.json: {e}"]
+
+    servers = spec.get("mcpServers", {}) or {}
+    if not servers:
+        return failures
+
+    for name, cfg in servers.items():
+        command = cfg.get("command", "")
+        args = cfg.get("args", []) or []
+        cwd = cfg.get("cwd", "") or ""
+
+        # 1) The launch binary must resolve.
+        bin_path = None
+        if os.path.isabs(command):
+            bin_path = command
+        else:
+            # Resolve against PATH (shutil.which mirrors what subprocess does).
+            import shutil
+            bin_path = shutil.which(command)
+        if not bin_path or not os.path.isfile(bin_path):
+            failures.append(
+                f"MCP server '{name}': command '{command}' not found "
+                f"(resolved='{bin_path}')")
+            continue
+        if not os.access(bin_path, os.X_OK):
+            failures.append(
+                f"MCP server '{name}': command '{bin_path}' is not executable")
+            continue
+
+        # 2) uv-launched Python MCP servers need their image-built .venv.
+        #    `uv run` will try to (re)create it on a no-egress node and either
+        #    hang past startupTimeoutMs or exit non-zero — either way kimi drops
+        #    the server and every tool it provides becomes "NOT FOUND".
+        #
+        #    The venv lives next to the uv *project* (the package that `uv run`
+        #    executes).  Toolathlon uv servers pass the project via the
+        #    `--directory <dir>` flag (e.g. excel-mcp-server, mcp-google-sheets),
+        #    while `cwd` is the agent workspace — so the venv must be resolved
+        #    from `--directory`, NOT from `cwd`.  Checking cwd/.venv caused every
+        #    excel/google_sheet task to be misclassified as infra_failed.
+        if command == "uv":
+            uv_project = ""
+            # Resolve ${local_servers_paths} style placeholders the same way the
+            # generator does: local_servers live under /opt/local_servers in the
+            # image, which is also AGENT_TEMPLATE/opt/local_servers on the host.
+            if "--directory" in args:
+                try:
+                    di = args.index("--directory")
+                    if di + 1 < len(args):
+                        uv_project = args[di + 1]
+                except ValueError:
+                    pass
+            if not uv_project:
+                uv_project = cwd  # fall back; some servers may set cwd to the project
+            if uv_project:
+                venv_python = os.path.join(uv_project, ".venv", "bin", "python")
+                if not os.path.isfile(venv_python):
+                    failures.append(
+                        f"MCP server '{name}': uv project '{uv_project}' has no "
+                        f".venv/bin/python — the image build did not sync this "
+                        f"server's venv. Rebuild the image (it is now in "
+                        f"UV_REQUIRED_DIRS) or fix the .venv before rerunning.")
+                    continue
+                # Host-path contamination guard (case-study 2026-08-14, P0-2):
+                # if the runtime rootfs was hand-edited on the host, venv entry
+                # scripts (dotenv/httpx/mcp/uvicorn/...) keep HOST-absolute
+                # interpreter paths that cannot resolve inside the container.
+                # Every executable under .venv/bin must stay container-relative.
+                venv_bin = os.path.join(uv_project, ".venv", "bin")
+                try:
+                    bin_entries = os.listdir(venv_bin)
+                except OSError:
+                    bin_entries = []
+                for entry in bin_entries:
+                    entry_path = os.path.join(venv_bin, entry)
+                    if os.path.isdir(entry_path) or os.path.islink(entry_path):
+                        continue
+                    try:
+                        with open(entry_path, "rb") as f:
+                            head = f.read(4096).decode("utf-8", "replace")
+                    except OSError:
+                        continue
+                    # A venv entry script's shebang/exec references its own
+                    # interpreter. Under enroot that must be the container path
+                    # (/opt/... or /usr/...); a /lintaoLab2 or /storage path is
+                    # definitive evidence of host-side contamination.
+                    for bad_prefix in ("/lintaoLab2/", "/storage/lintaoLab/"):
+                        if bad_prefix in head:
+                            failures.append(
+                                f"MCP server '{name}': venv entry '{entry}' "
+                                f"references host path '{bad_prefix}...' — the "
+                                f"runtime rootfs was contaminated by a host-side "
+                                f"edit. Rebuild the image; do not patch the "
+                                f"rootfs on the host.")
+                            break
+
+        # 3) node/npx servers: the entry script (first non-flag arg) should
+        #    exist when it is a path-like value.
+        if command in ("node", "npx") and args:
+            entry = args[0]
+            if entry and not entry.startswith("-") and entry.endswith((".js", ".mjs", ".cjs")):
+                entry_full = entry if os.path.isabs(entry) else os.path.join(cwd, entry)
+                if not os.path.isfile(entry_full):
+                    failures.append(
+                        f"MCP server '{name}': entry script '{entry_full}' "
+                        f"not found")
+    return failures
 
 
 _LIBC = ctypes.CDLL("libc.so.6", use_errno=True)
@@ -931,6 +1133,29 @@ def launch_kimi(task_str: str, agentfile: str, home: str, stream_path: str,
     env.pop("HTTP_PROXY", None)
     env.pop("HTTPS_PROXY", None)
 
+    # Credential isolation (audit §A.3 / security-boundary): the evaluated
+    # agent must NOT be able to read backing-DB credentials from its own
+    # process environment. The MCP servers receive PG credentials through the
+    # per-server `env` block written into mcp.json (see mcp_json_gen.py), so
+    # the agent's global environment does not need them. Strip every libpq /
+    # Toolathlon spelling of PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE so
+    # `os.environ['PGPASSWORD']` and `env | grep PG` both come back empty.
+    # MODEL_API_KEY is kept here because the kimi-code CLI needs it to call
+    # the model; python_execute strips it again at the tool boundary (see
+    # local_tools_server.py) so agent-authored code still cannot read it.
+    if os.environ.get("KIMI_DISABLE_BOUNDARY") != "1":
+        for _k in list(env.keys()):
+            if _k.upper().startswith("PG") and _k.upper() in (
+                "PGHOST", "PG_HOST", "PGPORT", "PG_PORT",
+                "PGUSER", "PG_USER", "PGPASSWORD", "PG_PASSWORD",
+                "PGDATABASE", "PG_DATABASE", "PGSERVICE", "PG_SERVICE",
+                "PGSERVICEFILE", "PG_SERVICE_FILE",
+                "PGSSLMODE", "PG_SSLMODE",
+            ):
+                env.pop(_k, None)
+        print_color("[boundary] stripped PG credentials from agent environment",
+                    "cyan")
+
     # Rewrite env paths that point into masked dirs (e.g. /opt/venv on PATH)
     # so the agent's tools resolve to the staged copies.
     rewrite = rewrite or {}
@@ -1089,7 +1314,12 @@ async def amain():
         os.remove(marker)
 
     workspace = setup_workspace(task_config)
-    run_preprocess(task_config, args.debug)
+    if not run_preprocess(task_config, args.debug):
+        # Fail-fast: do NOT launch the model on a task whose DB seed failed.
+        # The .preprocess_failed marker lets the outer runner classify this as
+        # PREPROCESS_FAILED (infra), not a model CASE_FAILED.
+        print_color("[kimi] aborting: preprocess failed; not launching model.", "red")
+        return 3
     mock_servers = _relocate_mock_servers(task_config)
 
     # Stage agent-runtime deps (MCP servers, harness tools, venv) into an
@@ -1099,6 +1329,24 @@ async def amain():
     kimi_home = os.path.join(task_root, ".kimi_home")
     write_kimi_home(kimi_home, task_config, workspace, marker, max_steps,
                     rewrite=rewrite)
+
+    # Pre-flight MCP health check (P0-2): verify every declared MCP server's
+    # launch binary / venv / entry script exists BEFORE launching the model. A
+    # missing .venv (the google_sheet failure mode) cannot be recovered at
+    # runtime on a no-egress compute node; fail-fast here as infra so the run
+    # is classified as INFRA_FAILED and auto-rerun, not scored as a model fail.
+    mcp_json_path = os.path.join(kimi_home, "mcp.json")
+    mcp_failures = _check_mcp_servers_health(mcp_json_path)
+    if mcp_failures and os.environ.get("KIMI_DISABLE_BOUNDARY") != "1":
+        msg = "MCP server health check failed:\n  - " + "\n  - ".join(mcp_failures)
+        print_color(f"[infra] {msg}", "red")
+        try:
+            with open(os.path.join(task_root, ".infra_failed"), "w",
+                      encoding="utf-8") as fh:
+                fh.write(msg + "\n")
+        except Exception:
+            pass
+        return 3
 
     agentfile = os.path.join(task_root, "agent_main.md")
     write_agentfile(agentfile, render_system_prompt(task_config))
@@ -1123,7 +1371,6 @@ async def amain():
         )
     finally:
         _unmask_blackbox(masked)
-        _shutdown_mock_servers(mock_servers)
 
     status = "success" if done else "failed"
     print_color(f"[kimi] exited rc={rc} claim_done={done} -> status={status}",
@@ -1131,12 +1378,41 @@ async def amain():
 
     write_traj_logs(task_config, status, start_time, stream_path)
 
-    print_color("\n====== Evaluating ======", "yellow")
-    from utils.evaluation.evaluator import TaskEvaluator
-    eval_res = await TaskEvaluator.evaluate_from_log_file(task_config.log_file)
-    print(f"Pass:    {eval_res.get('pass', False)}")
-    print(f"Details: {eval_res.get('details', 'N/A')}")
-    return 0 if eval_res.get("pass", False) else 1
+    # Provider-invalid detection (case-study 2026-08-12, case #1 sf-support): a run
+    # that never produced a usable assistant turn — only provider connection /
+    # auth / balance / overload errors — is an infra failure, not a model failure.
+    # We scan the raw stream for provider-error signals and for any real model
+    # progress (tool calls or assistant text content). If there is no real model
+    # progress AND provider errors are present, write a marker so the outer runner
+    # classifies the run as provider_invalid instead of case_failed, and the task
+    # gets an automatic rerun rather than being scored as a model ability deficit.
+    try:
+        pv = _detect_provider_invalid(stream_path)
+        if pv:
+            print_color(f"[provider] invalid run detected: {pv}", "magenta")
+            try:
+                with open(os.path.join(task_root, ".provider_invalid"), "w",
+                          encoding="utf-8") as fh:
+                    fh.write(pv + "\n")
+            except Exception:
+                pass
+            # Skip evaluation: there is nothing to evaluate, and the run is invalid.
+            return 4
+
+        print_color("\n====== Evaluating ======", "yellow")
+        from utils.evaluation.evaluator import TaskEvaluator
+        eval_res = await TaskEvaluator.evaluate_from_log_file(task_config.log_file)
+        print(f"Pass:    {eval_res.get('pass', False)}")
+        print(f"Details: {eval_res.get('details', 'N/A')}")
+        # Only a completed lifecycle may return 0 to the outer runner. A
+        # no-claim artifact-only PASS is valuable audit signal, but the worker
+        # status must remain case_failed so downstream tables can distinguish
+        # "answer quality passed" from "agent followed completion protocol".
+        return 0 if (done and eval_res.get("pass", False)) else 1
+    finally:
+        # Keep mock services alive through evaluation so no-claim runs with
+        # deliverables can still be judged against local service side effects.
+        _shutdown_mock_servers(mock_servers)
 
 
 def main():

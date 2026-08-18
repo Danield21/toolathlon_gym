@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 DELEGATION_TOOLS = {"Agent", "AgentSwarm"}
+RUN_DIR_RE = re.compile(r"^\d{8}-\d{6}(?:[-_][A-Za-z0-9_.-]+)?_slot\d+$")
 
 
 def load_json(p: Path):
@@ -30,7 +31,7 @@ def find_case_dirs(dump_root: Path) -> list[Path]:
         if not task_dir.is_dir():
             continue
         for run_dir in sorted(task_dir.iterdir()):
-            if run_dir.is_dir() and re.match(r"\d{8}-\d{6}_slot\d+", run_dir.name):
+            if run_dir.is_dir() and RUN_DIR_RE.match(run_dir.name):
                 dirs.append(run_dir)
     return dirs
 
@@ -72,6 +73,29 @@ def parse_eval_res(inner: Path | None) -> dict:
         d = load_json(p) or {}
         out["pass"] = d.get("pass")
         failure = d.get("failure") or ""
+        out["failure_text"] = failure
+        m = re.search(r"ERRORS:\s*(\d+)", failure)
+        if m:
+            out["eval_errors"] = int(m.group(1))
+        m = re.search(r"RESULT:\s*(\S+)", failure)
+        if m:
+            out["eval_result"] = m.group(1)
+    return out
+
+
+def parse_artifact_eval_res(inner: Path | None) -> dict:
+    """Load supplemental artifact-only evaluation for no-claim runs."""
+    out: dict = {}
+    p = (inner / "artifact_eval_res.json") if inner else None
+    if p and p.exists():
+        d = load_json(p) or {}
+        out["pass"] = d.get("pass")
+        out["returncode"] = d.get("returncode")
+        out["details"] = d.get("details") or ""
+        out["stdout"] = d.get("stdout") or ""
+        out["stderr"] = d.get("stderr") or ""
+        out["command"] = d.get("command") or ""
+        failure = d.get("failure") or d.get("stdout") or d.get("details") or ""
         out["failure_text"] = failure
         m = re.search(r"ERRORS:\s*(\d+)", failure)
         if m:
@@ -248,9 +272,82 @@ def fmt_args(name: str, args: dict) -> str:
     if name == "TodoList":
         todos = args.get("todos") or []
         return "; ".join(f"[{t.get('status','?')}] {t.get('title','')}" for t in todos if isinstance(t, dict))[:300]
-    if name == "python_execute":
-        return (args.get("code") or "")[:300]
+    if name == "python_execute" or name.endswith("__python_execute"):
+        code = args.get("code") or ""
+        n_lines = code.count("\n") + 1 if code else 0
+        return f"python_execute · {n_lines} line{'s' if n_lines != 1 else ''}"
     return json.dumps(args, ensure_ascii=False)[:300]
+
+
+_PY_KEYWORDS = (
+    "import", "from", "as", "def", "class", "return", "if", "elif", "else",
+    "for", "while", "in", "not", "and", "or", "is", "None", "True", "False",
+    "try", "except", "finally", "with", "raise", "pass", "break", "continue",
+    "lambda", "yield", "del", "global", "nonlocal", "assert", "print",
+)
+
+
+_PY_STRING_RE = re.compile(
+    r'('
+    r'"(?:[^"\\]|\\.)*"'      # double-quoted
+    r"|'(?:[^'\\]|\\.)*'"     # single-quoted
+    r'|"""(?:[^"]|"(?!""))*"""'  # triple double
+    r"|'''(?:[^']|'(?!''))*'''"  # triple single
+    r')', re.S)
+_PY_COMMENT_RE = re.compile(r'#(?!\\).*$', re.M)
+
+
+def _render_python_block(code: str) -> str:
+    """Render Python source with light syntax highlighting (no deps).
+
+    Tokenize first (strings/comments), then escape each segment and wrap in
+    spans so we never run keyword regex over already-escaped HTML.
+    """
+    # find all strings first
+    spans: list[tuple[int, int, str]] = []  # (start, end, css_class)
+    for m in _PY_STRING_RE.finditer(code):
+        spans.append((m.start(), m.end(), "py-str"))
+    # find comments that are not inside a string
+    for m in _PY_COMMENT_RE.finditer(code):
+        s, e = m.start(), m.end()
+        inside_str = any(a <= s < b for a, b, c in spans if c == "py-str")
+        if not inside_str:
+            spans.append((s, e, "py-com"))
+    spans.sort()
+
+    kw_pat = re.compile(r'\b(' + '|'.join(_PY_KEYWORDS) + r')\b')
+    num_pat = re.compile(r'\b(\d+(?:\.\d+)?)\b')
+
+    def _plain(text: str) -> str:
+        esc = html.escape(text)
+        esc = kw_pat.sub(r'<span class="py-kw">\1</span>', esc)
+        esc = num_pat.sub(r'<span class="py-num">\1</span>', esc)
+        return esc
+
+    out: list[str] = []
+    pos = 0
+    for s, e, cls in spans:
+        if s > pos:
+            out.append(_plain(code[pos:s]))
+        out.append(f'<span class="{cls}">{html.escape(code[s:e])}</span>')
+        pos = e
+    if pos < len(code):
+        out.append(_plain(code[pos:]))
+    return f'<pre class="code-block py">{"".join(out)}</pre>'
+
+
+def _render_shell_block(cmd: str) -> str:
+    esc = html.escape(cmd)
+    esc = re.sub(r'(?m)^(\s*[$#]\s+)', r'<span class="sh-prompt">\1</span>', esc)
+    return f'<pre class="code-block sh">{esc}</pre>'
+
+
+def _is_python_tool(name: str) -> bool:
+    return name == "python_execute" or name.endswith("__python_execute")
+
+
+def _is_shell_tool(name: str) -> bool:
+    return name == "Bash" or name.endswith("__terminal") or name.endswith("__run_terminal_cmd")
 
 
 def render_call(call: dict) -> str:
@@ -264,10 +361,37 @@ def render_call(call: dict) -> str:
              f'<span class="tool-tag">{html.escape(name)}</span> {err}'
              f'<span class="call-line">{html.escape(oneline)}</span></div>']
 
-    full_args = json.dumps(call["args"], ensure_ascii=False, indent=2)
-    if len(full_args) > len(oneline) + 40:
-        parts.append(f'<details class="args"><summary>arguments</summary>'
-                     f'<div class="md-pre">{html.escape(full_args)}</div></details>')
+    # Code-bearing tools get a dedicated, formatted block instead of the
+    # generic JSON dump. This keeps the one-liner compact and lets the
+    # auditor read the script in isolation.
+    rendered_code = None
+    code_label = None
+    if _is_python_tool(name):
+        code = call["args"].get("code") or ""
+        if code:
+            rendered_code = _render_python_block(code)
+            code_label = "code"
+    elif _is_shell_tool(name):
+        cmd = call["args"].get("command") or call["args"].get("cmd") or ""
+        if cmd:
+            rendered_code = _render_shell_block(cmd)
+            code_label = "command"
+
+    if rendered_code is not None:
+        parts.append(f'<details class="args code-args"><summary>{code_label}</summary>'
+                     f'{rendered_code}</details>')
+        # Other args besides the code field, if any, still go to JSON.
+        other_args = {k: v for k, v in call["args"].items()
+                      if k not in ("code", "command", "cmd")}
+        if other_args:
+            other_json = json.dumps(other_args, ensure_ascii=False, indent=2)
+            parts.append(f'<details class="args"><summary>other args</summary>'
+                         f'<div class="md-pre">{html.escape(other_json)}</div></details>')
+    else:
+        full_args = json.dumps(call["args"], ensure_ascii=False, indent=2)
+        if len(full_args) > len(oneline) + 40:
+            parts.append(f'<details class="args"><summary>arguments</summary>'
+                         f'<div class="md-pre">{html.escape(full_args)}</div></details>')
 
     # structured delegation
     if name == "Agent":
@@ -417,6 +541,24 @@ details.sub>*:not(summary){margin-left:16px;margin-right:16px}
 .phase.solo td:first-child{border-left:3px solid #cfc9c0}
 .footer{text-align:center;color:var(--mut);font-size:12px;padding:26px}
 a{color:var(--acc)}
+
+/* code blocks */
+.code-block{background:#2b2b2b;color:#e8e6e3;border:1px solid #1d1d1d;border-radius:8px;
+padding:10px 12px;font:12px/1.55 'SF Mono','Menlo','DejaVu Sans Mono',monospace;
+white-space:pre;overflow-x:auto;overflow-y:auto;max-height:480px;margin:6px 0;
+tab-size:4;-moz-tab-size:4}
+.code-block.py{background:#1e1e2e;border-color:#2f2f42}
+.code-block.py .py-kw{color:#cba6f7;font-weight:600}
+.code-block.py .py-str{color:#a6e3a1}
+.code-block.py .py-num{color:#fab387}
+.code-block.py .py-com{color:#7f849c;font-style:italic}
+.code-block.sh{background:#1b2327;border-color:#233038}
+.code-block.sh .sh-prompt{color:#7aa2f7;font-weight:600}
+details.code-args summary{color:var(--mut);font-size:12px}
+details.code-args[open] summary{margin-bottom:4px}
+.btn-code{cursor:pointer;border:1px solid var(--bd);background:var(--card);color:var(--acc);
+border-radius:8px;padding:4px 12px;font-size:12.5px;font-weight:600;margin:4px 0}
+.btn-code:hover{background:var(--acc-l)}
 """
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -430,6 +572,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </header><main>
 {body}
 <div class="footer">generated by scripts/audit_html_gen.py</div>
+<script>
+function toggleCodeBlocks(btn, sectionId) {{
+  var sec = document.getElementById(sectionId);
+  if (!sec) return;
+  var open = btn.dataset.open === '1';
+  var target = !open;
+  sec.querySelectorAll('details.code-args').forEach(function(d) {{ d.open = target; }});
+  btn.dataset.open = target ? '1' : '0';
+  btn.textContent = target ? 'collapse all code' : 'expand all code';
+}}
+</script>
 </main></body></html>"""
 
 
@@ -440,6 +593,7 @@ def build_case_html(case_dir: Path) -> dict | None:
     task, run = case_dir.parent.name, case_dir.name
     runlog = parse_run_log(case_dir)
     evres = parse_eval_res(inner)
+    artifact_evres = parse_artifact_eval_res(inner)
     traj_log = load_json(inner / "traj_log.json") or {}
     cfg = traj_log.get("config") or {}
 
@@ -476,6 +630,10 @@ def build_case_html(case_dir: Path) -> dict | None:
     pass_pill = ('<span class="pill ok">PASS</span>' if passed is True
                  else '<span class="pill bad">FAIL</span>' if passed is False
                  else '<span class="pill bad">NO EVAL</span>')
+    artifact_passed = artifact_evres.get("pass")
+    artifact_pill = ('<span class="pill ok">PASS</span>' if artifact_passed is True
+                     else '<span class="pill bad">FAIL</span>' if artifact_passed is False
+                     else '<span class="pill">not run</span>')
     duration = runlog.get("duration_s")
     dur_txt = f"{duration}s ({duration//60}m{duration%60}s)" if duration else "—"
     ck_txt = f"{ck_pass} / {ck_total} pass · {ck_fail} fail" if ck_pass is not None else "—"
@@ -492,6 +650,7 @@ def build_case_html(case_dir: Path) -> dict | None:
     body.append(f"""<section id="summary"><h2>Run Summary</h2>
 <div class="kv">
 <div><b>Eval</b>{pass_pill}</div>
+<div><b>Artifact Eval</b>{artifact_pill}</div>
 <div><b>Split / Tier</b><span class="tag">{tier}</span> <span class="muted">{n_mcp} MCP server(s)</span></div>
 <div><b>Checkpoints</b>{html.escape(ck_txt)}<div class="bar"><div style="width:{ck_pct:.0f}%"></div></div></div>
 <div><b>Duration</b>{html.escape(dur_txt)}</div>
@@ -558,15 +717,31 @@ A single step firing N Agent calls concurrently counts as one parallel phase.</p
     body.append(f"""<section id="subdef"><h2>Sub-agent Definitions ({len(inv['subagents'])})</h2>{''.join(sd) or '<p class="muted">none</p>'}</section>""")
 
     body.append(f"""<section id="timeline"><h2>Main Agent Execution Timeline ({main_wire['n_steps']} steps)</h2>
-<p class="muted">Purple = sub-agent delegation · blue = tool call. Expand for full arguments/results.</p>
+<p class="muted">Purple = sub-agent delegation · blue = tool call. Expand for full arguments/results.
+Python code is rendered with syntax highlighting inside a dedicated block.</p>
+<button class="btn-code" onclick="toggleCodeBlocks(this, 'timeline')">expand all code</button>
 {render_timeline(main_wire)}</section>""")
 
     body.append(f"""<section id="subrun"><h2>Sub-agent Runs ({len(sub_wires)})</h2>
 <p class="muted">{crit['n_parallel_subs']} in parallel · {crit['n_sequential_subs']} sequential.</p>
+<button class="btn-code" onclick="toggleCodeBlocks(this, 'subrun')">expand all code</button>
 {render_subagents(sub_wires)}</section>""")
 
+    artifact_detail = ""
+    if artifact_evres:
+        artifact_detail = f"""
+<h3>Artifact-only Evaluation</h3>
+<p class="muted">Supplemental audit only: this ignores the missing claim_done lifecycle signal and evaluates the artifacts currently present on disk. It does not change the official Eval above.</p>
+<div class="md-pre">{html.escape(artifact_evres.get('failure_text') or artifact_evres.get('details') or '(empty artifact eval)')}</div>"""
+        if artifact_evres.get("stderr"):
+            artifact_detail += f"""
+<h3>Artifact Eval STDERR</h3>
+<div class="md-pre">{html.escape(artifact_evres.get('stderr') or '')}</div>"""
+
     body.append(f"""<section id="eval"><h2>Evaluation Detail</h2>
-<div class="md-pre">{html.escape(evres.get('failure_text') or '(no eval_res.json)')}</div></section>""")
+<h3>Official Evaluation</h3>
+<div class="md-pre">{html.escape(evres.get('failure_text') or '(no eval_res.json)')}</div>
+{artifact_detail}</section>""")
 
     (case_dir / "audit.html").write_text(
         HTML_TEMPLATE.format(task=html.escape(task), run=html.escape(run),
@@ -613,7 +788,7 @@ def main(argv: list[str]) -> int:
         if not root.is_dir():
             print(f"[skip] {root} not a directory")
             continue
-        if re.match(r"\d{8}-\d{6}_slot\d+", root.name):
+        if RUN_DIR_RE.match(root.name):
             rec = build_case_html(root)
             if rec:
                 print(f"[ok] {rec['task']}/{rec['run']}  pass={rec['pass']}  crit={rec['critical_steps']}  subs={rec['n_subs']}({rec['n_parallel']}p/{rec['n_sequential']}s)")

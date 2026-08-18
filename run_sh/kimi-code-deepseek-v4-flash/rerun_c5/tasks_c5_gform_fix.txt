@@ -1,0 +1,6 @@
+canvas-course-feedback
+terminal-canvas-gform-gcal-excel-email
+terminal-howtocook-scholarly-excel-word-gform
+terminal-wc-howtocook-gform-excel-notion
+canvas-grade-summary
+canvas-enrollment-overview

@@ -152,7 +152,11 @@ def server(
 
         res = ""
         cursor = None
-        for i, line in islice(enumerate(texts), int(next_cursor or 0), None):
+        # Cursor may come back as a float-like string ("1377.6") when models
+        # feed the previous cursor through arithmetic. int() raises ValueError
+        # on those; float() first tolerates both integer and decimal strings.
+        start_idx = int(float(next_cursor or 0))
+        for i, line in islice(enumerate(texts), start_idx, None):
             if len(res) + len(line) + 1 > response_limit:
                 cursor = str(i)
                 break
@@ -178,7 +182,9 @@ def server(
         res = []
         size = len(title) + 1
         cursor = None
-        for i, snippet in islice(enumerate(snippet_objs), int(next_cursor or 0), None):
+        # Same float-string cursor tolerance as get_transcript above.
+        start_idx = int(float(next_cursor or 0))
+        for i, snippet in islice(enumerate(snippet_objs), start_idx, None):
             if size + len(snippet) + 1 > response_limit:
                 cursor = str(i)
                 break

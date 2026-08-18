@@ -109,6 +109,22 @@ read -r -d '' INNER <<'INNER_EOF' || true
 set -euo pipefail
 cd /lintaoLab2/bowending/project_agent_swarm_benchmark/toolathlon_gym
 
+# MODEL_NAME / KIMI_CONFIG_ENV are passed as $1 / $2 from the srun invocation
+# (see the bash -c "$INNER" _ "$MODEL_NAME" "$KIMI_CONFIG_ENV" ... below). srun
+# on this cluster does NOT reliably propagate KIMI_CONFIG_ENV through the
+# environment (observed: it arrived as config.env instead of config.c2.env),
+# which made run_eval_parallel.sh fall back to the default config.env
+# (MODEL_NAME=deepseek-v4-flash, quota exhausted -> 503). Passing them as
+# positional args is the robust fix.
+export MODEL_NAME="$1"
+export KIMI_CONFIG_ENV="$2"
+export MODEL_API_URL="$3"
+export MODEL_API_KEY="$4"
+export KIMI_MAX_CONTEXT="$5"
+export KIMI_TASK_TIMEOUT_S="$6"
+shift 6
+echo "[inner] ARGV: MODEL_NAME=$MODEL_NAME KIMI_CONFIG_ENV=$KIMI_CONFIG_ENV"
+
 # Compute nodes inherit http_proxy=127.0.0.1:7890 (nonexistent). Clear all
 # proxy vars and whitelist the login node so API calls go direct to the relay.
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
@@ -164,10 +180,24 @@ cleanup_inner() {
 trap cleanup_inner EXIT
 
 # The base rootfs (toolathlon-pack) lives on NFS so every compute node can see
-# it. Each worker copies it into its own /dev/shm/enroot_data/agent-<task> (fast
-# tmpfs-to-tmpfs copy). On compute nodes /dev/shm is 1TB so 6x4.7GB is trivial.
-# The login-node shm copy is NOT visible here, so point at the NFS snapshot.
-export AGENT_TEMPLATE="/lintaoLab2/bowending/project_agent_swarm_benchmark/toolathlon_gym_eval_dockers/toolathlon-pack-rootfs"
+# it. Each worker enroot-creates its own copy into /dev/shm/enroot_data/agent-<task>.
+# On compute nodes /dev/shm is 1TB so 6x4.7GB is trivial.
+#
+# c4 case-study (2026-08-15, dev_docs/2026-08-15-c4-rerun-batch-analysis.md §1):
+# this line used to point at toolathlon-pack-rootfs — a WRITABLE copy that had
+# been pip/uv-edited on the host, so its venv entry scripts carried host paths
+# and 42/77 cases failed the MCP health check with infra_failed. The only
+# artifact allowed here is the sqsh produced by enroot_build_agent.sh (immutable
+# by construction). run_eval_parallel.sh's AGENT_TEMPLATE default prefers a
+# directory copy, so unset it and export the sqsh path explicitly: workers then
+# take the `enroot create -n <name> <sqsh>` path.
+unset AGENT_TEMPLATE
+export AGENT_SQSH="/lintaoLab2/bowending/project_agent_swarm_benchmark/toolathlon_gym_eval_dockers/images/toolathlon-pack.sqsh"
+if [[ ! -f "$AGENT_SQSH" ]]; then
+  echo "[inner] FATAL: agent image $AGENT_SQSH missing — build it with scripts/enroot_build_agent.sh" >&2
+  exit 1
+fi
+echo "[inner] agent image: $AGENT_SQSH (sqsh, build-produced)"
 
 # Sanity: relay reachable from compute node?
 echo "[inner] relay check:"
@@ -183,17 +213,106 @@ echo "[inner] /dev/shm: $(df -h /dev/shm | tail -1 | awk '{print $2" total, "$4"
 
 # Hand off to the existing parallel launcher. Keep this shell alive so its
 # EXIT trap can release the Slurm allocation and sweep this run's tmpfs roots.
+#
+# Important: model/evaluator case failures are valid eval outcomes and should
+# not mark the Slurm job FAILED. Reconcile the summary after the runner exits:
+# missing rows, rootfs/PG failures, or missing audit.html are infra failures;
+# ordinary "failed" rows are case results.
+set +e
 bash run_sh/kimi-code-deepseek-v4-flash/run_eval_parallel.sh "$@"
+RUNNER_RC=$?
+set -e
+echo "[inner] runner rc=${RUNNER_RC}; generating audit/index and reconciling"
+
+if [[ "${AUTO_AUDIT_HTML:-1}" == "1" ]]; then
+  python3 scripts/audit_html_gen.py "${DUMP_ROOT:-/lintaoLab2/bowending/project_agent_swarm_benchmark/toolathlon_gym/dumps/kimi-code_deepseek-v4-flash}" || true
+fi
+
+python3 - "${DUMP_ROOT:-}" "${RUN_ID:-}" "$@" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+dump_root = Path(sys.argv[1] or ".")
+run_id = sys.argv[2]
+tasks = sys.argv[3:]
+summary = dump_root / f"summary_parallel_{run_id}.csv"
+infra_statuses = {
+    "pg_fail", "rootfs_fail", "pg_test_fail", "pg_test_success",
+    "missing_summary", "audit_missing", "interrupted",
+    # Fail-fast / provider-invalid classifications (case-study 2026-08-12):
+    # these mean the run was infra-invalid (bad seed / model backend down /
+    # MCP server missing its venv) and must NOT count against the model's
+    # ability score. infra_failed = MCP pre-flight health check failed
+    # (P0-2, dev_docs/2026-08-13-c2-tz-fix-design.md §2).
+    "preprocess_failed", "provider_invalid", "infra_failed",
+}
+case_failure_statuses = {"failed", "case_failed"}
+allowed_statuses = {"success"} | case_failure_statuses
+
+if not summary.exists():
+    print(f"[reconcile] INFRA: missing summary {summary}")
+    sys.exit(2)
+
+rows = []
+with summary.open(newline="") as f:
+    for row in csv.DictReader(f):
+        rows.append(row)
+
+by_task = {r.get("task"): r for r in rows}
+missing = [t for t in tasks if t not in by_task]
+bad_status = [
+    (r.get("task"), r.get("status"))
+    for r in rows
+    if r.get("status") not in allowed_statuses
+]
+missing_audit = []
+for r in rows:
+    out = Path(r.get("output_dir") or "")
+    if r.get("status") in allowed_statuses and not (out / "audit.html").exists():
+        missing_audit.append(r.get("task"))
+
+case_failed = sum(1 for r in rows if r.get("status") in case_failure_statuses)
+case_success = sum(1 for r in rows if r.get("status") == "success")
+print(
+    f"[reconcile] rows={len(rows)} tasks={len(tasks)} "
+    f"success={case_success} failed={case_failed} "
+    f"missing={len(missing)} bad_status={len(bad_status)} missing_audit={len(missing_audit)}"
+)
+if missing:
+    print("[reconcile] missing summary tasks: " + ", ".join(missing))
+if bad_status:
+    print("[reconcile] infra statuses: " + ", ".join(f"{t}:{s}" for t, s in bad_status))
+if missing_audit:
+    print("[reconcile] missing audit tasks: " + ", ".join(missing_audit))
+
+if missing or bad_status or missing_audit:
+    sys.exit(2)
+sys.exit(0)
+PY
 INNER_EOF
 
 # Pass tasks as args to the inner script.
+# Explicitly export MODEL_NAME/MODEL_API_URL/MODEL_API_KEY + KIMI_CONFIG_ENV so
+# the srun'd INNER script (and the run_eval_parallel.sh it calls) receive the
+# correct model alias. Without this, srun may not propagate KIMI_CONFIG_ENV
+# and run_eval_parallel.sh falls back to the default config.env.
 export SLURM_MEM SLURM_CPUS SLURM_TIME SLURM_PARTITION SLURM_NODELIST RELAY_API_KEY
 export RUN_ID DUMP_ROOT MAX_CONCURRENT AUTO_AUDIT_HTML
+export MODEL_NAME MODEL_API_URL MODEL_API_KEY KIMI_CONFIG_ENV KIMI_MAX_CONTEXT KIMI_TASK_TIMEOUT_S
 
 echo "[slurm-launch] dispatching to slurm..."
+echo "[slurm-launch] DEBUG: MODEL_NAME=${MODEL_NAME:-<unset>} KIMI_CONFIG_ENV=${KIMI_CONFIG_ENV:-<unset>}"
 srun -p "$SLURM_PARTITION" \
      "${SRUN_NODE_ARGS[@]}" \
      -N1 -n1 -c"$SLURM_CPUS" \
      --mem="$SLURM_MEM" --time="$SLURM_TIME" \
      --job-name="ds-v4-flash-eval" \
-     bash -c "$INNER" _ "${TASKS[@]}"
+     bash -c "$INNER" _ \
+     "${MODEL_NAME:?MODEL_NAME must be set}" \
+     "${KIMI_CONFIG_ENV:?KIMI_CONFIG_ENV must be set}" \
+     "${MODEL_API_URL:?MODEL_API_URL must be set}" \
+     "${MODEL_API_KEY:?MODEL_API_KEY must be set}" \
+     "${KIMI_MAX_CONTEXT:-262144}" \
+     "${KIMI_TASK_TIMEOUT_S:-7200}" \
+     "${TASKS[@]}"

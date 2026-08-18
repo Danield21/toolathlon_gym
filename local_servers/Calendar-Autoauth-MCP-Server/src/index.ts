@@ -29,11 +29,11 @@ function formatEvent(row: any) {
         description: row.description,
         location: row.location,
         start: {
-            dateTime: row.start_datetime ? new Date(row.start_datetime).toISOString() : null,
+            dateTime: row.start_datetime ? toUtcIso(row.start_datetime, row.start_timezone) : null,
             timeZone: row.start_timezone || undefined,
         },
         end: {
-            dateTime: row.end_datetime ? new Date(row.end_datetime).toISOString() : null,
+            dateTime: row.end_datetime ? toUtcIso(row.end_datetime, row.end_timezone) : null,
             timeZone: row.end_timezone || undefined,
         },
         status: row.status,
@@ -46,6 +46,89 @@ function formatEvent(row: any) {
         created: row.created ? new Date(row.created).toISOString() : null,
         updated: row.updated ? new Date(row.updated).toISOString() : null,
     };
+}
+
+/**
+ * Normalize a wall-clock `dateTime` into a UTC ISO string, honoring an IANA
+ * `timeZone` when the dateTime carries no explicit offset.
+ *
+ * Background (case-study 2026-08-12, case #2 canvas-assignment-deadline-word-gcal):
+ * The Google Calendar contract sends a local wall-clock string like
+ * "2013-10-13T08:00:00" together with timeZone "America/New_York". The previous
+ * code stored that string verbatim and later did `new Date(row.start_datetime)`,
+ * which — for an offset-less string — is interpreted in the *server process* TZ
+ * and then re-emitted as UTC. That silently shifted the event by hours and, in
+ * the observed failure, collapsed the time to midnight. The fix: convert the
+ * local wall-clock to true UTC at write time using the declared IANA zone, so
+ * the stored value is an unambiguous instant and the read-back is consistent.
+ *
+ * Rules:
+ *  - Already carries an offset (trailing Z or +HH:MM/-HH:MM) -> parse as-is.
+ *  - No offset + valid IANA timeZone -> compute the zone's offset for that
+ *    instant (DST-aware) via Intl.DateTimeFormat and shift to UTC.
+ *  - No offset + no/invalid timeZone -> leave as-is (legacy best-effort),
+ *    but emit a UTC ISO if the value already parses as a Date.
+ */
+function toUtcIso(dateTime: unknown, timeZone?: string | null): string | null {
+    if (dateTime === undefined || dateTime === null || dateTime === '') return null;
+    // Date objects arrive on the READ path: node-pg parses `timestamptz`
+    // columns into JS Dates. String(date) renders them in the PROCESS TZ
+    // (e.g. "Sat Mar 14 2026 22:00:00 GMT+0800 ..."), which the string
+    // paths below would mis-handle (the +0800 in the locale text can even
+    // trip the offset regex, or the naive fallback appends 'Z' to a string
+    // V8 then parses wall-clock-as-UTC — both shift the instant by hours).
+    // A Date already carries the exact instant: normalize directly.
+    if (dateTime instanceof Date) {
+        return isNaN(dateTime.getTime()) ? String(dateTime) : dateTime.toISOString();
+    }
+    const dt = String(dateTime);
+    const hasOffset = /Z$|[+-]\d{2}:\d{2}$/.test(dt) || /([+-]\d{2}\d{2})$/.test(dt);
+    if (hasOffset) {
+        const d = new Date(dt);
+        return isNaN(d.getTime()) ? dt : d.toISOString();
+    }
+    // No explicit offset — interpret as wall-clock in the declared zone.
+    const tz = timeZone && timeZone.trim() ? timeZone.trim() : null;
+    if (tz) {
+        try {
+            // Probe whether the IANA zone is valid by formatting the current
+            // instant in it; an invalid zone throws RangeError.
+            Intl.DateTimeFormat('en-US', { timeZone: tz });
+            // Parse the wall-clock into UTC by asking for the zone's parts.
+            // We construct a Date by assuming the wall-clock fields and then
+            // correcting for the zone offset at that instant.
+            const m = dt.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+            if (m) {
+                const [, y, mo, d, hh = '00', mm = '00', ss = '00'] = m;
+                // Build a UTC Date from the wall-clock fields, then compute the
+                // zone's offset at that instant via Intl.formatToParts.
+                const wallAsUtc = Date.UTC(+y, +mo - 1, +d, +hh, +mm, +ss);
+                const parts = new Intl.DateTimeFormat('en-US', {
+                    timeZone: tz,
+                    year: 'numeric', month: '2-digit', day: '2-digit',
+                    hour: '2-digit', minute: '2-digit', second: '2-digit',
+                    hour12: false,
+                }).formatToParts(new Date(wallAsUtc));
+                const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '0';
+                const zoneWallUtc = Date.UTC(
+                    +get('year'), +get('month') - 1, +get('day'),
+                    +get('hour'), +get('minute'), +get('second'),
+                );
+                const offsetMs = zoneWallUtc - wallAsUtc;
+                const trueUtc = wallAsUtc - offsetMs;
+                return new Date(trueUtc).toISOString();
+            }
+        } catch {
+            // invalid timeZone or parse failure -> fall through
+        }
+    }
+    // No timeZone given — interpret naive datetime as UTC (not process TZ).
+    // new Date("2026-03-31T14:00:00") in Node uses the process TZ (e.g.
+    // Asia/Shanghai in the Enroot container), silently shifting the stored
+    // instant by -8h.  Appending 'Z' forces UTC interpretation.
+    const utcDt = /Z$|[+-]\d{2}:?\d{2}$/.test(dt) ? dt : dt + 'Z';
+    const d = new Date(utcDt);
+    return isNaN(d.getTime()) ? dt : d.toISOString();
 }
 
 // PgCalendar class that mimics the google calendar.events.* interface
@@ -67,6 +150,11 @@ class PgCalendar {
                 const startTimeZone = requestBody.start?.timeZone || null;
                 const endDateTime = requestBody.end?.dateTime;
                 const endTimeZone = requestBody.end?.timeZone || null;
+                // Normalize wall-clock + timeZone into unambiguous UTC instants at
+                // write time, so create→get/list round-trips are consistent
+                // (case-study 2026-08-12, case #2). Store the UTC ISO string.
+                const startUtc = toUtcIso(startDateTime, startTimeZone);
+                const endUtc = toUtcIso(endDateTime, endTimeZone);
                 const result = await pool.query(
                     `INSERT INTO gcal.events (summary, description, location, start_datetime, start_timezone, end_datetime, end_timezone)
                      VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -75,9 +163,9 @@ class PgCalendar {
                         requestBody.summary || null,
                         requestBody.description || null,
                         requestBody.location || null,
-                        startDateTime,
+                        startUtc,
                         startTimeZone,
-                        endDateTime,
+                        endUtc,
                         endTimeZone,
                     ]
                 );
@@ -114,7 +202,7 @@ class PgCalendar {
                 }
                 if (requestBody.start?.dateTime !== undefined) {
                     setClauses.push(`start_datetime = $${paramIndex++}`);
-                    values.push(requestBody.start.dateTime);
+                    values.push(toUtcIso(requestBody.start.dateTime, requestBody.start?.timeZone));
                 }
                 if (requestBody.start?.timeZone !== undefined) {
                     setClauses.push(`start_timezone = $${paramIndex++}`);
@@ -122,7 +210,7 @@ class PgCalendar {
                 }
                 if (requestBody.end?.dateTime !== undefined) {
                     setClauses.push(`end_datetime = $${paramIndex++}`);
-                    values.push(requestBody.end.dateTime);
+                    values.push(toUtcIso(requestBody.end.dateTime, requestBody.end?.timeZone));
                 }
                 if (requestBody.end?.timeZone !== undefined) {
                     setClauses.push(`end_timezone = $${paramIndex++}`);
@@ -218,6 +306,12 @@ const CreateEventSchema = z.object({
     }),
     description: z.string().optional().describe("Event description"),
     location: z.string().optional().describe("Event location"),
+    attendees: z.array(z.object({
+        email: z.string().describe("Attendee email"),
+    })).optional().describe("Event attendees"),
+    recurrence: z.array(z.string()).optional().describe(
+        "Recurrence rules in RRULE format, e.g. [\"RRULE:FREQ=WEEKLY\"] for a weekly recurring event"
+    ),
 });
 
 const GetEventSchema = z.object({
@@ -237,6 +331,12 @@ const UpdateEventSchema = z.object({
     }).optional(),
     description: z.string().optional().describe("New event description"),
     location: z.string().optional().describe("New event location"),
+    attendees: z.array(z.object({
+        email: z.string().describe("Attendee email"),
+    })).optional().describe("New event attendees"),
+    recurrence: z.array(z.string()).optional().describe(
+        "New recurrence rules in RRULE format, e.g. [\"RRULE:FREQ=WEEKLY\"]; pass [] to clear"
+    ),
 });
 
 const DeleteEventSchema = z.object({

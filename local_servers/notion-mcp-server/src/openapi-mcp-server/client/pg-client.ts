@@ -5,6 +5,23 @@ import { Headers } from './polyfill-headers.js'
 
 const { Pool } = pg
 
+/**
+ * Normalize a page-parent object so the stored JSON always carries the "type"
+ * discriminator that evaluators (and real Notion) expect. Agents frequently
+ * omit it: {"database_id": "..."} instead of {"type": "database_id",
+ * "database_id": "..."}. See createPage() for the Bug C case-study.
+ */
+function normalizeParent(parent: Record<string, any>): Record<string, any> {
+  if (!parent || typeof parent !== 'object' || Array.isArray(parent)) return parent
+  if (typeof parent.type === 'string' && parent.type) return parent
+  for (const key of ['database_id', 'page_id', 'block_id', 'workspace']) {
+    if (parent[key] !== undefined && parent[key] !== null) {
+      return { type: key, ...parent }
+    }
+  }
+  return parent
+}
+
 export type HttpClientConfig = {
   baseUrl: string
   headers?: Record<string, string>
@@ -178,20 +195,51 @@ export class PgHttpClient {
   }
 
   // 6. update-a-database
+  // Mirrors the real Notion `PATCH /v1/databases/{database_id}` merge
+  // semantics: top-level scalar/array/object fields (title, description,
+  // icon, cover, archived, is_inline) are replaced when provided, but
+  // `properties` is MERGED at the property-name level — new properties are
+  // added, same-name properties are replaced, and unmentioned properties
+  // are preserved. The previous implementation replaced the whole
+  // `properties` JSON, silently dropping every unmentioned property schema
+  // (audit Bug C / §A.5).
   private async updateDatabase(params: Record<string, any>): Promise<HttpClientResponse> {
-    const { database_id, ...body } = params
+    const { database_id, properties: incomingProperties, ...body } = params
+
+    // Merge properties first if provided, reading the current row so we can
+    // deep-merge by property name.
+    let mergedProperties: Record<string, any> | undefined
+    if (incomingProperties !== undefined) {
+      const { rows: currentRows } = await this.pool.query(
+        'SELECT properties FROM notion.databases WHERE id = $1',
+        [database_id],
+      )
+      const currentProps = currentRows[0]?.properties
+      const baseProps =
+        typeof currentProps === 'string'
+          ? safeParseJson(currentProps, {})
+          : (currentProps as Record<string, any> | null | undefined) ?? {}
+      mergedProperties = { ...baseProps, ...incomingProperties }
+    }
+
     const setClauses: string[] = []
     const values: any[] = []
     let idx = 1
 
-    const allowedFields = ['title', 'description', 'icon', 'cover', 'properties', 'archived', 'is_inline']
+    const allowedFields = ['title', 'description', 'icon', 'cover', 'archived', 'is_inline']
     for (const field of allowedFields) {
       if (body[field] !== undefined) {
-        const isJsonField = ['title', 'description', 'icon', 'cover', 'properties'].includes(field)
+        const isJsonField = ['title', 'description', 'icon', 'cover'].includes(field)
         setClauses.push(`${field} = $${idx}`)
         values.push(isJsonField ? JSON.stringify(body[field]) : body[field])
         idx++
       }
+    }
+
+    if (mergedProperties !== undefined) {
+      setClauses.push(`properties = $${idx}`)
+      values.push(JSON.stringify(mergedProperties))
+      idx++
     }
 
     setClauses.push(`last_edited_time = $${idx}`)
@@ -350,20 +398,48 @@ export class PgHttpClient {
   }
 
   // 9. patch-page
+  // Mirrors the real Notion `PATCH /v1/pages/{page_id}` merge semantics:
+  // scalar/array/object fields (icon, cover, archived, in_trash) are
+  // replaced when provided, but `properties` is MERGED at the property-name
+  // level — same-name properties are replaced, unmentioned properties are
+  // preserved. (Audit Bug C / §A.5 — the previous replace-semantics lost
+  // every unmentioned page property, which is the same class of bug as
+  // update-a-database.)
   private async patchPage(params: Record<string, any>): Promise<HttpClientResponse> {
-    const { page_id, ...body } = params
+    const { page_id, properties: incomingProperties, ...body } = params
+
+    let mergedProperties: Record<string, any> | undefined
+    if (incomingProperties !== undefined) {
+      const { rows: currentRows } = await this.pool.query(
+        'SELECT properties FROM notion.pages WHERE id = $1',
+        [page_id],
+      )
+      const currentProps = currentRows[0]?.properties
+      const baseProps =
+        typeof currentProps === 'string'
+          ? safeParseJson(currentProps, {})
+          : (currentProps as Record<string, any> | null | undefined) ?? {}
+      mergedProperties = { ...baseProps, ...incomingProperties }
+    }
+
     const setClauses: string[] = []
     const values: any[] = []
     let idx = 1
 
-    const allowedFields = ['properties', 'icon', 'cover', 'archived', 'in_trash']
+    const allowedFields = ['icon', 'cover', 'archived', 'in_trash']
     for (const field of allowedFields) {
       if (body[field] !== undefined) {
-        const isJsonField = ['properties', 'icon', 'cover'].includes(field)
+        const isJsonField = ['icon', 'cover'].includes(field)
         setClauses.push(`${field} = $${idx}`)
         values.push(isJsonField ? JSON.stringify(body[field]) : body[field])
         idx++
       }
+    }
+
+    if (mergedProperties !== undefined) {
+      setClauses.push(`properties = $${idx}`)
+      values.push(JSON.stringify(mergedProperties))
+      idx++
     }
 
     setClauses.push(`last_edited_time = $${idx}`)
@@ -391,12 +467,22 @@ export class PgHttpClient {
       children,
     } = params
 
+    // Normalize the parent object before storage (Bug C fix, 2026-08-15):
+    // agents legitimately send {"database_id": "..."} / {"page_id": "..."} /
+    // {"workspace": true} WITHOUT the "type" discriminator, but evaluators
+    // filter on parent->>'type' or parent.type and seed data always carries
+    // the field. Without normalization the stored JSON lacks "type" and
+    // downstream checks report "0 database-parented pages" (c4 case:
+    // yt-transcript-notion-song-report). Infer the type from whichever key
+    // is present, mirroring how formatEvent row->parent is reconstructed.
+    const parentNormalized = normalizeParent(parent)
+
     const { rows } = await this.pool.query(
       `INSERT INTO notion.pages
         (id, object, created_time, last_edited_time, parent, properties, icon, cover, archived, in_trash)
        VALUES ($1, 'page', $2, $3, $4, $5, $6, $7, false, false)
        RETURNING *`,
-      [id, now, now, JSON.stringify(parent), JSON.stringify(properties), JSON.stringify(icon), JSON.stringify(cover)],
+      [id, now, now, JSON.stringify(parentNormalized), JSON.stringify(properties), JSON.stringify(icon), JSON.stringify(cover)],
     )
 
     // If children blocks are provided, insert them
@@ -630,11 +716,36 @@ export class PgHttpClient {
     for (const child of children) {
       const id = crypto.randomUUID()
       const now = this.nowISO()
-      const blockType = child.type || 'paragraph'
-      const hasChildren = !!(child.children && child.children.length > 0)
+
+      // Notion API tolerates plain-string children by treating them as paragraph
+      // blocks. Normalize before destructuring so `child.type` etc. work below.
+      let normalizedChild: any
+      if (typeof child === 'string') {
+        // Try parsing as JSON first (agent may send stringified block objects)
+        try {
+          const parsed = JSON.parse(child)
+          normalizedChild = typeof parsed === 'object' && parsed !== null ? parsed : child
+        } catch {
+          normalizedChild = child
+        }
+        // If still a string, wrap as paragraph
+        if (typeof normalizedChild === 'string') {
+          normalizedChild = {
+            type: 'paragraph',
+            paragraph: {
+              rich_text: [{ type: 'text', text: { content: normalizedChild } }],
+            },
+          }
+        }
+      } else {
+        normalizedChild = child
+      }
+
+      const blockType = normalizedChild.type || 'paragraph'
+      const hasChildren = !!(normalizedChild.children && normalizedChild.children.length > 0)
 
       // Extract block data: everything except meta fields
-      const { type, children: childChildren, object, ...blockData } = child
+      const { type, children: childChildren, object, ...blockData } = normalizedChild
 
       await this.pool.query(
         `INSERT INTO notion.blocks
@@ -650,5 +761,20 @@ export class PgHttpClient {
         await this.insertBlocks(id, 'block_id', childChildren)
       }
     }
+  }
+}
+
+// Module-level JSON parser used when merging properties read back from PG.
+// `pg` returns JSON/JSONB columns as either already-parsed objects or as
+// strings depending on the driver configuration, so tolerate both and fall
+// back to the caller-provided default on any parse failure.
+function safeParseJson<T>(value: unknown, fallback: T): T {
+  if (typeof value !== 'string') {
+    return (value as T | null | undefined) ?? fallback
+  }
+  try {
+    return JSON.parse(value) as T
+  } catch {
+    return fallback
   }
 }

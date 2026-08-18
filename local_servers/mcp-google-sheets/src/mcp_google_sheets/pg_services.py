@@ -1012,9 +1012,9 @@ def create_pg_pool():
     return psycopg2.pool.SimpleConnectionPool(
         1,
         5,
-        host=os.environ.get("PG_HOST", "localhost"),
-        port=int(os.environ.get("PG_PORT", "5432")),
-        dbname=os.environ.get("PG_DATABASE", "toolathlon"),
-        user=os.environ.get("PG_USER", "postgres"),
-        password=os.environ.get("PG_PASSWORD", "postgres"),
+        host=os.environ.get("PG_HOST") or os.environ.get("PGHOST") or "localhost",
+        port=int(os.environ.get("PG_PORT") or os.environ.get("PGPORT") or "5432"),
+        dbname=os.environ.get("PG_DATABASE") or os.environ.get("PGDATABASE") or "toolathlon",
+        user=os.environ.get("PG_USER") or os.environ.get("PGUSER") or "postgres",
+        password=os.environ.get("PG_PASSWORD") or os.environ.get("PGPASSWORD") or "postgres",
     )

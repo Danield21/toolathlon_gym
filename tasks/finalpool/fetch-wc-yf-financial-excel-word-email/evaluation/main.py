@@ -103,9 +103,12 @@ def run_evaluation(agent_workspace, groundtruth_workspace, launch_time, res_log_
         if "Data_Analysis" in wb.sheetnames:
             ws = wb["Data_Analysis"]
             data_rows = list(ws.iter_rows(min_row=2, values_only=True))
-            check("Data_Analysis has >= 6 rows", len(data_rows) >= 6, f"got {len(data_rows)}")
+            # 5 categories have both completed-order data and a market
+            # benchmark (Watches has 0 completed orders and no API entry —
+            # round-3 audit 2026-08-16 removed it from GT).
+            check("Data_Analysis has >= 5 rows", len(data_rows) >= 5, f"got {len(data_rows)}")
 
-            check_columns('Data_Analysis', ['Category', 'Our_Avg_Price', 'Market_Avg_Price', 'Price_Gap_Pct'], 6)
+            check_columns('Data_Analysis', ['Category', 'Our_Avg_Price', 'Market_Avg_Price', 'Price_Gap_Pct'], 5)
 
             # Value-level: category names overlap with GT (>=3 of 6) AND Price_Gap_Pct numeric (col 3)
             if gt_wb is not None and "Data_Analysis" in gt_wb.sheetnames:

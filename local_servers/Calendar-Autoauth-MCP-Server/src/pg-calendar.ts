@@ -39,6 +39,66 @@ interface EventRow {
     updated: string | null;
 }
 
+/**
+ * Convert an agent-supplied dateTime into an explicit-offset ISO instant string
+ * (see insert() comment for the timezone bug rationale). Rules:
+ *   - already has an offset / is a Z string  -> returned as-is
+ *   - naive "2026-04-07T10:00:00"           -> interpreted in `timeZone`
+ *                                              (IANA name; default UTC)
+ *   - date-only "2026-04-07"                -> interpreted as midnight in
+ *                                              `timeZone` (Google Calendar treats
+ *                                              date-only values as all-day in the
+ *                                              event's timezone)
+ * Implementation: compute the wall-clock offset of the target zone for that
+ * instant using Intl.DateTimeFormat parts — no external date library needed.
+ */
+function toInstantString(dateTime: unknown, timeZone?: string | null): string | null {
+    if (dateTime === null || dateTime === undefined) return null;
+    const raw = String(dateTime);
+    // Already offset-aware (Z, +hh:mm, -hh:mm) — trust it verbatim.
+    if (/(?:Z|[+-]\d{2}:?\d{2})\s*$/i.test(raw)) return raw;
+    // Normalize a space separator (JS Date can parse "2026-04-07 10:00:00").
+    const normalized = raw.includes('T') ? raw : raw.replace(' ', 'T');
+    // Interpret the naive wall-clock in the requested zone. `timeZone`
+    // undefined/empty/invalid falls back to UTC.
+    let tz = timeZone && timeZone.trim() ? timeZone.trim() : 'UTC';
+    try {
+        // First pass: treat the naive string as UTC to get the epoch millis.
+        // Date-only strings ("2026-04-07") parse as UTC midnight directly;
+        // datetime strings get an explicit Z appended.
+        const asUtc = normalized.length === 10
+            ? Date.parse(`${normalized}T00:00:00Z`)
+            : Date.parse(`${normalized}Z`);
+        const epoch = asUtc;
+        if (Number.isNaN(epoch)) return raw; // unparseable: let PG see the original
+        // For date-only inputs the inserted value must remain a full timestamp,
+        // otherwise "2026-04-07" + offset suffix concatenates into an invalid
+        // string like "2026-04-07-04:00".
+        const body = normalized.length === 10 ? `${normalized}T00:00:00` : normalized;
+        // Second pass: find the zone's wall-clock offset AT that epoch by
+        // formatting the instant in the zone and re-parsing it as if it were UTC.
+        const dtf = new Intl.DateTimeFormat('en-US', {
+            timeZone: tz,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+            hour12: false,
+        });
+        const parts = dtf.formatToParts(new Date(epoch));
+        const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '00';
+        const wallClockUtc = Date.parse(
+            `${get('year')}-${get('month')}-${get('day')}T` +
+            `${get('hour')}:${get('minute')}:${get('second')}Z`
+        );
+        const offsetMin = Math.round((wallClockUtc - epoch) / 60000);
+        const sign = offsetMin >= 0 ? '+' : '-';
+        const absMin = Math.abs(offsetMin);
+        const pad = (n: number) => String(n).padStart(2, '0');
+        return `${body}${sign}${pad(Math.floor(absMin / 60))}:${pad(absMin % 60)}`;
+    } catch {
+        return raw; // invalid tz name etc.: pass through, PG will surface the error
+    }
+}
+
 function formatEvent(row: EventRow): CalendarEvent {
     return {
         id: row.id,
@@ -84,17 +144,38 @@ export class PgCalendar {
     constructor(pool: InstanceType<typeof Pool>) {
         this.events = {
             async insert({ calendarId, requestBody }) {
-                const startDateTime = requestBody.start?.dateTime;
+                // Timezone-correct serialization (c4 case-study 2026-08-15,
+                // yt-top-videos-excel-gcal / sf-sales-region-forecast-gcal-excel):
+                // the column is TIMESTAMPTZ, but agents send naive dateTime strings
+                // like "2026-04-07T10:00:00" plus a timeZone field. Passing the
+                // naive string straight to pg makes PostgreSQL interpret it in the
+                // SESSION timezone (UTC+8 on this harness) — so "10:00 UTC" became
+                // 02:00Z and every evaluator window match failed. Interpret the
+                // naive value in the REQUESTED timeZone (default UTC) and insert an
+                // explicit-offset ISO string instead.
+                const startDateTime = toInstantString(
+                    requestBody.start?.dateTime,
+                    requestBody.start?.timeZone
+                );
+                const endDateTime = toInstantString(
+                    requestBody.end?.dateTime,
+                    requestBody.end?.timeZone
+                );
                 const startTimeZone = requestBody.start?.timeZone || null;
-                const endDateTime = requestBody.end?.dateTime;
                 const endTimeZone = requestBody.end?.timeZone || null;
                 const attendeesJson = requestBody.attendees
                     ? JSON.stringify(requestBody.attendees)
                     : '[]';
+                // recurrence is a real column (gcal.events.recurrence jsonb) but the
+                // old INSERT never wrote it, silently dropping the agent's RRULE
+                // (c4 case-study: yt-fireship-tech-report "recurrence" FAIL).
+                const recurrenceJson = requestBody.recurrence
+                    ? JSON.stringify(requestBody.recurrence)
+                    : null;
 
                 const result = await pool.query(
-                    `INSERT INTO gcal.events (summary, description, location, start_datetime, start_timezone, end_datetime, end_timezone, attendees)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+                    `INSERT INTO gcal.events (summary, description, location, start_datetime, start_timezone, end_datetime, end_timezone, attendees, recurrence)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)
                      RETURNING *`,
                     [
                         requestBody.summary || null,
@@ -105,6 +186,7 @@ export class PgCalendar {
                         endDateTime,
                         endTimeZone,
                         attendeesJson,
+                        recurrenceJson,
                     ]
                 );
                 return { data: formatEvent(result.rows[0]) };
@@ -140,7 +222,10 @@ export class PgCalendar {
                 }
                 if (requestBody.start?.dateTime !== undefined) {
                     setClauses.push(`start_datetime = $${paramIndex++}`);
-                    values.push(requestBody.start.dateTime);
+                    values.push(toInstantString(
+                        requestBody.start.dateTime,
+                        requestBody.start.timeZone
+                    ));
                 }
                 if (requestBody.start?.timeZone !== undefined) {
                     setClauses.push(`start_timezone = $${paramIndex++}`);
@@ -148,11 +233,18 @@ export class PgCalendar {
                 }
                 if (requestBody.end?.dateTime !== undefined) {
                     setClauses.push(`end_datetime = $${paramIndex++}`);
-                    values.push(requestBody.end.dateTime);
+                    values.push(toInstantString(
+                        requestBody.end.dateTime,
+                        requestBody.end.timeZone
+                    ));
                 }
                 if (requestBody.end?.timeZone !== undefined) {
                     setClauses.push(`end_timezone = $${paramIndex++}`);
                     values.push(requestBody.end.timeZone);
+                }
+                if (requestBody.recurrence !== undefined) {
+                    setClauses.push(`recurrence = $${paramIndex++}::jsonb`);
+                    values.push(requestBody.recurrence ? JSON.stringify(requestBody.recurrence) : null);
                 }
 
                 // Always update the updated timestamp

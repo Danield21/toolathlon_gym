@@ -9,6 +9,17 @@ function stripLeadingSlash(url: string): string {
   return url.replace(/^\/+/, '');
 }
 
+function paramToArray(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (Array.isArray(value)) {
+    return value.flatMap((v) => paramToArray(v));
+  }
+  return String(value)
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 interface RouteMatch {
   table: string;
   conditions: string[];
@@ -298,10 +309,31 @@ export class PgCanvasRouter {
       const page = Math.max(1, parseInt(params.page, 10) || 1);
       const perPage = Math.min(100, Math.max(1, parseInt(params.per_page, 10) || 100));
       const offset = (page - 1) * perPage;
+      // Server-side filtering (case-study 2026-08-16 §5.6): without it,
+      // late-submission analysis had to page through ~174k rows (~1060
+      // calls) just to derive an aggregate. Real Canvas accepts
+      // workflow_state[] filters; mirror that so agents can fetch only
+      // the relevant slice.
+      const filterStates = (params.workflow_state || params['workflow_state[]'])
+        ? [].concat(params.workflow_state || params['workflow_state[]']).flatMap((v: string) => String(v).split(',')).map((v: string) => v.trim()).filter(Boolean)
+        : [];
+      const lateOnly = String(params.late || '') === 'true';
+      const whereClauses = ['assignment_id = $1'];
+      const queryParams: any[] = [m[2]];
+      if (filterStates.length) {
+        queryParams.push(filterStates);
+        whereClauses.push(`workflow_state = ANY($${queryParams.length})`);
+      }
+      if (lateOnly) {
+        whereClauses.push('late IS TRUE');
+      }
+      const whereSql = whereClauses.join(' AND ');
       const countRes = await this.pool.query(
-        'SELECT COUNT(*)::int AS total_count FROM canvas.submissions WHERE assignment_id = $1',
-        [m[2]]
+        `SELECT COUNT(*)::int AS total_count FROM canvas.submissions WHERE ${whereSql}`,
+        queryParams
       );
+      // Summary stays whole-assignment (matches real Canvas behavior where
+      // the aggregate covers the assignment, not the filtered page).
       const summaryRes = await this.pool.query(`
         SELECT
           COUNT(*)::int AS total_count,
@@ -314,8 +346,8 @@ export class PgCanvasRouter {
         WHERE assignment_id = $1
       `, [m[2]]);
       const res = await this.pool.query(
-        'SELECT * FROM canvas.submissions WHERE assignment_id = $1 ORDER BY user_id, id LIMIT $2 OFFSET $3',
-        [m[2], perPage, offset]
+        `SELECT * FROM canvas.submissions WHERE ${whereSql} ORDER BY user_id, id LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`,
+        [...queryParams, perPage, offset]
       );
       const totalCount = countRes.rows[0]?.total_count || 0;
       return {
@@ -488,10 +520,48 @@ export class PgCanvasRouter {
     }
 
     // GET /courses/:id/enrollments
+    // Supports pagination (page/per_page) and filtering by enrollment type and
+    // state (comma- or repeat-separated), mirroring the Canvas REST API. This
+    // avoids the 100K tool-output truncation that silently drops enrollment
+    // records for large courses (audit 2026-08-12).
     m = path.match(/^courses\/(\d+)\/enrollments$/);
     if (m) {
-      const res = await this.pool.query('SELECT * FROM canvas.enrollments WHERE course_id = $1', [m[1]]);
-      return res.rows;
+      const page = Math.max(1, parseInt(params.page, 10) || 1);
+      const perPage = Math.min(100, Math.max(1, parseInt(params.per_page, 10) || 100));
+      const offset = (page - 1) * perPage;
+      const conditions = ['course_id = $1'];
+      const values: unknown[] = [m[1]];
+      let idx = 2;
+      const typeFilter = paramToArray(params.type);
+      if (typeFilter.length > 0) {
+        conditions.push(`type = ANY($${idx++}::text[])`);
+        values.push(typeFilter);
+      }
+      const stateFilter = paramToArray(params.enrollment_state);
+      if (stateFilter.length > 0) {
+        conditions.push(`enrollment_state = ANY($${idx++}::text[])`);
+        values.push(stateFilter);
+      }
+      const where = conditions.join(' AND ');
+      const countRes = await this.pool.query(
+        `SELECT COUNT(*)::int AS total_count FROM canvas.enrollments WHERE ${where}`,
+        values,
+      );
+      const res = await this.pool.query(
+        `SELECT * FROM canvas.enrollments WHERE ${where} ORDER BY id LIMIT $${idx} OFFSET $${idx + 1}`,
+        [...values, perPage, offset],
+      );
+      const totalCount = countRes.rows[0]?.total_count || 0;
+      return {
+        enrollments: res.rows,
+        pagination: {
+          page,
+          per_page: perPage,
+          total_count: totalCount,
+          total_pages: Math.max(1, Math.ceil(totalCount / perPage)),
+          has_more: page * perPage < totalCount,
+        },
+      };
     }
 
     // GET /courses/:id/users

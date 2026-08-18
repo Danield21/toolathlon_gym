@@ -73,13 +73,32 @@ def create_document_copy(source_path: str, dest_path: Optional[str] = None) -> T
 def ensure_docx_extension(filename: str) -> str:
     """
     Ensure filename has .docx extension.
-    
+
     Args:
         filename: The filename to check
-        
+
     Returns:
         Filename with .docx extension
+
+    Raises:
+        ValueError: If the path is relative (stdio mode path trap).
+
+        The Word MCP server is launched via `uv --directory <project> run`, so
+        the process CWD is the server project dir (/opt/local_servers/
+        Office-Word-MCP-Server), NOT the agent workspace. A relative filename
+        therefore writes silently to the wrong directory (c4 case-study
+        2026-08-15: yt-transcript-music-schedule "Radio_Show_Script.docx" landed
+        in the server dir; evaluator found nothing -> 3 false FAILs). Align with
+        excel-mcp-server: reject relative paths with an explicit error so the
+        agent retries with an absolute path (verified working pattern in the
+        afrobeat case).
     """
+    if not os.path.isabs(filename):
+        raise ValueError(
+            f"Invalid filename: {filename}, must be an absolute path "
+            f"(the server resolves relative paths against its own working "
+            f"directory, not your workspace)"
+        )
     if not filename.endswith('.docx'):
         return filename + '.docx'
     return filename

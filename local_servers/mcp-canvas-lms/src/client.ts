@@ -371,22 +371,34 @@ export class CanvasClient {
     courseId: number,
     assignmentId: number,
     page = 1,
-    perPage = 100
+    perPage = 100,
+    workflowState?: string,
+    lateOnly?: boolean
   ): Promise<any> {
     const limitedPage = Math.max(1, Math.floor(page || 1));
     const limitedPerPage = Math.min(100, Math.max(1, Math.floor(perPage || 100)));
+    const requestParams: Record<string, any> = {
+      include: ['submission_comments', 'rubric_assessment', 'assignment'],
+      page: limitedPage,
+      per_page: limitedPerPage
+    };
+    if (workflowState) {
+      requestParams.workflow_state = workflowState;
+    }
+    if (lateOnly === true) {
+      requestParams.late = 'true';
+    }
     const response = await this.client.get(
       `/courses/${courseId}/assignments/${assignmentId}/submissions`,
       {
-        params: {
-          include: ['submission_comments', 'rubric_assessment', 'assignment'],
-          page: limitedPage,
-          per_page: limitedPerPage
-        }
+        params: requestParams
       }
     );
     const data = response.data;
     if (!Array.isArray(data)) {
+      // The pg-backed mock router returns the {submissions, pagination,
+      // summary} envelope directly (with server-side filtering applied);
+      // pass it through untouched.
       return data;
     }
     const scored = data.filter((s: CanvasSubmission) => typeof s.score === 'number');
@@ -412,7 +424,6 @@ export class CanvasClient {
       }
     };
   }
-
   async getSubmission(courseId: number, assignmentId: number, userId: number | 'self' = 'self'): Promise<CanvasSubmission> {
     const response = await this.client.get(
       `/courses/${courseId}/assignments/${assignmentId}/submissions/${userId}`,
@@ -645,12 +656,52 @@ export class CanvasClient {
   // ---------------------
   // GRADES (Enhanced)
   // ---------------------
-  async getCourseGrades(courseId: number): Promise<CanvasEnrollment[]> {
+  async getCourseGrades(
+    courseId: number,
+    options: {
+      page?: number;
+      perPage?: number;
+      type?: string[];
+      enrollmentState?: string[];
+    } = {},
+  ): Promise<{
+    enrollments: CanvasEnrollment[];
+    pagination: {
+      page: number;
+      per_page: number;
+      total_count: number;
+      total_pages: number;
+      has_more: boolean;
+    };
+  }> {
+    const page = Math.max(1, Math.floor(options.page || 1));
+    const perPage = Math.min(100, Math.max(1, Math.floor(options.perPage || 100)));
     const response = await this.client.get(`/courses/${courseId}/enrollments`, {
       params: {
-        include: ['grades', 'observed_users']
-      }
+        include: ['grades', 'observed_users'],
+        page,
+        per_page: perPage,
+        ...(options.type && options.type.length > 0 ? { type: options.type } : {}),
+        ...(options.enrollmentState && options.enrollmentState.length > 0
+          ? { enrollment_state: options.enrollmentState }
+          : {}),
+      },
     });
+    // Backward compat: if the backend returned a bare array (old router),
+    // wrap it so callers always see the paginated shape.
+    if (Array.isArray(response.data)) {
+      const rows = response.data as CanvasEnrollment[];
+      return {
+        enrollments: rows,
+        pagination: {
+          page,
+          per_page: perPage,
+          total_count: rows.length,
+          total_pages: 1,
+          has_more: false,
+        },
+      };
+    }
     return response.data;
   }
 
