@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 DELEGATION_TOOLS = {"Agent", "AgentSwarm"}
@@ -19,7 +21,91 @@ DELEGATION_TOOLS = {"Agent", "AgentSwarm"}
 # (20260817-002742) or carry a prefix (rerun-fix6-20260817-102737,
 # subagent-20260817-120650). Accept an optional alphanumeric prefix before
 # the timestamp so prefixed runs still match.
-RUN_DIR_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9_.-]*[-_])?\d{8}-\d{6}(?:[-_][A-Za-z0-9_.-]+)?_slot\d+$")
+RUN_DIR_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9_.-]*[-_])?(?:\d{8}-\d{6}|\d{8})(?:[-_][A-Za-z0-9_.-]+)?_slot\d+$")
+USAGE_FIELDS = ("inputOther", "inputCacheRead", "inputCacheCreation", "output")
+
+# Model/provider/relay failures only.  Do not include generic "API" or
+# localhost connection failures here: many Toolathlon tasks intentionally use
+# business/data APIs, and failed local probing is task behavior rather than a
+# model-provider outage.
+API_ERROR_RE = re.compile(
+    r"("
+    r"provider_invalid|No providers available|MODEL_API_URL|RELAY_API_KEY|"
+    r"API(?:Connection|Timeout)?Error|APITimeoutError|APIConnectionError|"
+    r"AuthenticationError|PermissionDeniedError|RateLimitError|"
+    r"429 Too Many Requests|401 Unauthorized|403 Forbidden|"
+    r"502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout|"
+    r"invalid api key|api key invalid|quota exceeded|"
+    r"provider error|upstream error|relay error|model api"
+    r")",
+    re.I,
+)
+
+
+def load_tokenizer():
+    try:
+        import tiktoken  # type: ignore
+
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        return None
+
+
+TOKENIZER = load_tokenizer()
+
+
+def estimate_tokens(text: str) -> int:
+    if not text:
+        return 0
+    if TOKENIZER is not None:
+        return len(TOKENIZER.encode(text))
+    return max(1, math.ceil(len(text) / 4))
+
+
+def int_or_none(value) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(float(value))
+    except Exception:
+        return None
+
+
+def usage_totals(usage: dict | None) -> dict[str, int]:
+    usage = usage or {}
+    return {k: int_or_none(usage.get(k)) or 0 for k in USAGE_FIELDS}
+
+
+def add_usage(dst: dict[str, int], src: dict[str, int]) -> None:
+    for k in USAGE_FIELDS:
+        dst[k] = dst.get(k, 0) + src.get(k, 0)
+
+
+def step_token_total(step: dict) -> int:
+    u = step.get("usage_totals") or {}
+    return sum(int(u.get(k, 0)) for k in USAGE_FIELDS)
+
+
+def wire_total_tokens(wire: dict) -> int:
+    u = wire.get("usage_totals") or {}
+    return sum(int(u.get(k, 0)) for k in USAGE_FIELDS)
+
+
+def prompt_tokens_from_usage(usage: dict) -> int:
+    return int(usage.get("inputOther", 0)) + int(usage.get("inputCacheRead", 0)) + int(usage.get("inputCacheCreation", 0))
+
+
+def is_api_error_step(step: dict) -> bool:
+    chunks: list[str] = [str(step.get("content") or "")]
+    for call in step.get("calls", []):
+        chunks.append(str(call.get("name") or ""))
+        chunks.append(str(call.get("args_text") or ""))
+        try:
+            chunks.append(json.dumps(call.get("args") or {}, ensure_ascii=False))
+        except Exception:
+            chunks.append(str(call.get("args") or ""))
+        chunks.append(str(call.get("result") or ""))
+    return bool(API_ERROR_RE.search("\n".join(chunks)))
 
 
 def load_json(p: Path):
@@ -136,9 +222,14 @@ def parse_wire(wire_path: Path) -> dict:
     profile_name = None
     sub_prompt = None
     result_by_id: dict[str, dict] = {}
+    fallback_usage_by_step: dict[int, list[dict[str, int]]] = defaultdict(list)
 
     if not wire_path.exists():
-        return {"steps": [], "n_steps": 0, "profile": None, "prompt": None}
+        return {"steps": [], "all_steps": [], "n_steps": 0, "raw_n_steps": 0,
+                "api_error_steps": 0, "profile": None, "prompt": None,
+                "usage_totals": {k: 0 for k in USAGE_FIELDS},
+                "excluded_usage_totals": {k: 0 for k in USAGE_FIELDS},
+                "observation_tokens_est": 0, "excluded_observation_tokens_est": 0}
 
     for line in wire_path.read_text(errors="replace").splitlines():
         try:
@@ -155,12 +246,20 @@ def parse_wire(wire_path: Path) -> dict:
                 sub_prompt = " ".join(x.get("text", "") for x in inp if isinstance(x, dict))[:4000]
             else:
                 sub_prompt = str(j.get("prompt") or "")[:4000]
+        elif t == "usage.record":
+            if cur_step is not None:
+                sn = cur_step.get("step")
+                if isinstance(sn, int):
+                    fallback_usage_by_step[sn].append(usage_totals(j.get("usage")))
         elif t == "context.append_loop_event":
             ev = j.get("event", {})
             et = ev.get("type")
             sn = ev.get("step")
             if et == "step.begin":
-                cur_step = {"step": sn, "calls": [], "content": ""}
+                cur_step = {"step": sn, "calls": [], "content": "",
+                            "usage_totals": {k: 0 for k in USAGE_FIELDS},
+                            "observation_tokens_est": 0, "has_step_end_usage": False,
+                            "api_error": False}
                 steps[sn] = cur_step
             elif et == "tool.call":
                 raw_args = ev.get("args")
@@ -184,11 +283,21 @@ def parse_wire(wire_path: Path) -> dict:
                 output = res.get("output") if isinstance(res, dict) else str(res)
                 is_error = bool(res.get("is_error")) if isinstance(res, dict) else False
                 result_by_id[ev.get("toolCallId")] = {"output": str(output), "is_error": is_error}
+                if cur_step is not None:
+                    cur_step["observation_tokens_est"] += estimate_tokens(str(output or ""))
             elif et == "content.part":
                 part = ev.get("part") or {}
                 txt = part.get("text") or ""
                 if cur_step is not None and txt:
                     cur_step["content"] += txt + "\n"
+            elif et == "step.end":
+                if isinstance(sn, int):
+                    st = steps.setdefault(sn, {"step": sn, "calls": [], "content": "",
+                                               "usage_totals": {k: 0 for k in USAGE_FIELDS},
+                                               "observation_tokens_est": 0, "has_step_end_usage": False,
+                                               "api_error": False})
+                    st["usage_totals"] = usage_totals(ev.get("usage"))
+                    st["has_step_end_usage"] = True
 
     step_list = [steps[k] for k in sorted(steps)]
     for st in step_list:
@@ -196,20 +305,54 @@ def parse_wire(wire_path: Path) -> dict:
             r = result_by_id.get(call["id"])
             if r:
                 call["result"], call["is_error"] = r["output"], r["is_error"]
-    return {"steps": step_list, "n_steps": len(step_list),
-            "profile": profile_name, "prompt": sub_prompt}
+        if not st.get("has_step_end_usage"):
+            total = {k: 0 for k in USAGE_FIELDS}
+            sn = st.get("step")
+            for u in fallback_usage_by_step.get(sn, []):
+                add_usage(total, u)
+            st["usage_totals"] = total
+        st["api_error"] = is_api_error_step(st)
+
+    included = [st for st in step_list if not st.get("api_error")]
+    totals = {k: 0 for k in USAGE_FIELDS}
+    excluded_totals = {k: 0 for k in USAGE_FIELDS}
+    observation = 0
+    excluded_observation = 0
+    for st in step_list:
+        if st.get("api_error"):
+            add_usage(excluded_totals, st.get("usage_totals") or {})
+            excluded_observation += int(st.get("observation_tokens_est") or 0)
+        else:
+            add_usage(totals, st.get("usage_totals") or {})
+            observation += int(st.get("observation_tokens_est") or 0)
+
+    return {"steps": included, "all_steps": step_list, "n_steps": len(included),
+            "raw_n_steps": len(step_list), "api_error_steps": len(step_list) - len(included),
+            "profile": profile_name, "prompt": sub_prompt,
+            "usage_totals": totals, "excluded_usage_totals": excluded_totals,
+            "observation_tokens_est": observation,
+            "excluded_observation_tokens_est": excluded_observation}
 
 
 def compute_critical_steps(main_wire: dict, sub_wires: list[dict]) -> dict:
-    """A step that fires N Agent calls concurrently = ONE parallel phase.
-    A lone Agent call = sequential phase. AgentSwarm with N items = parallel.
+    """Compute critical-path steps after excluding model/API-error steps.
+
+    API-error steps remain visible in the audit timeline, but are removed from
+    step counts and token totals for both main and sub-agents.
     """
     phases: list[dict] = []
     sub_cursor = 0
     phase_idx = 0
+    critical_tokens_api = 0
+    critical_observation_tokens = 0
+
     for st in main_wire["steps"]:
         deleg = [c for c in st["calls"] if c["name"] in DELEGATION_TOOLS]
+        main_tokens = step_token_total(st)
+        main_obs = int(st.get("observation_tokens_est") or 0)
         if not deleg:
+            critical_tokens_api += main_tokens
+            critical_observation_tokens += main_obs
             continue
         n_sub = 0
         tools_used = set()
@@ -224,28 +367,79 @@ def compute_critical_steps(main_wire: dict, sub_wires: list[dict]) -> dict:
         taken = sub_wires[sub_cursor:sub_cursor + n_sub]
         sub_cursor += len(taken)
         sub_step_counts = [w["n_steps"] for w in taken]
+        sub_token_counts = [wire_total_tokens(w) for w in taken]
+        sub_obs_counts = [int(w.get("observation_tokens_est") or 0) for w in taken]
         slowest = max(sub_step_counts) if sub_step_counts else 0
+        slowest_tokens = max(sub_token_counts) if sub_token_counts else 0
+        slowest_obs = max(sub_obs_counts) if sub_obs_counts else 0
         phase_idx += 1
         phases.append({"phase": phase_idx, "mode": mode,
                        "deleg_tool": "/".join(sorted(tools_used)),
                        "n_sub": len(taken), "s_main": 1,
                        "sub_steps": sub_step_counts, "slowest": slowest,
-                       "cost": 1 + slowest})
+                       "cost": 1 + slowest,
+                       "main_tokens_api": main_tokens,
+                       "sub_tokens_api": sub_token_counts,
+                       "slowest_tokens_api": slowest_tokens,
+                       "token_cost_api": main_tokens + slowest_tokens})
+        critical_tokens_api += main_tokens + slowest_tokens
+        critical_observation_tokens += main_obs + slowest_obs
 
     total_main = main_wire["n_steps"]
     n_deleg_phases = len(phases)
     solo = max(0, total_main - n_deleg_phases)
     if solo:
+        solo_steps = [st for st in main_wire["steps"] if not any(c["name"] in DELEGATION_TOOLS for c in st["calls"])]
+        solo_tokens = sum(step_token_total(st) for st in solo_steps)
         phases.insert(0, {"phase": 0, "mode": "solo", "deleg_tool": None,
                           "n_sub": 0, "s_main": solo, "sub_steps": [],
-                          "slowest": 0, "cost": solo})
+                          "slowest": 0, "cost": solo,
+                          "main_tokens_api": solo_tokens, "sub_tokens_api": [],
+                          "slowest_tokens_api": 0, "token_cost_api": solo_tokens})
     critical = sum(p["cost"] for p in phases)
     serial = total_main + sum(w["n_steps"] for w in sub_wires)
     n_parallel = sum(p["n_sub"] for p in phases if p["mode"] == "parallel")
     n_sequential = sum(p["n_sub"] for p in phases if p["mode"] == "sequential")
+    total_usage = {k: 0 for k in USAGE_FIELDS}
+    excluded_usage = {k: 0 for k in USAGE_FIELDS}
+    observation = int(main_wire.get("observation_tokens_est") or 0)
+    excluded_observation = int(main_wire.get("excluded_observation_tokens_est") or 0)
+    add_usage(total_usage, main_wire.get("usage_totals") or {})
+    add_usage(excluded_usage, main_wire.get("excluded_usage_totals") or {})
+    for w in sub_wires:
+        add_usage(total_usage, w.get("usage_totals") or {})
+        add_usage(excluded_usage, w.get("excluded_usage_totals") or {})
+        observation += int(w.get("observation_tokens_est") or 0)
+        excluded_observation += int(w.get("excluded_observation_tokens_est") or 0)
+    prompt_tokens = prompt_tokens_from_usage(total_usage)
+    assistant_tokens = int(total_usage.get("output", 0))
+    excluded_prompt_tokens = prompt_tokens_from_usage(excluded_usage)
+    excluded_assistant_tokens = int(excluded_usage.get("output", 0))
+    serial_tokens_api = prompt_tokens + assistant_tokens
     return {"phases": phases, "critical_steps": critical, "serial_steps": serial,
             "n_parallel_subs": n_parallel, "n_sequential_subs": n_sequential,
-            "main_steps": total_main}
+            "main_steps": total_main, "main_steps_raw": main_wire.get("raw_n_steps", total_main),
+            "main_api_error_steps": main_wire.get("api_error_steps", 0),
+            "sub_api_error_steps": sum(w.get("api_error_steps", 0) for w in sub_wires),
+            "api_error_steps": main_wire.get("api_error_steps", 0) + sum(w.get("api_error_steps", 0) for w in sub_wires),
+            "prompt_tokens_api": prompt_tokens,
+            "prompt_uncached_tokens_api": int(total_usage.get("inputOther", 0)),
+            "prompt_cache_read_tokens_api": int(total_usage.get("inputCacheRead", 0)),
+            "prompt_cache_creation_tokens_api": int(total_usage.get("inputCacheCreation", 0)),
+            "assistant_tokens_api": assistant_tokens,
+            "total_tokens_api": serial_tokens_api,
+            "observation_tokens_est": observation,
+            "critical_tokens_api": critical_tokens_api,
+            "serial_tokens_api": serial_tokens_api,
+            "critical_token_saving_api": max(0, serial_tokens_api - critical_tokens_api),
+            "critical_observation_tokens_est": critical_observation_tokens,
+            "serial_observation_tokens_est": observation,
+            "critical_all_tokens_est": critical_tokens_api + critical_observation_tokens,
+            "serial_all_tokens_est": serial_tokens_api + observation,
+            "excluded_prompt_tokens_api": excluded_prompt_tokens,
+            "excluded_assistant_tokens_api": excluded_assistant_tokens,
+            "excluded_total_tokens_api": excluded_prompt_tokens + excluded_assistant_tokens,
+            "excluded_observation_tokens_est": excluded_observation}
 
 
 def compute_plan_first_metrics(main_wire: dict) -> dict:
@@ -519,15 +713,18 @@ def _is_shell_tool(name: str) -> bool:
     return name == "Bash" or name.endswith("__terminal") or name.endswith("__run_terminal_cmd")
 
 
-def render_call(call: dict) -> str:
+def render_call(call: dict, api_error: bool = False) -> str:
     name = call["name"]
     is_deleg = name in DELEGATION_TOOLS
     cls = "call deleg" if is_deleg else "call"
+    if api_error:
+        cls += " api-error"
     oneline = fmt_args(name, call["args"])
     err = '<span class="err-badge">error</span>' if call["is_error"] else ""
+    api_badge = '<span class="api-badge">API error step · excluded from metrics</span>' if api_error else ""
 
     parts = [f'<div class="{cls}"><div class="call-h">'
-             f'<span class="tool-tag">{html.escape(name)}</span> {err}'
+             f'<span class="tool-tag">{html.escape(name)}</span> {err} {api_badge}'
              f'<span class="call-line">{html.escape(oneline)}</span></div>']
 
     # Code-bearing tools get a dedicated, formatted block instead of the
@@ -602,7 +799,7 @@ def render_call(call: dict) -> str:
 
 def render_timeline(main_wire: dict) -> str:
     parts = []
-    for st in main_wire["steps"]:
+    for st in main_wire.get("all_steps") or main_wire["steps"]:
         sn = st["step"]
         content = (st.get("content") or "").strip()
         think = ""
@@ -617,7 +814,11 @@ def render_timeline(main_wire: dict) -> str:
         if deleg_n:
             badge += f' · <span class="par">{deleg_n} delegation{"s" if deleg_n!=1 else ""}</span>'
 
-        parts.append(f'<div class="step"><div class="step-h"><span class="step-no">Step {sn}</span>'
+        api_error = bool(st.get("api_error"))
+        step_cls = "step api-error" if api_error else "step"
+        if api_error:
+            badge += ' · <span class="api-text">API error · excluded</span>'
+        parts.append(f'<div class="{step_cls}"><div class="step-h"><span class="step-no">Step {sn}</span>'
                      f'<span class="badge">{badge}</span></div>')
         if think:
             parts.append(f'<details class="think"><summary>reasoning</summary>'
@@ -625,7 +826,7 @@ def render_timeline(main_wire: dict) -> str:
         if narrative:
             parts.append(f'<div class="narrative md-pre">{html.escape(narrative)}</div>')
         for call in st["calls"]:
-            parts.append(render_call(call))
+            parts.append(render_call(call, api_error=api_error))
         if n_calls == 0 and not narrative and not think:
             parts.append('<div class="muted small">(no tool call / no output this step)</div>')
         parts.append("</div>")
@@ -643,15 +844,18 @@ def render_subagents(sub_wires: list[dict]) -> str:
         parts.append(f'<details class="sub"><summary>{head}</summary>')
         if w.get("prompt"):
             parts.append(f'<h4>Prompt</h4><div class="md-pre prompt">{html.escape(w["prompt"])}</div>')
-        for st in w["steps"]:
-            parts.append(f'<div class="substep"><div class="substep-h">step {st["step"]}</div>')
+        for st in w.get("all_steps") or w["steps"]:
+            api_error = bool(st.get("api_error"))
+            substep_cls = "substep api-error" if api_error else "substep"
+            api_note = ' <span class="api-badge">API error step · excluded from metrics</span>' if api_error else ""
+            parts.append(f'<div class="{substep_cls}"><div class="substep-h">step {st["step"]}{api_note}</div>')
             content = (st.get("content") or "").strip()
             if content:
                 content = re.sub(r"<think>.*?</think>", "", content, flags=re.S).strip()
             if content:
                 parts.append(f'<div class="md-pre narrative">{html.escape(content[:600])}</div>')
             for call in st["calls"]:
-                parts.append(render_call(call))
+                parts.append(render_call(call, api_error=api_error))
             if not st["calls"]:
                 parts.append('<div class="muted small">(no tool this step)</div>')
             parts.append("</div>")
@@ -661,7 +865,7 @@ def render_subagents(sub_wires: list[dict]) -> str:
 
 CSS = """
 :root{--bg:#faf9f7;--card:#fff;--bd:#e8e6e1;--fg:#1f1e1b;--mut:#6b6862;--acc:#b4552d;
---acc-l:#f6ede7;--ok:#2a7d4f;--bad:#c13434;--code:#f4f2ee;--blue:#2f5f8f;--par:#7d54b2}
+--acc-l:#f6ede7;--ok:#2a7d4f;--bad:#c13434;--code:#f4f2ee;--blue:#2f5f8f;--par:#7d54b2;--api:#d97706;--api-l:#fff4d6}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 'Söhne','Inter',-apple-system,'Segoe UI',sans-serif}
 header{padding:22px 32px;border-bottom:1px solid var(--bd);background:var(--card);position:sticky;top:0;z-index:5}
@@ -701,6 +905,10 @@ details.args summary,details.res summary,details.think summary{color:var(--mut);
 .badge .par{color:var(--par);font-weight:600}
 .call{border-left:3px solid var(--blue);background:#fbfcfd;border:1px solid var(--bd);border-radius:8px;padding:8px 12px;margin:8px 0}
 .call.deleg{border-left-color:var(--par);background:#faf7fc}
+.step.api-error,.substep.api-error{border-color:#f0b65d;background:var(--api-l)}
+.call.api-error{border-left-color:var(--api);background:#fffaf0}
+.api-badge{background:#fff0bf;color:#9a5700;border:1px solid #e8b85a;border-radius:6px;padding:1px 7px;font-size:11px;font-weight:700}
+.api-text{color:var(--api);font-weight:700}
 .call-h{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
 .tool-tag{background:var(--blue);color:#fff;border-radius:6px;padding:1px 8px;font-size:11px;font-weight:600;font-family:monospace}
 .call.deleg .tool-tag{background:var(--par)}
@@ -874,12 +1082,12 @@ def build_case_html(case_dir: Path) -> dict | None:
     for p in crit["phases"]:
         if p["mode"] == "solo":
             rows.append(f'<tr class="phase solo"><td>{p["phase"]}</td><td>solo</td><td>—</td>'
-                        f'<td>{p["s_main"]}</td><td>—</td><td>{p["cost"]}</td></tr>')
+                        f'<td>{p["s_main"]}</td><td>—</td><td>{p["cost"]}</td><td>{p.get("token_cost_api", 0)}</td></tr>')
         else:
             subs = ", ".join(map(str, p["sub_steps"])) or "—"
             rows.append(f'<tr class="phase {p["mode"]}"><td>{p["phase"]}</td>'
                         f'<td>{p["mode"]} <span class="muted">({html.escape(str(p["deleg_tool"]))})</span></td>'
-                        f'<td>{p["n_sub"]}</td><td>{p["s_main"]}</td><td>[{subs}] → {p["slowest"]}</td><td>{p["cost"]}</td></tr>')
+                        f'<td>{p["n_sub"]}</td><td>{p["s_main"]}</td><td>[{subs}] → {p["slowest"]}</td><td>{p["cost"]}</td><td>{p.get("token_cost_api", 0)}</td></tr>')
     body.append(f"""<section id="critical"><h2>Critical Steps</h2>
 <p class="muted">CriticalSteps = Σ<sub>t</sub>(S<sub>main</sub><sup>(t)</sup> + max<sub>i</sub> S<sub>sub,i</sub><sup>(t)</sup>) = <b style="color:var(--acc)">{crit['critical_steps']}</b>
 · serial equivalent {crit['serial_steps']} · parallel saving {max(0, crit['serial_steps']-crit['critical_steps'])}.
@@ -928,12 +1136,12 @@ A single step firing N Agent calls concurrently counts as one parallel phase.</p
 
     body.append(f"""<section id="timeline"><h2>Main Agent Execution Timeline ({main_wire['n_steps']} steps)</h2>
 <p class="muted">Purple = sub-agent delegation · blue = tool call. Expand for full arguments/results.
-Python code is rendered with syntax highlighting inside a dedicated block.</p>
+Python code is rendered with syntax highlighting inside a dedicated block. Amber steps are model/provider API-error steps and are excluded from step/token metrics.</p>
 <button class="btn-code" onclick="toggleCodeBlocks(this, 'timeline')">expand all code</button>
 {render_timeline(main_wire)}</section>""")
 
     body.append(f"""<section id="subrun"><h2>Sub-agent Runs ({len(sub_wires)})</h2>
-<p class="muted">{crit['n_parallel_subs']} in parallel · {crit['n_sequential_subs']} sequential.</p>
+<p class="muted">{crit['n_parallel_subs']} in parallel · {crit['n_sequential_subs']} sequential · {crit['sub_api_error_steps']} API-error sub-agent step(s) excluded.</p>
 <button class="btn-code" onclick="toggleCodeBlocks(this, 'subrun')">expand all code</button>
 {render_subagents(sub_wires)}</section>""")
 
@@ -960,6 +1168,14 @@ Python code is rendered with syntax highlighting inside a dedicated block.</p>
             "pass": passed, "ckpt_pass": ck_pass, "ckpt_total": ck_total,
             "duration_s": duration, "critical_steps": crit["critical_steps"],
             "serial_steps": crit["serial_steps"], "main_steps": crit["main_steps"],
+            "main_steps_raw": crit["main_steps_raw"], "api_error_steps": crit["api_error_steps"],
+            "main_api_error_steps": crit["main_api_error_steps"], "sub_api_error_steps": crit["sub_api_error_steps"],
+            "prompt_tokens_api": crit["prompt_tokens_api"], "assistant_tokens_api": crit["assistant_tokens_api"],
+            "total_tokens_api": crit["total_tokens_api"], "critical_tokens_api": crit["critical_tokens_api"],
+            "serial_tokens_api": crit["serial_tokens_api"], "observation_tokens_est": crit["observation_tokens_est"],
+            "critical_all_tokens_est": crit["critical_all_tokens_est"], "serial_all_tokens_est": crit["serial_all_tokens_est"],
+            "excluded_total_tokens_api": crit["excluded_total_tokens_api"],
+            "excluded_observation_tokens_est": crit["excluded_observation_tokens_est"],
             "n_subs": len(sub_wires), "n_parallel": crit["n_parallel_subs"],
             "n_sequential": crit["n_sequential_subs"], "claim_done": runlog.get("claim_done"),
             "plan_first_arm": plan_first_arm,
@@ -993,6 +1209,8 @@ def write_dump_index(dump_root: Path, records: list[dict]) -> None:
         rows.append(f"<tr><td><a href='{rel}'>{r['task']}</a></td><td>{r['run']}</td>"
                     f"<td><span class='pill {pill}</span></td><td>{ck}</td><td>{dur}</td>"
                     f"<td>{r['critical_steps']}</td><td>{r['serial_steps']}</td>"
+                    f"<td><span class='api-text'>{r.get('api_error_steps', 0)}</span></td>"
+                    f"<td>{r.get('total_tokens_api', 0)}</td><td>{r.get('critical_tokens_api', 0)}</td>"
                     f"<td>{r['n_subs']} ({r['n_parallel']}p/{r['n_sequential']}s)</td>{pf_cell}</tr>")
     pf_head = "<th>Plan-first</th>" if has_pf else ""
     doc = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
@@ -1004,10 +1222,10 @@ td,th{{padding:9px 12px;border-bottom:1px solid #e8e6e1;text-align:left;font-siz
 th{{background:#f4f2ee;color:#6b6862;font-size:12px;text-transform:uppercase}}
 a{{color:#b4552d;text-decoration:none}}a:hover{{text-decoration:underline}}
 .pill{{padding:3px 12px;border-radius:14px;font-size:12.5px;font-weight:600}}
-.pill.ok{{background:#e6f3ec;color:#2a7d4f}}.pill.bad{{background:#fbeaea;color:#c13434}}
+.pill.ok{{background:#e6f3ec;color:#2a7d4f}}.pill.bad{{background:#fbeaea;color:#c13434}}.api-text{{color:#d97706;font-weight:700}}
 h1{{font-size:20px}}p{{color:#6b6862}}</style></head><body>
 <h1>Audit Index — {dump_root.name}</h1><p>{len(records)} case(s)</p>{pf_stat}
-<table><tr><th>Task</th><th>Run</th><th>Pass</th><th>Checkpoints</th><th>Duration</th><th>Critical</th><th>Serial</th><th>Subs</th>{pf_head}</tr>
+<table><tr><th>Task</th><th>Run</th><th>Pass</th><th>Checkpoints</th><th>Duration</th><th>Critical</th><th>Serial</th><th>API-error steps</th><th>Total tokens API</th><th>Critical tokens API</th><th>Subs</th>{pf_head}</tr>
 {''.join(rows)}</table></body></html>"""
     (dump_root / "audit_index.html").write_text(doc)
 
