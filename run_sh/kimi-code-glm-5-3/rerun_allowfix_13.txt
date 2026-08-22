@@ -1,0 +1,13 @@
+academic-literature-review
+arxiv-latex-analysis-notion-word
+arxiv-research-tracker-notion
+canvas-scholarly-curriculum-review
+ecommerce-market-benchmark
+fetch-yf-portfolio-health-excel-gcal-email
+playwright-arxiv-review-criteria-word-gsheet
+ppt-snowflake-executive
+sf-hr-education-notion
+sf-hr-salary-benchmark-gform-excel-email
+sf-support-csat-gform-gsheet-email
+yf-financial-health-excel-notion
+yf-portfolio-risk-excel

@@ -30,7 +30,8 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # ── login-node API relay (idempotent) ────────────────────────────────────────
 LOGIN_IP="192.168.180.240"
-RELAY_PORT=19317
+RELAY_PORT="${RELAY_PORT:-19317}"
+RELAY_SKIP_AUTOSTART="${RELAY_SKIP_AUTOSTART:-0}"
 PYTHON_BIN="${PYTHON_BIN:-/storage/lintaoLab/bowending/miniconda3/envs/dbw_dev/bin/python3}"
 RELAY_API_KEY="${RELAY_API_KEY:?Set RELAY_API_KEY before launching the eval}"
 
@@ -51,6 +52,9 @@ if curl -sS -m 5 -o /dev/null \
      -H "Authorization: Bearer ${RELAY_API_KEY}" \
      "http://127.0.0.1:${RELAY_PORT}/v1/models"; then
   echo "[slurm-launch] API relay healthy on 127.0.0.1:${RELAY_PORT}"
+elif [[ "$RELAY_SKIP_AUTOSTART" == "1" ]]; then
+  echo "[slurm-launch] FATAL: relay on 127.0.0.1:${RELAY_PORT} is down and RELAY_SKIP_AUTOSTART=1" >&2
+  exit 1
 else
   # Start relay on the login node (where this script runs). If the port was
   # already healthy above, it is shared and we leave it alone on exit. If this
@@ -122,8 +126,16 @@ export MODEL_API_URL="$3"
 export MODEL_API_KEY="$4"
 export KIMI_MAX_CONTEXT="$5"
 export KIMI_TASK_TIMEOUT_S="$6"
-shift 6
-echo "[inner] ARGV: MODEL_NAME=$MODEL_NAME KIMI_CONFIG_ENV=$KIMI_CONFIG_ENV"
+export RELAY_PORT="$7"
+export KIMI_MODEL_THINKING_EFFORT="$8"
+# $9 = KIMI_SUBAGENTS with a sentinel: "__UNSET__" means leave it unset (harness
+# default: coder/explore/plan); "" explicitly disables all sub-agents; "ten"
+# selects the 10-agent roster; comma lists pass through verbatim.
+if [ "$9" != "__UNSET__" ]; then
+  export KIMI_SUBAGENTS="$9"
+fi
+shift 9
+echo "[inner] ARGV: MODEL_NAME=$MODEL_NAME KIMI_CONFIG_ENV=$KIMI_CONFIG_ENV RELAY_PORT=$RELAY_PORT effort=${KIMI_MODEL_THINKING_EFFORT:-} subagents=${KIMI_SUBAGENTS:-<default 3>}"
 
 # Compute nodes inherit http_proxy=127.0.0.1:7890 (nonexistent). Clear all
 # proxy vars and whitelist the login node so API calls go direct to the relay.
@@ -199,14 +211,27 @@ if [[ ! -f "$AGENT_SQSH" ]]; then
 fi
 echo "[inner] agent image: $AGENT_SQSH (sqsh, build-produced)"
 
-# Sanity: relay reachable from compute node?
+# Sanity: relay reachable from compute node.
+# /v1/models can wait on the upstream gateway (llmapi.blsc.cn often >5s).
+# Use /healthz when the HTTPS relay serves it; otherwise /v1/models with 30s.
 echo "[inner] relay check:"
-curl -sS -m 5 -o /dev/null -w "  HTTP %{http_code}\n" \
-  -H "Authorization: Bearer ${RELAY_API_KEY}" \
-  http://192.168.180.240:19317/v1/models || {
-    echo "[inner] FATAL: cannot reach API relay from compute node"
-    exit 1
-  }
+_relay_ok=0
+_healthz_code="$(curl -sS -m 5 -o /dev/null -w "%{http_code}" \
+  "http://192.168.180.240:${RELAY_PORT}/healthz" || true)"
+if [[ "${_healthz_code}" == "200" ]]; then
+  echo "  healthz HTTP 200"
+  _relay_ok=1
+else
+  if curl -sS -m 30 -o /dev/null -w "  models HTTP %{http_code}\n" \
+       -H "Authorization: Bearer ${RELAY_API_KEY}" \
+       "http://192.168.180.240:${RELAY_PORT}/v1/models"; then
+    _relay_ok=1
+  fi
+fi
+if [[ "${_relay_ok}" != 1 ]]; then
+  echo "[inner] FATAL: cannot reach API relay from compute node (port ${RELAY_PORT})"
+  exit 1
+fi
 
 echo "[inner] enroot: $(enroot version 2>&1)"
 echo "[inner] /dev/shm: $(df -h /dev/shm | tail -1 | awk '{print $2" total, "$4" free"}')"
@@ -297,17 +322,20 @@ INNER_EOF
 # the srun'd INNER script (and the run_eval_parallel.sh it calls) receive the
 # correct model alias. Without this, srun may not propagate KIMI_CONFIG_ENV
 # and run_eval_parallel.sh falls back to the default config.env.
-export SLURM_MEM SLURM_CPUS SLURM_TIME SLURM_PARTITION SLURM_NODELIST RELAY_API_KEY
-export RUN_ID DUMP_ROOT MAX_CONCURRENT AUTO_AUDIT_HTML
+export SLURM_MEM SLURM_CPUS SLURM_TIME SLURM_PARTITION SLURM_NODELIST RELAY_API_KEY RELAY_PORT
+export RUN_ID DUMP_ROOT MAX_CONCURRENT MAX_CONCURRENT_CAP AUTO_AUDIT_HTML MOCK_PORT_WAIT_LOOPS
+export PG_PORT_BASE PG_RUNTIME_ROOT PG_PORT_LEASE_ROOT
 export MODEL_NAME MODEL_API_URL MODEL_API_KEY KIMI_CONFIG_ENV KIMI_MAX_CONTEXT KIMI_TASK_TIMEOUT_S
+export KIMI_MODEL_THINKING_EFFORT="${KIMI_MODEL_THINKING_EFFORT:-}"
+export KIMI_PLAN_FIRST="${KIMI_PLAN_FIRST:-}"
 
 echo "[slurm-launch] dispatching to slurm..."
-echo "[slurm-launch] DEBUG: MODEL_NAME=${MODEL_NAME:-<unset>} KIMI_CONFIG_ENV=${KIMI_CONFIG_ENV:-<unset>}"
+echo "[slurm-launch] DEBUG: MODEL_NAME=${MODEL_NAME:-<unset>} KIMI_CONFIG_ENV=${KIMI_CONFIG_ENV:-<unset>} RELAY_PORT=${RELAY_PORT} effort=${KIMI_MODEL_THINKING_EFFORT:-} subagents=${KIMI_SUBAGENTS-<default 3>}"
 srun -p "$SLURM_PARTITION" \
      "${SRUN_NODE_ARGS[@]}" \
      -N1 -n1 -c"$SLURM_CPUS" \
      --mem="$SLURM_MEM" --time="$SLURM_TIME" \
-     --job-name="ds-v4-flash-eval" \
+     --job-name="${SLURM_JOB_NAME:-ds-v4-flash-eval}" \
      bash -c "$INNER" _ \
      "${MODEL_NAME:?MODEL_NAME must be set}" \
      "${KIMI_CONFIG_ENV:?KIMI_CONFIG_ENV must be set}" \
@@ -315,4 +343,7 @@ srun -p "$SLURM_PARTITION" \
      "${MODEL_API_KEY:?MODEL_API_KEY must be set}" \
      "${KIMI_MAX_CONTEXT:-262144}" \
      "${KIMI_TASK_TIMEOUT_S:-7200}" \
+     "${RELAY_PORT:-19317}" \
+     "${KIMI_MODEL_THINKING_EFFORT:-}" \
+     "${KIMI_SUBAGENTS-__UNSET__}" \
      "${TASKS[@]}"

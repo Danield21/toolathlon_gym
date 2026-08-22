@@ -1,0 +1,7 @@
+pw-wc-review-analysis-excel-notion
+yf-stock-volatility-terminal
+canvas-grade-equity-excel-word-gcal
+canvas-grade-summary
+canvas-late-submission-gcal
+canvas-pdf-grade-gsheet
+canvas-course-feedback

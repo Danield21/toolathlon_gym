@@ -15,6 +15,16 @@
 #   KIMI_SUBAGENTS=coder,explore
 #   KIMI_EXAMPLES_FILE=examples_none.md
 #   KIMI_COORDINATION_FILE=subagent_coordination_default.md
+#
+# Sub-agent roster (kimi_harness reads KIMI_SUBAGENTS):
+#   unset                    → default 3 (coder, explore, plan)
+#   KIMI_SUBAGENTS=ten       → 10-agent roster (3 + 7 domain specialists;
+#                              aliases: 10, all). Specialists keep their own
+#                              tool ceilings intersected with the task's MCP
+#                              servers (fail closed to tools: [] when empty).
+#   KIMI_SUBAGENTS=three     → pin the classic 3 (aliases: 3)
+#   KIMI_SUBAGENTS=""        → disable all sub-agents
+#   comma list               → exactly those agents
 
 set -euo pipefail
 

@@ -16,6 +16,7 @@ Flow:
 import argparse
 import asyncio
 import ctypes
+import fnmatch
 import glob
 import html
 import http.server
@@ -24,6 +25,7 @@ import mimetypes
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -75,11 +77,46 @@ Completion Protocol (Mandatory):
 # --- Pluggable prompt sections (ablation-ready) -----------------------------
 # Sub-agent type descriptions and examples are loaded from separate files so
 # different subagent combinations can be swapped via env vars without touching
-# code.  Set KIMI_SUBAGENTS="coder,explore" to drop plan, KIMI_EXAMPLES_FILE
-# to an empty file to remove examples entirely, etc.
+# code.  Set KIMI_SUBAGENTS="plan,academic-literature-researcher" to pin a
+# subset, KIMI_EXAMPLES_FILE to an empty file to remove examples entirely, etc.
+#
+# 2026-08-21 roster redesign: coder and explore are RETIRED from the final
+# design.  The 10-agent roster is plan + 7 domain specialists + 2 cross-cutting
+# agents (evidence-integrator, deliverable-auditor); select it explicitly with
+# KIMI_SUBAGENTS=ten (aliases: 10 / all).  The DEFAULT (unset) stays on the
+# legacy trio (coder/explore/plan) so launch scripts that predate the redesign
+# keep their original behavior; KIMI_SUBAGENTS=three (3) pins the same trio.
 
 SECTIONS_DIR = os.path.join(HARNESS_DIR, "assets", "sections")
-DEFAULT_SUBAGENTS = ("coder", "explore", "plan")
+LEGACY_SUBAGENTS = ("coder", "explore", "plan")  # retired; kept for the "three" preset
+SPECIALIZED_SUBAGENTS = (
+    "academic-literature-researcher",
+    "web-domain-researcher",
+    "enterprise-data-analyst",
+    "financial-market-analyst",
+    "workspace-data-engineer",
+    "office-report-builder",
+    "external-workflow-operator",
+)
+# Cross-cutting function agents (not bound to one tool domain): merge parallel
+# evidence, and independently audit finished deliverables.
+CROSSCUT_SUBAGENTS = (
+    "evidence-integrator",
+    "deliverable-auditor",
+)
+PROFILE_SUBAGENTS = SPECIALIZED_SUBAGENTS + CROSSCUT_SUBAGENTS
+TEN_SUBAGENTS = ("plan",) + PROFILE_SUBAGENTS
+# Default (unset) stays the legacy trio: existing launch scripts keep producing
+# pre-redesign prompts; opt in to the new roster with KIMI_SUBAGENTS=ten.
+DEFAULT_SUBAGENTS = LEGACY_SUBAGENTS
+# Named presets accepted by _active_subagents() (case-insensitive).
+SUBAGENT_PRESETS = {
+    "ten": list(TEN_SUBAGENTS),
+    "10": list(TEN_SUBAGENTS),
+    "all": list(TEN_SUBAGENTS),
+    "three": list(LEGACY_SUBAGENTS),
+    "3": list(LEGACY_SUBAGENTS),
+}
 
 CORE_RESPONSIBILITIES_BASE = (
     "Core Responsibilities:\n"
@@ -96,8 +133,21 @@ CORE_RESPONSIBILITIES_PARALLEL = (
     "natively when sufficient."
 )
 CORE_RESPONSIBILITIES_TRUST = (
-    "- Trust sub-agent outputs that satisfy their return contract. Reuse facts, artifact "
-    "paths, resource IDs, digests, and verification results provided by sub-agents."
+    "- Reuse sub-agent outputs only when they satisfy their named versioned return "
+    "contract. Preserve facts, artifact paths, resource IDs, digests, provenance, and "
+    "verification results without silently reshaping them."
+)
+CORE_RESPONSIBILITIES_SPECIALIST = (
+    "- When a domain specialist matches the sub-task (papers, web evidence, enterprise "
+    "data, market data, workspace engineering, office artifacts, external workflows), "
+    "delegate to the narrowest matching profile. When no specialist matches, do the "
+    "work yourself rather than inventing a generalist delegate."
+)
+CORE_RESPONSIBILITIES_CROSSCUT = (
+    "- Route cross-cutting phases to their dedicated agents: merge parallel evidence "
+    "packets through `evidence-integrator` instead of reconciling them in your own "
+    "context, and, when the audit threshold applies, obtain an independent per-criterion "
+    "verdict from `deliverable-auditor` before signaling completion."
 )
 
 
@@ -123,6 +173,10 @@ def _core_responsibilities(subagents: list, workspace: str = "") -> str:
     if subagents:
         lines += [CORE_RESPONSIBILITIES_DELEGATION, CORE_RESPONSIBILITIES_PARALLEL,
                   CORE_RESPONSIBILITIES_TRUST]
+        if any(s in PROFILE_SUBAGENTS for s in subagents):
+            lines.append(CORE_RESPONSIBILITIES_SPECIALIST)
+        if any(s in CROSSCUT_SUBAGENTS for s in subagents):
+            lines.append(CORE_RESPONSIBILITIES_CROSSCUT)
     else:
         lines.append(CORE_RESPONSIBILITIES_PARALLEL)
     out = "\n".join(lines)
@@ -153,7 +207,54 @@ Sub-Agent Orchestration Rules:
   - For parallel sub-agents of one type, one prompt template, and distinct items, issue only the AgentSwarm tool call in that response (no other tool calls allowed).
 
 - Environment & Context:
-  - Sub-agents share the same task-approved tools and workspace directory as you — including terminal (shell), filesystem read/write, Python execution, database queries, spreadsheet/document creation, calendar/email, and any other tools granted by the current task.
+  - By default, sub-agents inherit the same task-scoped tools and workspace permissions as the parent agent, including terminal access, filesystem read/write operations, Python execution, database interactions, spreadsheet/document generation, calendar/email capabilities, and other tools enabled for the current task. However, if a sub-agent YAML configuration defines customized tool permissions or workspace directory access, the customized configuration overrides the inherited defaults.
+  - Current roster YAML customizations (the Agent tool description lists each type's Tools; do not assume any sub-agent has every tool you have):
+    - Write-capable specialists (`workspace-data-engineer`, `office-report-builder`, `external-workflow-operator`) receive a task-scoped write tool ceiling for their domain.
+    - Research specialists, `plan`, and `deliverable-auditor` operate **read-only** over their domains. They cannot create, update, delete, send, or otherwise mutate persistent state (Notion pages, email, calendar events, Canvas/WooCommerce writes, spreadsheet writes, etc.).
+    - `evidence-integrator` cannot query domain systems or mutate external state, but it may write one named canonical intermediate dataset inside the task workspace.
+    - Do not ask a read-only agent to call a write tool.
+  - Every sub-agent prompt must be **self-contained** — sub-agents operate in isolated contexts and cannot see the current user message or your previous reasoning steps.
+
+- Role Boundaries & Staged Handoffs:
+  - Select the narrowest profile whose semantic responsibility and task-scoped tool ceiling both fit the subtask; tool availability alone is not a reason to select a role.
+  - When one apparent subtask crosses profile boundaries, split it into **producer and consumer phases**: a domain researcher returns EvidencePacket v1, then `workspace-data-engineer`, `office-report-builder`, or `external-workflow-operator` consumes the frozen packet and returns its versioned artifact packet or **DeliverableReceipt v1**.
+  - **Never broaden a profile's tool ceiling** to keep a cross-domain subtask monolithic. If a step is genuinely atomic and no profile fits, execute that residual step in the main agent with the task-granted tools.
+
+- Evidence Integration:
+  - Research specialists return **EvidencePacket v1**. When two or more parallel packets must feed shared deliverables, delegate their merge to `evidence-integrator`; do not reconcile multi-packet joins ad hoc in your own context.
+  - Inline small packets verbatim. Packets larger than 32 KiB, packets already materialized by a sub-agent, or packets whose duplication would materially bloat context must be passed as **named workspace files** with path, size, and digest. If a required packet cannot be materialized or its size and digest cannot be computed, you must stop before integration and report the blocker. The integrator holds no domain tools and cannot re-fetch missing facts.
+  - Treat **CanonicalEvidence v1** from the integrator as the single source for downstream construction; resolve its `conflicts` and `unresolved` lists yourself before dispatching builders.
+  - Skip the integrator when a task has only one evidence branch or the packets need no joining — project directly.
+
+- Pre-Completion Audit:
+  - Before calling `mcp__local__claim_done`, delegate `deliverable-auditor` **whenever deliverables span two or more systems or the acceptance list has several independently checkable criteria**; hand it the per-criterion checklist plus the deliverable inventory (paths/IDs) and require **AuditReport v1**.
+  - Treat the audit as fail-closed: repair every FAIL and re-audit the affected criteria; investigate every UNKNOWN yourself with authoritative read-backs. You **must not call `mcp__local__claim_done`** while any applicable criterion remains FAIL or UNKNOWN. The gate opens only when every criterion is PASS.
+  - For a single trivial deliverable, verify it yourself with read-backs instead — the audit must earn its cost.
+
+- When & How to Delegate:
+  - Delegate when a subtask is independent and would otherwise bloat your own context (e.g. researching sources, drafting documents, verifying intermediate results).
+  - **Never delegate the final completion signal.** Only *you* may call `mcp__local__claim_done` after verifying that *every* requirement has been met (directly, or via the auditor's verdict).
+  - Default to **foreground** sub-agents (`run_in_background=false`). Use `run_in_background=true` **only** for long-running work where you can proceed without the result immediately. Do not poll background agents, and do not restate a single background result unless integration requires it.
+  - Prefer **resume** when an existing sub-agent already holds relevant context or the current task is a continuation of its prior work.\
+"""
+
+# Three-agent orchestration text. Environment & Context uses the same
+# inherit-then-YAML-override wording as the ten-agent rules; the rest of this
+# block stays on the pre-redesign structure so KIMI_SUBAGENTS=three still
+# selects the legacy catalog/examples rather than the specialist roster.
+ORCHESTRATION_RULES_LEGACY = """\
+Sub-Agent Orchestration Rules:
+
+- General Delegation:
+  - Delegate focused subtasks to available sub-agents via the Agent tool. For parallel execution, use the AgentSwarm tool.
+  - If a **Specified Sub-Agent Coordination** section appears later in this prompt, follow that prescribed workflow strictly when assigning and coordinating sub-agents; it overrides your default delegation judgment.
+
+- Parallelism Guidelines:
+  - For parallel sub-agents with different roles, issue multiple Agent tool calls within the same response.
+  - For parallel sub-agents of one type, one prompt template, and distinct items, issue only the AgentSwarm tool call in that response (no other tool calls allowed).
+
+- Environment & Context:
+  - By default, sub-agents inherit the same task-scoped tools and workspace permissions as the parent agent, including terminal access, filesystem read/write operations, Python execution, database interactions, spreadsheet/document generation, calendar/email capabilities, and other tools enabled for the current task. However, if a sub-agent YAML configuration defines customized tool permissions or workspace directory access, the customized configuration overrides the inherited defaults.
   - Every sub-agent prompt must be **self-contained** — sub-agents operate in isolated contexts and cannot see the current user message or your previous reasoning steps.
 
 - When & How to Delegate:
@@ -162,6 +263,18 @@ Sub-Agent Orchestration Rules:
   - Default to **foreground** sub-agents (`run_in_background=false`). Use `run_in_background=true` **only** for long-running work where you can proceed without the result immediately. Do not poll background agents, and do not restate a single background result unless integration requires it.
   - Prefer **resume** when an existing sub-agent already holds relevant context or the current task is a continuation of its prior work.\
 """
+
+# Retired pre-redesign agents: their presence in the active roster switches the
+# whole prompt (orchestration rules + section files) back to the legacy variant.
+RETIRED_SUBAGENTS = ("coder", "explore")
+
+
+def _is_legacy_roster(subagents: list) -> bool:
+    return any(s in RETIRED_SUBAGENTS for s in subagents)
+
+
+def _orchestration_rules(subagents: list) -> str:
+    return ORCHESTRATION_RULES_LEGACY if _is_legacy_roster(subagents) else ORCHESTRATION_RULES
 
 
 def _load_section(filename: str) -> str:
@@ -175,17 +288,31 @@ def _load_section(filename: str) -> str:
 def _active_subagents() -> list:
     """Return the list of sub-agent types to enable for this run.
 
-    Unset → default (coder, explore, plan).
+    Unset → legacy trio (coder/explore/plan) — the default, matching all
+    pre-redesign runs.
+    "ten" / "10" / "all" → new 10-agent roster (plan + 7 specialists +
+    integrator/auditor), pinned explicitly.
+    "three" / "3" → same legacy trio, pinned explicitly.
     Explicit empty string → none (disable all sub-agents).
+    Comma list → exactly those agents (e.g. "plan,evidence-integrator").
     """
     if "KIMI_SUBAGENTS" not in os.environ:
         return list(DEFAULT_SUBAGENTS)
-    return [s.strip() for s in os.environ["KIMI_SUBAGENTS"].split(",") if s.strip()]
+    raw = os.environ["KIMI_SUBAGENTS"]
+    preset = SUBAGENT_PRESETS.get(raw.strip().lower())
+    if preset is not None:
+        return list(preset)
+    return [s.strip() for s in raw.split(",") if s.strip()]
 
 
 def _subagent_types_section(subagents: list) -> str:
     """Load the subagent-types section file, filtered to active sub-agents."""
-    raw = _load_section("subagent_types_default.md")
+    fname = "subagent_types_default.md"
+    if _is_legacy_roster(subagents):
+        legacy = _load_section("subagent_types_legacy.md")
+        if legacy:
+            fname = "subagent_types_legacy.md"
+    raw = _load_section(fname)
     if not raw:
         return ""
     lines = raw.splitlines()
@@ -202,7 +329,9 @@ def _subagent_types_section(subagents: list) -> str:
     return "\n".join(kept)
 
 
-_SUBAGENT_NAMES = DEFAULT_SUBAGENTS  # coder, explore, plan
+# Full roster for example-block filtering: current 10 plus the retired trio's
+# coder/explore so legacy example files filter correctly under KIMI_SUBAGENTS=three.
+_SUBAGENT_NAMES = TEN_SUBAGENTS + RETIRED_SUBAGENTS
 _EXAMPLE_BLOCK_RE = re.compile(r"<example>.*?</example>", re.DOTALL)
 
 
@@ -231,13 +360,19 @@ def _filter_examples_by_subagents(raw: str, subagents: list) -> str:
 
 def _examples_section(subagents: list | None = None) -> str:
     """Load examples; filter <example> blocks to match *subagents* when set."""
-    fname = os.environ.get("KIMI_EXAMPLES_FILE", "examples_default.md")
+    subagents = subagents if subagents is not None else _active_subagents()
+    if "KIMI_EXAMPLES_FILE" in os.environ:
+        fname = os.environ["KIMI_EXAMPLES_FILE"]
+    else:
+        fname = ("examples_legacy.md" if _is_legacy_roster(subagents)
+                 else "examples_default.md")
+        if _is_legacy_roster(subagents) and not _load_section(fname):
+            fname = "examples_default.md"
     raw = _load_section(fname)
     if not raw:
         return ""
     if all(line.lstrip().startswith("#") or not line.strip() for line in raw.splitlines()):
         return ""
-    subagents = subagents if subagents is not None else _active_subagents()
     return _filter_examples_by_subagents(raw, subagents)
 
 
@@ -277,37 +412,93 @@ def _plan_first_section(subagents: list) -> str:
         return ""
     if not subagents or "plan" not in subagents:
         return ""
-    fname = os.environ.get("KIMI_PLAN_FIRST_FILE", "plan_first_default.md")
+    if "KIMI_PLAN_FIRST_FILE" in os.environ:
+        fname = os.environ["KIMI_PLAN_FIRST_FILE"]
+    else:
+        fname = ("plan_first_legacy.md" if _is_legacy_roster(subagents)
+                 else "plan_first_default.md")
+        if _is_legacy_roster(subagents) and not _load_section(fname):
+            fname = "plan_first_default.md"
     return _load_section(fname)
 
 # Read-only tool selection for `explore` / `plan` sub-agents.
 #
-# kimi matches MCP tool entries with picomatch, so `mcp__<server>__read_*`
-# is a real prefix glob (verified in agent-core-v2/.../evaluate.ts). We
-# allowlist by prefix so explore/plan can never see write/create/delete
-# tools even if the model tries to call them — the tools are not in the
-# schema sent to the model, and the executor re-checks before each call.
-READONLY_TOOL_PREFIXES = (
-    "read_", "list_", "search_", "get_", "view_", "query_", "fetch_",
-    "describe_", "info_", "count_", "exists_", "find_", "select_",
-    "inspect_", "show_", "lookup_",
+# kimi matches MCP names with picomatch against the FULL `mcp__<server>__<tool>`
+# string (agent-core-v2/.../evaluate.ts). A prefix-only glob such as
+# `mcp__canvas__get_*` misses real names like `canvas_get_course_grades`,
+# `woo_products_list`, `API-get-user`, `videos_getVideo`, `get-tickets`,
+# `search-arxiv`, `mcp_howtocook_getAllRecipes`.
+#
+# Allow by read-verb *substring* (`*{verb}*`) so those layouts match, then
+# deny `write_*` so snowflake `write_query` is not pulled in by `*query*`.
+# `select` stays prefix-only: `*select*` would match playwright
+# `browser_select_option`.
+READONLY_TOOL_VERBS = (
+    "read", "list", "search", "get", "view", "query", "fetch",
+    "describe", "info", "count", "exists", "find", "inspect",
+    "show", "lookup", "retrieve", "snapshot",
 )
-# Read-only tools whose names don't share a common read prefix.
-READONLY_TOOL_EXACT = {
-    "directory_tree",        # filesystem MCP: read-only tree listing
-    "list_allowed_directories",  # already covered by list_, kept for clarity
-}
+READONLY_TOOL_PREFIX_ONLY_VERBS = ("select",)
+# Names that are read-only but contain none of the verbs above.
+READONLY_TOOL_EXTRA_GLOBS = (
+    "directory_tree",
+    "list_allowed_directories",
+    "*_reports",
+    "*_reports_*",
+    "reports_*",
+    "*_health_check",
+    "*_system_status",
+    "browser_navigate",
+    "browser_navigate_back",
+    "browser_navigate_forward",
+    "browser_console_messages",
+    "browser_network_requests",
+    "browser_take_screenshot",
+    "browser_wait_for",
+    "*recommend*",
+    "*whatToEat",
+)
+# Defense in depth: keep write_query / write_file out even if an allow glob
+# would otherwise match (e.g. `*query*` vs snowflake write_query).
+READONLY_TOOL_DENY_PATTERNS = (
+    "mcp__*__write_*",
+    "mcp__*__*_write_*",
+    "mcp__*__*_write",
+)
 
 
 def build_readonly_tool_patterns(server_names):
-    """Return mcp__<server>__<prefix>* + exact patterns for read-only tools."""
+    """Return picomatch globs that grant read-oriented MCP tools for explore/plan."""
     patterns = []
-    for s in server_names:
-        for p in READONLY_TOOL_PREFIXES:
-            patterns.append(f"mcp__{s}__{p}*")
-        for name in READONLY_TOOL_EXACT:
-            patterns.append(f"mcp__{s}__{name}")
+    seen = set()
+
+    def add(pattern):
+        if pattern not in seen:
+            seen.add(pattern)
+            patterns.append(pattern)
+
+    for server in server_names:
+        for verb in READONLY_TOOL_VERBS:
+            add(f"mcp__{server}__*{verb}*")
+        for verb in READONLY_TOOL_PREFIX_ONLY_VERBS:
+            add(f"mcp__{server}__{verb}_*")
+        for extra in READONLY_TOOL_EXTRA_GLOBS:
+            add(f"mcp__{server}__{extra}")
     return patterns
+
+
+def mcp_tool_granted_to_readonly_agent(name, allow_patterns, deny_patterns=None):
+    """Whether an MCP tool name would be active under explore/plan policy.
+
+    Uses fnmatch, which agrees with kimi's picomatch on these `*` / `mcp__`
+    patterns (no `**`, no `/` in names).
+    """
+    deny_patterns = (
+        deny_patterns if deny_patterns is not None else READONLY_TOOL_DENY_PATTERNS
+    )
+    if not any(fnmatch.fnmatchcase(name, pattern) for pattern in allow_patterns):
+        return False
+    return not any(fnmatch.fnmatchcase(name, pattern) for pattern in deny_patterns)
 
 
 _SUBAGENT_BOUNDARY = (
@@ -342,7 +533,13 @@ def render_subagent_profile(name, tools_list, disallowed=None):
         raise ValueError(f"subagent profile {src} must define description")
     when_to_use = metadata.get("whenToUse")
     body = body.rstrip() + "\n\n" + _SUBAGENT_BOUNDARY + "\n"
-    tools_yaml = "\n".join(f"  - {t}" for t in tools_list)
+    # Fail closed: an empty allowlist must serialize as `tools: []`, never as
+    # a bare `tools:` (YAML null) which some runtimes read as "inherit all".
+    tools_block = (
+        "tools:\n" + "\n".join(f"  - {t}" for t in tools_list)
+        if tools_list
+        else "tools: []"
+    )
     disallowed_yaml = ""
     if disallowed:
         disallowed_yaml = "\ndisallowedTools:\n" + "\n".join(f"  - {t}" for t in disallowed)
@@ -357,13 +554,38 @@ def render_subagent_profile(name, tools_list, disallowed=None):
         f"description: {description}\n"
         f"{when_to_use_yaml}"
         f"override: true\n"
-        "tools:\n"
-        f"{tools_yaml}"
+        f"{tools_block}"
         f"{disallowed_yaml}\n"
         "subagents: []\n"
         "---\n\n"
         f"{body}\n"
     )
+
+
+def profile_tools_for_task(name: str, server_names: list) -> list:
+    """Intersect a specialized profile's declared tool ceiling with the tools
+    actually reachable in the current task (identified by MCP server name).
+
+    Specialized profiles declare exact `mcp__<server>__<tool>` entries (no
+    wildcards). Entries whose server is not part of this task's MCP config are
+    dropped; if nothing remains the caller must render `tools: []` (fail
+    closed) — the agent then simply has no MCP tools instead of inheriting
+    the main agent's set.
+    """
+    src = os.path.join(HARNESS_DIR, "assets", "subagents", f"{name}.md")
+    with open(src, encoding="utf-8") as f:
+        raw = f.read()
+    parts = raw.split("---", 2)
+    if len(parts) != 3:
+        raise ValueError(f"invalid subagent profile frontmatter: {src}")
+    metadata = yaml.safe_load(parts[1]) or {}
+    declared = metadata.get("tools")
+    if not isinstance(declared, list) or not all(isinstance(t, str) for t in declared):
+        raise ValueError(f"invalid tools list for subagent profile: {src}")
+    if any("*" in t for t in declared):
+        raise ValueError(f"wildcard tool is not allowed for specialized profile: {src}")
+    prefixes = tuple(f"mcp__{server}__" for server in server_names)
+    return sorted({t for t in declared if t.startswith(prefixes)})
 
 
 def copy_folder_contents(src: str, dst: str):
@@ -403,7 +625,7 @@ def run_preprocess(task_config, debug: bool) -> bool:
     if not (init and init.process_command):
         return True
     cmd = init.process_command
-    cmd += f" --agent_workspace {task_config.agent_workspace}"
+    cmd += f" --agent_workspace {shlex.quote(str(task_config.agent_workspace))}"
     lt = task_config.launch_time or ""
     lt_clean = " ".join(lt.split()[:2])
     cmd += f" --launch_time \"{lt_clean}\""
@@ -501,7 +723,7 @@ def render_system_prompt(task_config) -> str:
     subagents = _active_subagents()
     sections = [sp.rstrip(), "", _core_responsibilities(subagents, workspace=ws)]
     if subagents:
-        sections += ["", DELEGATION_RULES, "", ORCHESTRATION_RULES]
+        sections += ["", DELEGATION_RULES, "", _orchestration_rules(subagents)]
         types_sec = _subagent_types_section(subagents)
         if types_sec:
             sections += ["", types_sec]
@@ -551,6 +773,33 @@ disallowedTools:
         f.write(content)
 
 
+_SUPPORTED_MODEL_PROVIDER_TYPES = {"openai", "anthropic"}
+
+
+def resolve_model_provider_config():
+    """Return the Kimi provider wire type and a correctly shaped base URL.
+
+    OpenAI-compatible endpoints expect a ``/v1`` base URL. The Anthropic SDK
+    appends ``/v1/messages`` itself, so retaining a user-supplied trailing
+    ``/v1`` would incorrectly produce ``/v1/v1/messages``. The default stays
+    exactly compatible with the historical OpenAI-only harness.
+    """
+    provider_type = os.environ.get("KIMI_PROVIDER_TYPE", "openai").strip().lower()
+    if provider_type not in _SUPPORTED_MODEL_PROVIDER_TYPES:
+        supported = ", ".join(sorted(_SUPPORTED_MODEL_PROVIDER_TYPES))
+        raise ValueError(
+            f"unsupported KIMI_PROVIDER_TYPE={provider_type!r}; expected one of: {supported}"
+        )
+
+    base_url = os.environ["MODEL_API_URL"].rstrip("/")
+    if provider_type == "openai":
+        if not base_url.endswith("/v1"):
+            base_url += "/v1"
+    elif base_url.endswith("/v1"):
+        base_url = base_url[:-3]
+    return provider_type, base_url
+
+
 def write_kimi_home(home: str, task_config, workspace: str, marker: str,
                     max_steps: int, rewrite: dict = None):
     os.makedirs(home, exist_ok=True)
@@ -578,9 +827,13 @@ def write_kimi_home(home: str, task_config, workspace: str, marker: str,
     with open(os.path.join(home, "mcp.json"), "w", encoding="utf-8") as f:
         json.dump({"mcpServers": servers}, f, indent=2, ensure_ascii=False)
 
-    # Sub-agent profiles. coder keeps the full MCP set (minus claim_done);
-    # explore/plan get an explicit read-only allowlist computed from the
-    # task's MCP servers so write/create/delete tools are not even visible.
+    # Sub-agent profiles. Legacy coder (retired, "three" preset only) keeps the
+    # full MCP set (minus claim_done); legacy explore and plan get an explicit
+    # read-only allowlist computed from the task's MCP servers so
+    # write/create/delete tools are not even visible.  Specialist and
+    # cross-cutting profiles (10-agent roster) keep their own declared tool
+    # ceiling intersected with this task's MCP servers — no match renders
+    # `tools: []` (fail closed), never the full MCP set.
     active = _active_subagents()
     server_names = list(servers.keys())
     readonly_patterns = build_readonly_tool_patterns(server_names)
@@ -598,20 +851,52 @@ def write_kimi_home(home: str, task_config, workspace: str, marker: str,
         content = render_subagent_profile(
             name,
             tools_list=readonly_patterns,
-            disallowed=[CLAIM_TOOL, *BUILTIN_DISALLOWED_TOOLS],
+            disallowed=[
+                CLAIM_TOOL,
+                *BUILTIN_DISALLOWED_TOOLS,
+                *READONLY_TOOL_DENY_PATTERNS,
+            ],
+        )
+        with open(os.path.join(home, "agents", f"{name}.md"), "w", encoding="utf-8") as f:
+            f.write(content)
+    for name in PROFILE_SUBAGENTS:
+        if name not in active:
+            continue
+        specialist_tools = profile_tools_for_task(name, server_names)
+        content = render_subagent_profile(
+            name,
+            tools_list=specialist_tools,
+            disallowed=["Agent", "AgentSwarm", CLAIM_TOOL, *BUILTIN_DISALLOWED_TOOLS],
         )
         with open(os.path.join(home, "agents", f"{name}.md"), "w", encoding="utf-8") as f:
             f.write(content)
 
     provider = os.environ.get("KIMI_PROVIDER_NAME", "remote-eval")
     model_alias = os.environ.get("KIMI_MODEL_ALIAS", "eval-model")
-    base_url = os.environ["MODEL_API_URL"].rstrip("/")
-    if not base_url.endswith("/v1"):
-        base_url += "/v1"
+    provider_type, base_url = resolve_model_provider_config()
+    # For Anthropic-native calls, advertise thinking explicitly. This keeps
+    # newer Claude aliases usable even when the installed Kimi capability
+    # catalog has not caught up with their model-name prefix yet.
+    model_capabilities = ""
+    thinking_config = ""
+    requested_effort = ""
+    if provider_type == "anthropic":
+        # Kimi 0.34's static capability catalog predates Sonnet 5. Declare
+        # the native adaptive-thinking contract here so a requested `max`
+        # survives Kimi's model-level effort normalization.
+        model_capabilities = (
+            'capabilities = ["thinking"]\n'
+            'adaptive_thinking = true\n'
+            'support_efforts = ["low", "medium", "high", "xhigh", "max"]\n'
+        )
+        requested_effort = os.environ.get("KIMI_MODEL_THINKING_EFFORT", "").strip()
+        thinking_config = "\n[thinking]\nenabled = true\n"
+        if requested_effort:
+            thinking_config += f'effort = "{requested_effort}"\n'
     config = f"""default_model = "{model_alias}"
 
 [providers."{provider}"]
-type = "openai"
+type = "{provider_type}"
 base_url = "{base_url}"
 api_key = "{os.environ['MODEL_API_KEY']}"
 
@@ -619,6 +904,7 @@ api_key = "{os.environ['MODEL_API_KEY']}"
 provider = "{provider}"
 model = "{os.environ['MODEL_NAME']}"
 max_context_size = {int(os.environ.get('KIMI_MAX_CONTEXT', '262144'))}
+{model_capabilities}{thinking_config}
 
 [loop_control]
 max_steps_per_turn = {max_steps}
@@ -628,6 +914,13 @@ startup_timeout_ms = {int(float(os.environ.get('MCP_STDIO_TIMEOUT_MIN', '90')) *
 """
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as f:
         f.write(config)
+    if provider_type == "anthropic" and requested_effort == "max":
+        # Kimi 0.34 treats persisted max as a legacy UI value and migrates it
+        # to high before its first request. Each Toolathlon task owns a fresh
+        # KIMI_CODE_HOME, so mark that one-shot migration complete to retain
+        # this explicitly requested, session-scoped max effort.
+        with open(os.path.join(home, "migrations-effort.json"), "w", encoding="utf-8") as f:
+            json.dump({"thinking-effort-max-to-high": "harness-requested"}, f)
 
 
 def _check_mcp_servers_health(mcp_json_path: str) -> list:
@@ -1317,10 +1610,14 @@ async def amain():
         "max_steps_under_single_turn_mode", 100)
 
     model_name = os.environ.get("MODEL_NAME", "unknown-model")
+    # Dump/workspace paths are interpolated into shell preprocess commands.
+    # MODEL_NAME may contain a thinking suffix such as gpt-5.6-sol(xhigh);
+    # keep that string for config.toml, but strip shell-special chars here.
+    dump_model = re.sub(r"[^\w.+-]+", "-", model_name).strip("-") or "unknown-model"
 
     task_config = TaskConfig.build(
         args.task_dir,
-        agent_short_name=f"kimi-code/{model_name}",
+        agent_short_name=f"kimi-code/{dump_model}",
         global_task_config={"dump_path": dump_path,
                             "max_steps_under_single_turn_mode": max_steps},
         single_turn_mode=True,

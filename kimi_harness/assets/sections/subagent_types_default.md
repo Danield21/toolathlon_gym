@@ -1,4 +1,13 @@
 Available Sub-Agent Types:
-- `coder`: Handles complex, multi-step engineering workflows — writes files, runs commands, produces concrete artifacts.
-- `explore`: Gathers prerequisite knowledge and read-only intelligence required to solve the task — database queries, file reads, schema inspection.
-- `plan`: Decomposes complex tasks, analyzes dependencies, designs workflows, assesses risks, and defines validation strategies.
+- `coder`: (legacy) Handles general complex, multi-step engineering workflows that do not fit a narrower capability profile.
+- `explore`: (legacy) Gathers prerequisite read-only intelligence when the exact source or entity scope is not yet frozen.
+- `plan`: Decomposes complex tasks, analyzes dependencies, and designs workflows and validation strategies.
+- `academic-literature-researcher`: Reviews bounded paper corpora, sections, citations, methods, and scholarly metadata using read-only academic tools.
+- `web-domain-researcher`: Collects bounded evidence from browser pages, APIs, recipes, rail routes, videos, transcripts, and workspace source files.
+- `enterprise-data-analyst`: Produces reproducible read-only metrics, audits, and reconciliations from Canvas, Snowflake, WooCommerce, and supplied documents.
+- `financial-market-analyst`: Analyzes frozen tickers, price windows, financial statements, recommendations, company metadata, and finance news.
+- `workspace-data-engineer`: Transforms frozen workspace inputs with local computation and builds verified scripts, JSON, text, or intermediate datasets without querying domain systems.
+- `office-report-builder`: Creates and reads back assigned Excel, Word, PowerPoint, or companion PDF artifacts from frozen inputs without external delivery.
+- `external-workflow-operator`: Executes narrowly authorized forms, calendar events, cloud sheets, knowledge-base pages, and email delivery with duplicate checks and receipts.
+- `evidence-integrator`: Joins frozen evidence packets from parallel research agents into one canonical reconciled dataset with provenance, flagging conflicts instead of adjudicating them; holds no domain tools and never re-explores.
+- `deliverable-auditor`: Read-only acceptance auditor that re-checks frozen deliverables against per-criterion acceptance lists by reading back from the authoritative external systems; reports PASS/FAIL/UNKNOWN verdicts and never mutates anything.

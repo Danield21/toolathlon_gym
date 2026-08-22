@@ -1,0 +1,14 @@
+academic-presentation-builder
+arxiv-latex-reasoning-gsheet
+arxiv-research-report
+canvas-course-notion-wiki
+canvas-enrollment-overview-gsheet-ppt
+canvas-enrollment-ppt-gsheet
+fetch-yf-macro-portfolio-excel-gcal-email
+sf-sales-product-ranking-ppt
+sf-sales-region-forecast-gcal-excel
+support-sla-audit-form
+wc-inventory-gold-repricing
+yf-dividend-tracker-gcal
+yf-stock-volatility-terminal
+yt-fireship-ppt-gcal-email

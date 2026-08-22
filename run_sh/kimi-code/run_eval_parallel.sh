@@ -38,7 +38,7 @@ source "$CONFIG_ENV"
 echo "[runner] after source: MODEL_NAME=${MODEL_NAME:-<unset>}"
 
 export MODEL_NAME MODEL_API_KEY MODEL_API_URL
-export KIMI_MAX_CONTEXT KIMI_TASK_TIMEOUT_S KIMI_PROVIDER_NAME KIMI_MODEL_ALIAS
+export KIMI_MAX_CONTEXT KIMI_TASK_TIMEOUT_S KIMI_PROVIDER_NAME KIMI_PROVIDER_TYPE KIMI_MODEL_ALIAS
 export no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1,192.168.180.240,104.168.43.47"
 export NO_PROXY="$no_proxy"
 
@@ -47,9 +47,12 @@ MAX_STEPS="${ENV_MAX_STEPS:-${MAX_STEPS:-100}}"
 # RAM / 4.7 TB NFS, so the real ceiling is NFS bandwidth during rootfs copies
 # and the remote API rate limit, not local CPU/RAM.
 MAX_CONCURRENT="${ENV_MAX_CONCURRENT:-${MAX_CONCURRENT:-6}}"
-if (( MAX_CONCURRENT > 8 )); then
-  echo "[warn] MAX_CONCURRENT=$MAX_CONCURRENT is very high (NFS/API pressure); capping at 8." >&2
-  MAX_CONCURRENT=8
+# Default cap stays 8. Set MAX_CONCURRENT_CAP when a launcher intentionally
+# runs hotter (e.g. official-API plan-first allowfix rerun at 20).
+MAX_CONCURRENT_CAP="${MAX_CONCURRENT_CAP:-8}"
+if (( MAX_CONCURRENT > MAX_CONCURRENT_CAP )); then
+  echo "[warn] MAX_CONCURRENT=$MAX_CONCURRENT is very high (NFS/API pressure); capping at ${MAX_CONCURRENT_CAP}." >&2
+  MAX_CONCURRENT="$MAX_CONCURRENT_CAP"
 fi
 
 DUMP_ROOT="${ENV_DUMP_ROOT:-${DUMP_ROOT:-$PROJECT_ROOT/dumps/kimi-code}}"
@@ -817,12 +820,16 @@ SQL
     if [[ -v KIMI_SUBAGENTS ]]; then
       ENV_ARGS+=(-e "KIMI_SUBAGENTS=${KIMI_SUBAGENTS}")
     fi
+    # Always pass the wire choice into the container. In particular, a missing
+    # value must become the explicit compatible default rather than silently
+    # falling back after the host-side config has been sourced.
+    ENV_ARGS+=(-e "KIMI_PROVIDER_TYPE=${KIMI_PROVIDER_TYPE:-openai}")
     [[ -n "${KIMI_EXAMPLES_FILE:-}" ]] && ENV_ARGS+=(-e "KIMI_EXAMPLES_FILE=${KIMI_EXAMPLES_FILE}")
     [[ -n "${KIMI_COORDINATION_FILE:-}" ]] && ENV_ARGS+=(-e "KIMI_COORDINATION_FILE=${KIMI_COORDINATION_FILE}")
     [[ -n "${MODEL_N:-}" ]] && ENV_ARGS+=(-e "MODEL_N=${MODEL_N}")
-    # Optional reasoning-effort override (e.g. high) → request-body
-    # reasoning_effort for vLLM-style backends (deepseek-v4-flash-wl).
-    [[ -n "${KIMI_MODEL_THINKING_EFFORT:-}" ]] && ENV_ARGS+=(-e "KIMI_MODEL_THINKING_EFFORT=${KIMI_MODEL_THINKING_EFFORT}")
+    # Keep an explicit value (including the empty default) inside every task
+    # container. Native Anthropic mode consumes this as the configured effort.
+    ENV_ARGS+=(-e "KIMI_MODEL_THINKING_EFFORT=${KIMI_MODEL_THINKING_EFFORT:-}")
     # Plan-first arm switch: injects the plan-first mandate section into the
     # main agent prompt (kimi_main.py reads it; needs plan sub-agent active).
     [[ -n "${KIMI_PLAN_FIRST:-}" ]] && ENV_ARGS+=(-e "KIMI_PLAN_FIRST=${KIMI_PLAN_FIRST}")
@@ -922,7 +929,7 @@ fi
 export PROJECT_ROOT RUNTIME_ROOT DUMP_ROOT PARALLEL_ROOT PG_PORT_BASE PG_RUNTIME_ROOT PG_TEST_ONLY INIT_SQL
 export AGENT_TEMPLATE AGENT_SQSH ENROOT_DATA_PATH RUN_ID SUMMARY SUMMARY_LOCK KIMI_DIST
 export MODEL_NAME MODEL_API_KEY MODEL_API_URL MAX_STEPS
-export KIMI_MAX_CONTEXT KIMI_TASK_TIMEOUT_S
+export KIMI_MAX_CONTEXT KIMI_TASK_TIMEOUT_S KIMI_PROVIDER_TYPE
 export PGUSER PGPASSWORD PGDATABASE no_proxy NO_PROXY
 
 need_bins
@@ -934,6 +941,7 @@ need_bins
 log "=============================================="
 log "  Parallel safe eval — kimi-code @ Toolathlon-GYM"
 log "  Model:         $MODEL_NAME @ $MODEL_API_URL"
+log "  Provider:      ${KIMI_PROVIDER_TYPE:-openai}; thinking=${KIMI_MODEL_THINKING_EFFORT:-model-default}"
 log "  Context:       max_context=${KIMI_MAX_CONTEXT:-262144} task_timeout=${KIMI_TASK_TIMEOUT_S:-7200}s"
 log "  Tasks:         ${#TASKS[@]}"
 log "  Max concurrent:$MAX_CONCURRENT  (gnho019 recommend 6, soft-cap 8)"
@@ -943,8 +951,11 @@ log "  PG runtime:    $PG_RUNTIME_ROOT (unique data + socket per task)"
 [[ "$PG_TEST_ONLY" == 1 ]] && log "  Mode:          PostgreSQL isolation test only"
 log "=============================================="
 
-# API check
-if command -v curl >/dev/null 2>&1; then
+# API check. Anthropic's native Messages API has no OpenAI-style /v1/models
+# endpoint, so probing it would produce a misleading compatibility error.
+if [[ "${KIMI_PROVIDER_TYPE:-openai}" == "anthropic" ]]; then
+  log "API preflight: skipped OpenAI /v1/models probe (native Anthropic provider)"
+elif command -v curl >/dev/null 2>&1; then
   code="$(curl -sS --connect-timeout 8 -o /dev/null -w '%{http_code}' \
     -H "Authorization: Bearer ${MODEL_API_KEY}" \
     "${MODEL_API_URL%/}/v1/models" || true)"
@@ -1011,10 +1022,13 @@ for TASK in "${TASKS[@]}"; do
   # port the task needs is free. Tasks sharing a port (30216 collision,
   # case-study 2026-08-14) serialize instead of dying with preprocess_failed.
   _mock_wait=0
+  # Default 180*20s = 1h. Raise via MOCK_PORT_WAIT_LOOPS when two evals share a
+  # node and may contend on the same hardcoded 30xxx mock HTTP port.
+  _mock_wait_max="${MOCK_PORT_WAIT_LOOPS:-180}"
   until acquire_mock_ports "$TASK"; do
     sleep 20
     _mock_wait=$((_mock_wait + 1))
-    if (( _mock_wait > 180 )); then  # 1h cap so a dead lock cannot wedge a slot
+    if (( _mock_wait > _mock_wait_max )); then  # cap so a dead lock cannot wedge a slot
       log "[mockport] $TASK gave up waiting for mock port; proceeding unlocked"
       break
     fi

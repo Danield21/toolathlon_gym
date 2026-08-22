@@ -1,0 +1,13 @@
+academic-presentation-builder
+canvas-enrollment-overview-gsheet-ppt
+arxiv-research-report
+arxiv-research-tracker-notion
+canvas-assignment-feedback-gform-word
+canvas-scholarly-curriculum-review
+ecommerce-commodity-impact
+ecommerce-market-benchmark
+howtocook-ecommerce-bundle
+playwright-sf-hr-benefits-survey-gform-excel
+ppt-snowflake-executive
+sf-hr-dept-budget-ppt-email
+yt-fireship-gform-survey-excel-gcal

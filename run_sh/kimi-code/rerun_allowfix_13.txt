@@ -1,0 +1,13 @@
+wc-inventory-alert-gcal
+yf-financial-health-excel-notion
+wc-product-review-analysis-gform-gcal
+arxiv-research-report
+arxiv-research-tracker-notion
+canvas-enrollment-ppt-gsheet
+canvas-scholarly-curriculum-review
+ecommerce-commodity-impact
+ecommerce-market-benchmark
+ppt-snowflake-executive
+sf-sales-product-ranking-ppt
+wc-category-performance-ppt
+yf-portfolio-risk-excel

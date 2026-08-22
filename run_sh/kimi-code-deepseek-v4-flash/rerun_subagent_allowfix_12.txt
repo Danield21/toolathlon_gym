@@ -1,0 +1,12 @@
+terminal-sf-wc-yf-excel-ppt
+12306-wc-amazon-product-roadshow-excel-notion
+arxiv-latex-analysis-notion-word
+canvas-course-comparison
+canvas-curriculum-audit
+canvas-enrollment-notion
+canvas-enrollment-overview
+canvas-scholarly-curriculum-review
+canvas-ta-workload-excel-email
+howtocook-weekly-gsheet-gcal
+scholarly-arxiv-cross-reference
+terminal-sf-wc-order-audit-excel-word
