@@ -93,7 +93,8 @@ To solve this task efficiently, if required.csv is missing, stop before delegati
         score = score_task(parsed, actual)
         self.assertEqual(score["planned_wave_total"], 0)
         self.assertEqual(score["ineligible_wave_total"], 1)
-        self.assertIsNone(score["planned_wave_recall"])
+        self.assertIsNone(score["coarse_wave_recall"])
+        self.assertIsNone(score["fine_wave_recall"])
 
     def test_only_explicit_transition_creates_wave_dependency(self) -> None:
         prompt = """Task.
@@ -209,7 +210,7 @@ After Wave 1, aggregate directly.
 
         actual_nodes = [
             make_node_ir(
-                f"Collect and compute stats for one Canvas course_id={course_id} with the same literal recipe.",
+                f"Canvas course owner reads and computes stats while processing course_id={course_id} with the same literal recipe.",
                 node_id=f"a{course_id}",
                 declared_type="coder",
             )
@@ -219,7 +220,8 @@ After Wave 1, aggregate directly.
             "fresh_waves": 1, "fresh_nodes": 7, "accepted_resumes": 0, "linked_resumes": 0,
             "orphan_resumes": 0, "rejected_calls": 0, "repair_fresh_waves": 0, "repair_fresh_nodes": 0}}
         score = score_task(parsed, actual_ir)
-        self.assertEqual(score["fine"]["planned_hit"], 7)
+        self.assertEqual(score["coarse_wave_hit"], 1)
+        self.assertEqual(score["fine_wave_hit"], 1)
 
     def test_main_agent_tail_is_not_attached_to_wave_nodes(self) -> None:
         prompt = """Task.
@@ -555,9 +557,21 @@ class MatchingTests(unittest.TestCase):
     def test_fanout_mismatch_is_not_contract_hit(self) -> None:
         planned_node = make_node_ir("Explore reads Canvas one per course", node_id="p", declared_type="explore", multiplicity=22)
         actual_nodes = [make_node_ir(f"Explore reads Canvas course_id={index}", node_id=f"a{index}", declared_type="explore") for index in range(1, 22)]
-        aligned = ordered_wave_alignment([wave("wave_1", [planned_node], 22)], [wave("fresh_wave_1", actual_nodes, 21)])
+        planned_wave = wave("wave_1", [planned_node], 22)
+        actual_wave = wave("fresh_wave_1", actual_nodes, 21)
+        aligned = ordered_wave_alignment([planned_wave], [actual_wave])
         self.assertEqual(len(aligned["pairs"]), 1)
         self.assertFalse(aligned["pairs"][0]["contract_hit"])
+        actual_ir = {"fresh_waves": [actual_wave], "counts": {
+            "fresh_waves": 1, "fresh_nodes": 21, "accepted_resumes": 0, "linked_resumes": 0,
+            "orphan_resumes": 0, "rejected_calls": 0, "repair_fresh_waves": 0, "repair_fresh_nodes": 0}}
+        score = score_task({"task": "nested-rates", "waves": [planned_wave]}, actual_ir)
+        self.assertEqual(score["coarse_wave_recall"], 1.0)
+        self.assertEqual(score["coarse_wave_precision"], 1.0)
+        self.assertEqual(score["fine_wave_recall"], 0.0)
+        self.assertEqual(score["fine_wave_precision"], 0.0)
+        self.assertLessEqual(score["fine_wave_recall"], score["coarse_wave_recall"])
+        self.assertLessEqual(score["fine_wave_precision"], score["coarse_wave_precision"])
 
     def test_extra_fresh_wave_lowers_precision(self) -> None:
         planned_wave = wave("wave_1", [make_node_ir("Coder creates Report.xlsx", node_id="p", declared_type="coder")], 1)
@@ -568,8 +582,10 @@ class MatchingTests(unittest.TestCase):
             "fresh_waves": 2, "fresh_nodes": 2, "accepted_resumes": 0, "linked_resumes": 0,
             "orphan_resumes": 0, "rejected_calls": 0, "repair_fresh_waves": 0, "repair_fresh_nodes": 0}}
         score = score_task(planned_ir, actual_ir)
-        self.assertEqual(score["planned_wave_recall"], 1.0)
-        self.assertEqual(score["fresh_wave_precision"], 0.5)
+        self.assertEqual(score["coarse_wave_recall"], 1.0)
+        self.assertEqual(score["coarse_wave_precision"], 0.5)
+        self.assertEqual(score["fine_wave_recall"], 1.0)
+        self.assertEqual(score["fine_wave_precision"], 0.5)
 
     def test_contract_hit_wins_alignment_tie_before_extra_wave(self) -> None:
         planned = wave(
@@ -643,8 +659,9 @@ class MatchingTests(unittest.TestCase):
             }}}
             apply_verified_overrides(planned_ir, overrides, raw)
         score = score_task(planned_ir, actual_ir)
-        self.assertEqual(score["fine"]["planned_total"], 22)
-        self.assertEqual(score["fine"]["planned_hit"], 21)
+        self.assertEqual(planned_ir["waves"][0]["node_instances"], 22)
+        self.assertEqual(score["coarse_wave_recall"], 1.0)
+        self.assertEqual(score["fine_wave_recall"], 0.0)
         proof = planned_ir["waves"][0]["fanout"]["derivation_proof"]
         self.assertEqual(proof["tool_result_lines"], [2])
         self.assertEqual(proof["first_delegation_line"], 3)
@@ -734,8 +751,8 @@ class MatchingTests(unittest.TestCase):
             "fresh_waves": 2, "fresh_nodes": 3, "accepted_resumes": 0, "linked_resumes": 0,
             "orphan_resumes": 0, "rejected_calls": 0, "repair_fresh_waves": 0, "repair_fresh_nodes": 0}}
         score = score_task({"task": "split", "waves": [planned_wave]}, actual_ir)
-        self.assertEqual(score["fine"]["planned_total"], 3)
-        self.assertLess(score["fine"]["planned_hit"], 3)
+        self.assertEqual(score["coarse_wave_recall"], 1.0)
+        self.assertEqual(score["fine_wave_recall"], 0.0)
 
     def test_unplanned_write_and_missing_compute_do_not_hit(self) -> None:
         planned_read = wave("wave_1", [make_node_ir("Explore reads Canvas", node_id="p1", declared_type="explore")], 1)
@@ -753,6 +770,80 @@ class MatchingTests(unittest.TestCase):
         pair = ordered_wave_alignment([planned], [actual])["pairs"][0]
         self.assertFalse(pair["write_role_adherent"])
         self.assertFalse(pair["contract_hit"])
+
+    def test_missing_explicit_object_can_only_coarse_hit(self) -> None:
+        planned = wave(
+            "wave_1",
+            [make_node_ir("Explore reads Canvas course_id=123 as one course owner", node_id="p", declared_type="explore")],
+            1,
+        )
+        actual = wave(
+            "fresh_wave_1",
+            [make_node_ir("Explore reads Canvas generically", node_id="a", declared_type="explore")],
+            1,
+        )
+        actual_ir = {"fresh_waves": [actual], "counts": {
+            "fresh_waves": 1, "fresh_nodes": 1, "accepted_resumes": 0, "linked_resumes": 0,
+            "orphan_resumes": 0, "rejected_calls": 0, "repair_fresh_waves": 0, "repair_fresh_nodes": 0}}
+        score = score_task({"task": "object-strictness", "waves": [planned]}, actual_ir)
+        self.assertEqual(score["coarse_wave_hit"], 1)
+        self.assertEqual(score["fine_wave_hit"], 0)
+
+    def test_swarm_item_alias_satisfies_explicit_course_object(self) -> None:
+        planned = wave(
+            "wave_1",
+            [make_node_ir(
+                "Explore reads Canvas course_id=1 course_code=AAA-2013J as one course owner",
+                node_id="p",
+                declared_type="explore",
+            )],
+            1,
+        )
+        actual = wave(
+            "fresh_wave_1",
+            [make_node_ir(
+                "Explore reads Canvas as one course owner",
+                node_id="a",
+                declared_type="explore",
+                item="1|AAA-2013J",
+            )],
+            1,
+        )
+        actual_ir = {"fresh_waves": [actual], "counts": {
+            "fresh_waves": 1, "fresh_nodes": 1, "accepted_resumes": 0, "linked_resumes": 0,
+            "orphan_resumes": 0, "rejected_calls": 0, "repair_fresh_waves": 0, "repair_fresh_nodes": 0}}
+        score = score_task({"task": "object-alias", "waves": [planned]}, actual_ir)
+        self.assertEqual(score["fine_wave_hit"], 1)
+
+    def test_reliable_target_mismatch_can_only_coarse_hit(self) -> None:
+        planned = wave(
+            "wave_1",
+            [make_node_ir("Coder creates Report.xlsx", node_id="p", declared_type="coder")],
+            1,
+        )
+        actual = wave(
+            "fresh_wave_1",
+            [make_node_ir("Coder creates Other.xlsx", node_id="a", declared_type="coder")],
+            1,
+        )
+        actual_ir = {"fresh_waves": [actual], "counts": {
+            "fresh_waves": 1, "fresh_nodes": 1, "accepted_resumes": 0, "linked_resumes": 0,
+            "orphan_resumes": 0, "rejected_calls": 0, "repair_fresh_waves": 0, "repair_fresh_nodes": 0}}
+        score = score_task({"task": "target-strictness", "waves": [planned]}, actual_ir)
+        self.assertEqual(score["coarse_wave_hit"], 1)
+        self.assertEqual(score["fine_wave_hit"], 0)
+
+    def test_punctuation_led_target_parse_artifact_is_not_strict(self) -> None:
+        planned_node = make_node_ir("Coder computes a workbook summary", node_id="p", declared_type="coder")
+        planned_node["targets"] = ["; use exact headers"]
+        actual_node = make_node_ir("Coder computes a workbook summary", node_id="a", declared_type="coder")
+        planned = wave("wave_1", [planned_node], 1)
+        actual = wave("fresh_wave_1", [actual_node], 1)
+        actual_ir = {"fresh_waves": [actual], "counts": {
+            "fresh_waves": 1, "fresh_nodes": 1, "accepted_resumes": 0, "linked_resumes": 0,
+            "orphan_resumes": 0, "rejected_calls": 0, "repair_fresh_waves": 0, "repair_fresh_nodes": 0}}
+        score = score_task({"task": "target-artifact", "waves": [planned]}, actual_ir)
+        self.assertEqual(score["fine_wave_hit"], 1)
 
     def test_invalid_override_types_and_unknown_tasks_fail_closed(self) -> None:
         invalid = {"tasks": {"known": {

@@ -8,7 +8,7 @@ fixed location, counts, modes, and checksums in version control.
 ## Layout
 
 - `scripts/caidian_v2.py`: extraction, unified IR, ordered wave alignment, and
-  one-to-one node scoring.
+  nested coarse/fine Wave scoring with strict one-to-one node evidence.
 - `scripts/gen_caidian_v2.py`: 167-task CLI and report writer.
 - `config/eligibility_overrides_gt167_20260830.json`: exact-trajectory-hash-bound
   conditional-wave and runtime-manifest denominator decisions.

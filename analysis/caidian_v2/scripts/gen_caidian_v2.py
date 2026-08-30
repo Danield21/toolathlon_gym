@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate caidian v2 evidence, metrics, CSV, and Markdown reports."""
+"""Generate nested coarse/fine caidian evidence, CSV, and Markdown reports."""
 
 from __future__ import annotations
 
@@ -80,17 +80,13 @@ def write_task_csv(path: Path, records: list[dict[str, Any]]) -> None:
         "prompt_matches_reference",
         "planned_waves_eligible",
         "planned_waves_ineligible",
-        "planned_wave_hits",
-        "planned_wave_recall",
         "fresh_waves",
-        "fresh_wave_hits",
-        "fresh_wave_precision",
-        "fine_planned_nodes",
-        "fine_planned_hits",
-        "fine_node_recall",
-        "fine_actual_nodes",
-        "fine_actual_hits",
-        "fine_node_precision",
+        "coarse_wave_hits",
+        "coarse_wave_recall",
+        "coarse_wave_precision",
+        "fine_wave_hits",
+        "fine_wave_recall",
+        "fine_wave_precision",
         "accepted_resumes",
         "orphan_resumes",
         "rejected_calls",
@@ -117,7 +113,6 @@ def write_task_csv(path: Path, records: list[dict[str, Any]]) -> None:
                 )
                 continue
             score = record["score"]
-            fine = score["fine"]
             overhead = score["overhead"]
             writer.writerow(
                 {
@@ -130,17 +125,13 @@ def write_task_csv(path: Path, records: list[dict[str, Any]]) -> None:
                     "prompt_matches_reference": record["prompt"]["matches_reference"],
                     "planned_waves_eligible": score["planned_wave_total"],
                     "planned_waves_ineligible": score["ineligible_wave_total"],
-                    "planned_wave_hits": score["planned_wave_hit"],
-                    "planned_wave_recall": percent(score["planned_wave_recall"]),
                     "fresh_waves": score["fresh_wave_total"],
-                    "fresh_wave_hits": score["fresh_wave_hit"],
-                    "fresh_wave_precision": percent(score["fresh_wave_precision"]),
-                    "fine_planned_nodes": fine["planned_total"],
-                    "fine_planned_hits": fine["planned_hit"],
-                    "fine_node_recall": percent(fine["recall"]),
-                    "fine_actual_nodes": fine["actual_total"],
-                    "fine_actual_hits": fine["actual_hit"],
-                    "fine_node_precision": percent(fine["precision"]),
+                    "coarse_wave_hits": score["coarse_wave_hit"],
+                    "coarse_wave_recall": percent(score["coarse_wave_recall"]),
+                    "coarse_wave_precision": percent(score["coarse_wave_precision"]),
+                    "fine_wave_hits": score["fine_wave_hit"],
+                    "fine_wave_recall": percent(score["fine_wave_recall"]),
+                    "fine_wave_precision": percent(score["fine_wave_precision"]),
                     "accepted_resumes": overhead["accepted_resumes"],
                     "orphan_resumes": overhead["orphan_resumes"],
                     "rejected_calls": overhead["rejected_calls"],
@@ -203,14 +194,16 @@ def render_report(
         f"> 轨迹根: `{args.dump}`",
         "> 新版不覆盖 legacy 产物；实际 prompt 优先取 `traj_log.json:config.task_str`，否则取 `run.log` 启动参数。",
         "",
-        "## 1. 四组分离指标（P4）",
+        "## 1. 两类嵌套踩点率（P4）",
         "",
         "| 指标 | 命中 / 分母 | 值 |",
         "|---|---:|---:|",
-        f"| Planned Wave Recall | {summary['planned_wave_hit']} / {summary['planned_wave_total']} | {percent(summary['planned_wave_recall'])} |",
-        f"| Fresh Wave Precision | {summary['fresh_wave_hit']} / {summary['fresh_wave_total']} | {percent(summary['fresh_wave_precision'])} |",
-        f"| Fine-grained Node Recall | {summary['fine_planned_hit']} / {summary['fine_planned_total']} | {percent(summary['fine_node_recall'])} |",
-        f"| Fine-grained Node Precision | {summary['fine_actual_hit']} / {summary['fine_actual_total']} | {percent(summary['fine_node_precision'])} |",
+        f"| 粗踩点率 Recall | {summary['coarse_wave_hit']} / {summary['planned_wave_total']} | {percent(summary['coarse_wave_recall'])} |",
+        f"| 粗踩点率 Precision | {summary['coarse_wave_hit']} / {summary['fresh_wave_total']} | {percent(summary['coarse_wave_precision'])} |",
+        f"| 细踩点率 Recall | {summary['fine_wave_hit']} / {summary['planned_wave_total']} | {percent(summary['fine_wave_recall'])} |",
+        f"| 细踩点率 Precision | {summary['fine_wave_hit']} / {summary['fresh_wave_total']} | {percent(summary['fine_wave_precision'])} |",
+        "",
+        "粗判是保序 Wave 语义兼容；细判必须先粗命中，再满足依赖、fan-out、action、write role 和 Wave 内节点 1:1 严格 contract。细命中是粗命中的子集。",
         "",
         f"- 清单任务: **{summary['tasks']}**；可评分轨迹: **{summary['tasks_scored']}**；损坏/截断且未进入任何分子分母: **{summary['tasks_invalid_trajectory']}**。",
         "",
@@ -243,7 +236,7 @@ def render_report(
         "",
         "## 3. 新旧口径边界",
         "",
-        "v2 粗判是有序 wave 对齐，同时校验 action set 和 fan-out 区间；v2 细判仅在已对齐 wave 内做 1:1 节点匹配，同域的 22 个 Canvas owner 仍是 22 个点。",
+        "v2 粗判是保序的 semantic-compatible Wave 对齐；v2 细判是同一对齐上的 strict contract，必须完整覆盖每个计划节点并满足精确依赖和 fan-out。节点部分覆盖不再作为正式踩点率。",
         "",
     ]
     if legacy:
@@ -261,32 +254,32 @@ def render_report(
     lines += [
         "## 4. 需人工优先复核的执行偏差与额外事件",
         "",
-        "| task | Wave R | Wave P | Node R | Node P | resume | reject | repair wave | prompt |",
+        "| task | 粗 R | 粗 P | 细 R | 细 P | resume | reject | repair wave | prompt |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     priority = sorted(
         [record for record in records if record.get("score") is not None],
         key=lambda record: (
-            record["score"]["planned_wave_recall"] if record["score"]["planned_wave_recall"] is not None else 1.0,
-            record["score"]["fine"]["recall"] if record["score"]["fine"]["recall"] is not None else 1.0,
+            record["score"]["fine_wave_recall"] if record["score"]["fine_wave_recall"] is not None else 1.0,
+            record["score"]["coarse_wave_recall"] if record["score"]["coarse_wave_recall"] is not None else 1.0,
             record["task"],
         ),
     )
     for record in priority:
-        score, fine, overhead = record["score"], record["score"]["fine"], record["score"]["overhead"]
+        score, overhead = record["score"], record["score"]["overhead"]
         if (
-            (score["planned_wave_recall"] in {None, 1.0})
-            and (score["fresh_wave_precision"] in {None, 1.0})
-            and (fine["recall"] in {None, 1.0})
-            and (fine["precision"] in {None, 1.0})
+            (score["coarse_wave_recall"] in {None, 1.0})
+            and (score["coarse_wave_precision"] in {None, 1.0})
+            and (score["fine_wave_recall"] in {None, 1.0})
+            and (score["fine_wave_precision"] in {None, 1.0})
             and not overhead["accepted_resumes"]
             and not overhead["rejected_calls"]
             and not overhead["repair_fresh_waves"]
         ):
             continue
         lines.append(
-            f"| {record['task']} | {percent(score['planned_wave_recall'])} | {percent(score['fresh_wave_precision'])} | "
-            f"{percent(fine['recall'])} | {percent(fine['precision'])} | {overhead['accepted_resumes']} | "
+            f"| {record['task']} | {percent(score['coarse_wave_recall'])} | {percent(score['coarse_wave_precision'])} | "
+            f"{percent(score['fine_wave_recall'])} | {percent(score['fine_wave_precision'])} | {overhead['accepted_resumes']} | "
             f"{overhead['rejected_calls']} | {overhead['repair_fresh_waves']} | {record['prompt']['provenance']} |"
         )
     lines += [
@@ -307,7 +300,7 @@ def render_report(
         "## 5. 可复现性",
         "",
         "- `caidian_v2_detail.json`：统一 IR、请求/结果接受证据、有序 wave 对齐、1:1 节点匹配、条件分母。",
-        "- `caidian_v2_tasks.csv`：每题四组指标与 resume/repair/reject 数量。",
+        "- `caidian_v2_tasks.csv`：每题粗/细踩点率与 resume/repair/reject 数量。",
         "- `caidian_v2_source_manifest.tsv`：精确来源与哈希，不使用 mtime 选 slot。",
         "- `caidian_v2_summary.json`：机器可读汇总。",
         "",

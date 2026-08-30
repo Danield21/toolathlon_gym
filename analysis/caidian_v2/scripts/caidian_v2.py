@@ -3,7 +3,7 @@
 
 The legacy scorer is intentionally left untouched.  This module fixes the
 measurement contract at the extraction layer and exposes a unified IR used by
-both the coarse (wave) and fine (node) metrics.
+nested coarse and fine Wave metrics.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
 
-VERSION = "2.2.5"
+VERSION = "2.3.0"
 MIN_RAW_STREAM_BYTES = 1000
 
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -88,7 +88,7 @@ WORD_NUMBERS = {
     "twenty-one": 21,
     "twenty-two": 22,
     "thirty-one": 31,
-}
+    }
 
 DOMAIN_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     ("canvas", ("canvas", "course_id", "course code", "enrollment", "syllabus")),
@@ -1922,14 +1922,50 @@ def node_contract_adherent(
     actual: dict[str, Any],
     evidence: dict[str, Any],
 ) -> bool:
-    """Require all planned actions and every explicit final-write role."""
+    """Require reliable explicit constraints after semantic compatibility."""
     if evidence.get("veto"):
         return False
     if not set(planned.get("actions", [])) <= set(actual.get("actions", [])):
         return False
+    planned_type = planned.get("agent_type")
+    if planned_type not in {None, "", "unspecified"} and actual.get("agent_type") != planned_type:
+        return False
+    if not set(planned.get("domains", [])) <= set(actual.get("domains", [])):
+        return False
     planned_roles = {role for role in planned.get("write_roles", []) if role != "other-write"}
     actual_roles = {role for role in actual.get("write_roles", []) if role != "other-write"}
     if planned_roles and not planned_roles <= actual_roles:
+        return False
+    reliable_targets = {
+        str(value).strip()
+        for value in planned.get("targets", [])
+        if str(value).strip()
+        and (str(value).strip()[0].isalnum() or str(value).strip()[0] == "_")
+    }
+    if not reliable_targets <= {str(value).strip() for value in actual.get("targets", [])}:
+        return False
+    planned_shard = planned.get("shard_key")
+    if planned_shard and actual.get("shard_key") != planned_shard:
+        return False
+    required_objects = {
+        str(value)
+        for value in planned.get("object_ids", [])
+        if not str(value).startswith(("ordinal:", "position:", "rows:", "item:"))
+    }
+    actual_objects = {str(value) for value in actual.get("object_ids", [])}
+    for value in list(actual_objects):
+        if not value.startswith("item:"):
+            continue
+        payload = value.removeprefix("item:")
+        actual_objects.update(infer_object_ids(payload))
+        if actual.get("shard_key") == "course":
+            for token in re.split(r"[|,;\s]+", payload):
+                token = token.strip('"\'{}[]()')
+                if token.isdigit():
+                    actual_objects.add(f"course:{token}")
+        elif actual.get("shard_key") == "paper":
+            actual_objects.update(f"paper:{value}" for value in ARXIV_ID_RE.findall(payload))
+    if required_objects and not required_objects <= actual_objects:
         return False
     return True
 
@@ -2190,65 +2226,12 @@ def ordered_wave_alignment(planned_waves: Sequence[dict[str, Any]], actual_waves
     return {
         "pairs": pairs,
         "contract_pairs": contract_pairs,
+        "coarse_pairs": pairs,
+        "fine_pairs": contract_pairs,
         "unpaired_planned": [index for index in range(rows) if index not in planned_paired],
         "unpaired_actual": [index for index in range(cols) if index not in actual_paired],
         "contract_planned_indices": sorted(pair["planned_index"] for pair in contract_pairs),
         "contract_actual_indices": sorted(pair["actual_index"] for pair in contract_pairs),
-    }
-
-
-def fine_metrics(
-    planned_waves: Sequence[dict[str, Any]],
-    actual_waves: Sequence[dict[str, Any]],
-    alignment: dict[str, Any],
-) -> dict[str, Any]:
-    actual_nodes_by_wave = [expand_nodes(wave["nodes"]) for wave in actual_waves]
-    planned_nodes_by_wave = [expand_nodes(wave["nodes"]) for wave in planned_waves]
-    matched_planned: set[tuple[int, int]] = set()
-    matched_actual: set[tuple[int, int]] = set()
-    matches: list[dict[str, Any]] = []
-    for pair in alignment["pairs"]:
-        planned_index, actual_index = pair["planned_index"], pair["actual_index"]
-        local_matches = maximum_cardinality_matching(
-            planned_nodes_by_wave[planned_index],
-            actual_nodes_by_wave[actual_index],
-            threshold=0.58,
-            strict_contract=True,
-        )
-        for match in local_matches:
-            matched_planned.add((planned_index, match["planned_index"]))
-            matched_actual.add((actual_index, match["actual_index"]))
-            matches.append(
-                {
-                    **match,
-                    "planned_wave_index": planned_index,
-                    "actual_wave_index": actual_index,
-                    "planned_wave_id": planned_waves[planned_index]["wave_id"],
-                    "actual_wave_id": actual_waves[actual_index]["wave_id"],
-                }
-            )
-    planned_total = sum(len(nodes) for nodes in planned_nodes_by_wave)
-    actual_total = sum(len(nodes) for nodes in actual_nodes_by_wave)
-    return {
-        "planned_total": planned_total,
-        "planned_hit": len(matched_planned),
-        "actual_total": actual_total,
-        "actual_hit": len(matched_actual),
-        "recall": len(matched_planned) / planned_total if planned_total else None,
-        "precision": len(matched_actual) / actual_total if actual_total else None,
-        "matches": matches,
-        "unmatched_planned": [
-            {"wave_index": wave_index, "node_id": node["node_id"]}
-            for wave_index, nodes in enumerate(planned_nodes_by_wave)
-            for node_index, node in enumerate(nodes)
-            if (wave_index, node_index) not in matched_planned
-        ],
-        "unmatched_actual": [
-            {"wave_index": wave_index, "node_id": node["node_id"]}
-            for wave_index, nodes in enumerate(actual_nodes_by_wave)
-            for node_index, node in enumerate(nodes)
-            if (wave_index, node_index) not in matched_actual
-        ],
     }
 
 
@@ -2263,22 +2246,24 @@ def score_task(planned_ir: dict[str, Any], actual_ir: dict[str, Any]) -> dict[st
         )
     actual_waves = actual_ir["fresh_waves"]
     alignment = ordered_wave_alignment(eligible_waves, actual_waves)
-    fine = fine_metrics(eligible_waves, actual_waves, alignment)
-    wave_hit = len(alignment["contract_pairs"])
-    actual_hit = len(alignment["contract_actual_indices"])
+    coarse_hit = len(alignment["coarse_pairs"])
+    fine_hit = len(alignment["fine_pairs"])
+    if fine_hit > coarse_hit:
+        raise AssertionError("fine wave hits must be a subset of coarse wave hits")
     counts = actual_ir["counts"]
     overhead_numerator = counts["accepted_resumes"] + counts["repair_fresh_nodes"]
     overhead_denominator = counts["fresh_nodes"] + counts["accepted_resumes"]
     return {
         "planned_wave_total": len(eligible_waves),
-        "planned_wave_hit": wave_hit,
-        "planned_wave_recall": wave_hit / len(eligible_waves) if eligible_waves else None,
         "ineligible_wave_total": len(ineligible_waves),
         "fresh_wave_total": len(actual_waves),
-        "fresh_wave_hit": actual_hit,
-        "fresh_wave_precision": actual_hit / len(actual_waves) if actual_waves else None,
+        "coarse_wave_hit": coarse_hit,
+        "coarse_wave_recall": coarse_hit / len(eligible_waves) if eligible_waves else None,
+        "coarse_wave_precision": coarse_hit / len(actual_waves) if actual_waves else None,
+        "fine_wave_hit": fine_hit,
+        "fine_wave_recall": fine_hit / len(eligible_waves) if eligible_waves else None,
+        "fine_wave_precision": fine_hit / len(actual_waves) if actual_waves else None,
         "alignment": alignment,
-        "fine": fine,
         "overhead": {
             **counts,
             "overhead_events": overhead_numerator,
@@ -2294,14 +2279,10 @@ def aggregate_scores(task_records: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "tasks_scored": 0,
         "tasks_invalid_trajectory": 0,
         "planned_wave_total": 0,
-        "planned_wave_hit": 0,
         "ineligible_wave_total": 0,
         "fresh_wave_total": 0,
-        "fresh_wave_hit": 0,
-        "fine_planned_total": 0,
-        "fine_planned_hit": 0,
-        "fine_actual_total": 0,
-        "fine_actual_hit": 0,
+        "coarse_wave_hit": 0,
+        "fine_wave_hit": 0,
         "accepted_resumes": 0,
         "linked_resumes": 0,
         "orphan_resumes": 0,
@@ -2335,14 +2316,10 @@ def aggregate_scores(task_records: Sequence[dict[str, Any]]) -> dict[str, Any]:
         totals["tasks_scored"] += 1
         score = record["score"]
         totals["planned_wave_total"] += score["planned_wave_total"]
-        totals["planned_wave_hit"] += score["planned_wave_hit"]
         totals["ineligible_wave_total"] += score["ineligible_wave_total"]
         totals["fresh_wave_total"] += score["fresh_wave_total"]
-        totals["fresh_wave_hit"] += score["fresh_wave_hit"]
-        totals["fine_planned_total"] += score["fine"]["planned_total"]
-        totals["fine_planned_hit"] += score["fine"]["planned_hit"]
-        totals["fine_actual_total"] += score["fine"]["actual_total"]
-        totals["fine_actual_hit"] += score["fine"]["actual_hit"]
+        totals["coarse_wave_hit"] += score["coarse_wave_hit"]
+        totals["fine_wave_hit"] += score["fine_wave_hit"]
         for key in (
             "accepted_resumes",
             "linked_resumes",
@@ -2356,10 +2333,10 @@ def aggregate_scores(task_records: Sequence[dict[str, Any]]) -> dict[str, Any]:
             totals[key] += score["overhead"].get(key, 0)
     totals.update(
         {
-            "planned_wave_recall": totals["planned_wave_hit"] / totals["planned_wave_total"] if totals["planned_wave_total"] else None,
-            "fresh_wave_precision": totals["fresh_wave_hit"] / totals["fresh_wave_total"] if totals["fresh_wave_total"] else None,
-            "fine_node_recall": totals["fine_planned_hit"] / totals["fine_planned_total"] if totals["fine_planned_total"] else None,
-            "fine_node_precision": totals["fine_actual_hit"] / totals["fine_actual_total"] if totals["fine_actual_total"] else None,
+            "coarse_wave_recall": totals["coarse_wave_hit"] / totals["planned_wave_total"] if totals["planned_wave_total"] else None,
+            "coarse_wave_precision": totals["coarse_wave_hit"] / totals["fresh_wave_total"] if totals["fresh_wave_total"] else None,
+            "fine_wave_recall": totals["fine_wave_hit"] / totals["planned_wave_total"] if totals["planned_wave_total"] else None,
+            "fine_wave_precision": totals["fine_wave_hit"] / totals["fresh_wave_total"] if totals["fresh_wave_total"] else None,
             "resume_repair_overhead_rate": (
                 (totals["accepted_resumes"] + totals["repair_fresh_nodes"])
                 / (totals["fresh_nodes"] + totals["accepted_resumes"])
@@ -2368,4 +2345,6 @@ def aggregate_scores(task_records: Sequence[dict[str, Any]]) -> dict[str, Any]:
             ),
         }
     )
+    if totals["fine_wave_hit"] > totals["coarse_wave_hit"]:
+        raise AssertionError("aggregate fine wave hits must be a subset of coarse wave hits")
     return totals

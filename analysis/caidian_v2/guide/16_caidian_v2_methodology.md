@@ -1,6 +1,6 @@
 # 踩点率 v2 定义与实现（P0-P4）
 
-> 版本：2.2.5 · 2026-08-30
+> 版本：2.3.0 · 2026-08-30
 > 实现：`scripts/caidian_v2.py` + `scripts/gen_caidian_v2.py`
 > Legacy 口径保留在 `backups/caidian_legacy_20260830T190032+0800/`，v2 不覆盖其脚本或报告。
 
@@ -33,41 +33,39 @@
 节点是多动作的：例如“读取分页、聚合、写中间 JSON”是 `{read,compute,write}`，不再被压成单一 read 或 write。实际 Wave 也完整保留 `dependency/fanout/condition`：同一 assistant response 内为并行，后续 response 中的 fresh Wave 记录已发生的串行依赖。计划依赖只从 `After/Once/Following/...` 等明示转换提取；`After Wave 1` 保留精确目标 `wave_1`，不再简化成“前一 Wave”。
 分片只表示“一个 agent 被分配的单位”：分页参数 `page=1`、交付物中的论文/行数和共享 manifest 不会自动变成分片键。范围编号如 `1-2`/`3-6` 会保留为 2/4 个节点实例，混合 Coder/Explore Wave 不再被压成单一角色。
 
-## 3. P2：粗判 v2（有序 wave contract）
+## 3. P2：粗判 v2（有序 Wave 语义兼容）
 
-1. 将已验证 eligible 的 GT waves 与 accepted fresh waves 做保序对齐；跳过 wave 可以，交叉/换序不可以。对齐目标按 `contract hits > 语义诊断对数 > 相似度` 字典序最大化，避免后续多余 Wave 抢走本应命中的对齐。
-2. 对齐候选同时比较 action set、节点 1:1 粗语义覆盖、domain、write role 和 fan-out 比例。“任意 read 节点相同”不再能占领整个 wave。
-3. 对齐后仍需满足全部计划 action、write 动作的双向一致性、全部显式 write roles、显式 dependency 与 exact/range fan-out，才算 wave hit。dependency 通过已选 alignment 比较精确目标，而不只比较“是否非 main”。实际多出 write、漏 compute、漏任一计划写入角色，都只保留语义对齐以便诊断，不算 contract hit。
-4. 多出的 accepted fresh wave 是 unplanned wave，进 Precision 分母。Rejected call 不进分母。
-
-```text
-Planned Wave Recall = contract-hit eligible GT waves / eligible GT waves
-Fresh Wave Precision = contract-hit actual fresh waves / accepted actual fresh waves
-```
-
-## 4. P3：细判 v2（wave 内节点 1:1）
-
-1. 只在 P2 已保序对齐的 wave 对内做节点匹配。
-2. 节点同时比较 action、agent type、domain、write role、target、object ID 和 shard key；显式 agent type 不一致、写动作不一致、具体写角色冲突或显式 object ID 冲突会直接 veto。`other-write` 只表示未解析出具体类型，不伪装成具体角色。
-3. 每个计划实例与实际实例最多匹配一次。AgentSwarm `items` 逐项展开；计划头明确 `exactly 22`即使只写一个同模板 owner，也展开为 22 个实例。runtime-dependent fan-out 只使用委派前 manifest 证据固定计划分母，绝不读实际 fresh nodes 的数量。若模型把同一计划 Wave 拆成多个 fresh Wave，节点仍只能在已对齐的 Wave 内命中，不会跨 Wave 偷配。
-4. 不再将同一 domain 的多个 read owner 全局去重为 1 点。
+1. 将已验证 eligible 的 GT Waves 与 accepted fresh Waves 做保序对齐；可跳过，不可交叉或换序。对齐目标按 `细判 contract hits > 粗判语义对数 > 相似度` 字典序最大化，避免宽松对齐抢走本应严格命中的 Wave。
+2. 粗命中必须是 `semantic_compatible`：至少存在节点 1:1 语义匹配，template coverage ≥ 0.50、planned coverage ≥ 0.34、action coverage ≥ 0.34，加权相似度 ≥ 0.48。相似度同时考虑 action、domain、write role、fan-out 比例和节点覆盖，不会因一个泛化 read 节点就命中。
+3. 粗判允许 fan-out、依赖、个别 action 或具体对象存在偏差；这些偏差会使细判失败。多出的 accepted fresh Wave 仍进 Precision 分母，Rejected call 不进分母。
 
 ```text
-Fine Node Recall = matched eligible planned node instances / eligible planned node instances
-Fine Node Precision = matched accepted fresh node instances / accepted fresh node instances
+Coarse Recall = semantic-compatible planned Waves / eligible planned Waves
+Coarse Precision = semantic-compatible actual Waves / accepted fresh Waves
 ```
 
-## 5. P4：四组指标与开销分离
+## 4. P3：细判 v2（粗命中的严格子集）
 
-正式报告不再用一个“踩点率”混合表达，而是并列：
+1. 细命中必须首先是粗命中的同一个保序 Wave 对。
+2. 该 Wave 还必须满足：全部计划 action、write 动作双向一致、全部显式 write roles、精确 dependency 目标、exact/range fan-out，以及全部计划节点的严格 1:1 覆盖。
+3. 节点同时比较 action、agent type、domain、write role、target、object ID 和 shard key；显式角色、写动作或 object ID 冲突直接 veto。每个计划/实际实例最多匹配一次。
+4. AgentSwarm `items` 逐项展开；`exactly 22` 展开为 22 个实例。runtime-dependent fan-out 只由委派前 manifest 固定。任一计划节点缺失、错误分片或依赖偏差都不算细命中；多出的实际 Wave 降低 Precision，不撤销已对齐 Wave 的 Recall 命中。
 
-- Planned Wave Recall
-- Fresh Wave Precision
-- Fine-grained Node Recall
-- Fine-grained Node Precision
-- Resume/Repair Overhead（accepted resume、linked/orphan resume、repair fresh wave/node、rejected call）
+```text
+Fine Recall = strict-contract planned Waves / eligible planned Waves
+Fine Precision = strict-contract actual Waves / accepted fresh Waves
+```
 
-Legacy 宽/严判数字仅在报告的“新旧口径对照”中显示，不与 v2 分子分母混算。
+`Fine hits ⊆ Coarse hits`，两者使用相同 Wave 分母，因此 Recall 和 Precision 均保证 `Fine ≤ Coarse`。
+
+## 5. P4：只保留粗/细两类踩点率
+
+正式报告只展示：
+
+- 粗踩点率（Recall / Precision）
+- 细踩点率（Recall / Precision）
+
+节点局部覆盖仅保留在 alignment 证据中，不汇总成第三类正式指标。Resume/repair/reject 是证据诊断，不是第三类踩点率。Legacy 宽/严数字只用于回放对照，不与 v2.3 混算。
 
 ## 6. 产物
 
