@@ -34,3 +34,4 @@ local_servers/woocommerce-mcp/dist/index.js
 
 # OS
 .DS_Store
+._*
