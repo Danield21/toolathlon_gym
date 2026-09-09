@@ -17,6 +17,25 @@ from collections import defaultdict
 from pathlib import Path
 
 DELEGATION_TOOLS = {"Agent", "AgentSwarm"}
+
+
+def _swarm_items(args: dict | None) -> list:
+    """Normalize AgentSwarm items/tasks to a list.
+
+    MiniMax (and some other OpenAI-compat models) occasionally emit `items`
+    as an object (`{"0": {...}, "1": {...}}`) instead of an array. Slicing
+    that dict raises TypeError: unhashable type: 'slice'.
+    """
+    raw = (args or {}).get("items")
+    if raw is None:
+        raw = (args or {}).get("tasks")
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        return list(raw.values())
+    return [raw]
 # Slot dir names are "<RUN_ID>_slot<N>" where RUN_ID may be a bare timestamp
 # (20260817-002742) or carry a prefix (rerun-fix6-20260817-102737,
 # subagent-20260817-120650). Accept an optional alphanumeric prefix before
@@ -24,19 +43,25 @@ DELEGATION_TOOLS = {"Agent", "AgentSwarm"}
 RUN_DIR_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9_.-]*[-_])?(?:\d{8}-\d{6}|\d{8})(?:[-_][A-Za-z0-9_.-]+)?_slot\d+$")
 USAGE_FIELDS = ("inputOther", "inputCacheRead", "inputCacheCreation", "output")
 
-# Model/provider/relay failures only.  Do not include generic "API" or
-# localhost connection failures here: many Toolathlon tasks intentionally use
-# business/data APIs, and failed local probing is task behavior rather than a
-# model-provider outage.
+# Model/provider/relay failures only. Do not match generic HTTP status
+# phrases such as "502 Bad Gateway": Toolathlon tasks (e.g.
+# fetch-notion-monitoring) embed those strings in logs, Excel, Notion, and
+# email as *business* incident text. Scanning tool args/results for them
+# false-positives entire solving steps and drops them from Critical Steps.
+#
+# Match kimi/openai/relay envelopes instead:
+#   "502 relay: [Errno 104] ..."  (kimi prefixes HTTP status + relay body)
+#   {"error":{"type":"relay_error",...}}
+#   APIStatusError / RateLimitError / provider_invalid
 API_ERROR_RE = re.compile(
     r"("
     r"provider_invalid|No providers available|MODEL_API_URL|RELAY_API_KEY|"
-    r"API(?:Connection|Timeout)?Error|APITimeoutError|APIConnectionError|"
+    r"APIStatusError|APITimeoutError|APIConnectionError|"
     r"AuthenticationError|PermissionDeniedError|RateLimitError|"
-    r"429 Too Many Requests|401 Unauthorized|403 Forbidden|"
-    r"502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout|"
-    r"invalid api key|api key invalid|quota exceeded|"
-    r"provider error|upstream error|relay error|model api"
+    r"\b(?:429|401|403|502|503|504)\s+relay:|"
+    r"relay:\s*\[Errno|proxy CONNECT failed|"
+    r"['\"]type['\"]\s*:\s*['\"]relay_error['\"]|"
+    r"invalid api key|api key invalid|quota exceeded"
     r")",
     re.I,
 )
@@ -96,15 +121,16 @@ def prompt_tokens_from_usage(usage: dict) -> int:
 
 
 def is_api_error_step(step: dict) -> bool:
-    chunks: list[str] = [str(step.get("content") or "")]
-    for call in step.get("calls", []):
-        chunks.append(str(call.get("name") or ""))
-        chunks.append(str(call.get("args_text") or ""))
-        try:
-            chunks.append(json.dumps(call.get("args") or {}, ensure_ascii=False))
-        except Exception:
-            chunks.append(str(call.get("args") or ""))
-        chunks.append(str(call.get("result") or ""))
+    """True only for model/provider/relay failures on this LLM turn.
+
+    Assistant narrative is scanned. Tool names/args/results are not: they
+    often quote monitored HTTP statuses, arXiv ids, or Notion schemas.
+    Empty no-response turns are tagged separately in parse_wire.
+    """
+    chunks = [str(step.get("content") or "")]
+    extra = step.get("provider_error_text")
+    if extra:
+        chunks.append(str(extra))
     return bool(API_ERROR_RE.search("\n".join(chunks)))
 
 
@@ -248,6 +274,7 @@ def parse_wire(wire_path: Path) -> dict:
                 sub_prompt = str(j.get("prompt") or "")[:4000]
         elif t == "usage.record":
             if cur_step is not None:
+                cur_step["has_response"] = True
                 sn = cur_step.get("step")
                 if isinstance(sn, int):
                     fallback_usage_by_step[sn].append(usage_totals(j.get("usage")))
@@ -259,7 +286,7 @@ def parse_wire(wire_path: Path) -> dict:
                 cur_step = {"step": sn, "calls": [], "content": "",
                             "usage_totals": {k: 0 for k in USAGE_FIELDS},
                             "observation_tokens_est": 0, "has_step_end_usage": False,
-                            "api_error": False}
+                            "has_response": False, "api_error": False}
                 steps[sn] = cur_step
             elif et == "tool.call":
                 raw_args = ev.get("args")
@@ -295,9 +322,11 @@ def parse_wire(wire_path: Path) -> dict:
                     st = steps.setdefault(sn, {"step": sn, "calls": [], "content": "",
                                                "usage_totals": {k: 0 for k in USAGE_FIELDS},
                                                "observation_tokens_est": 0, "has_step_end_usage": False,
-                                               "api_error": False})
+                                               "has_response": False, "api_error": False})
                     st["usage_totals"] = usage_totals(ev.get("usage"))
                     st["has_step_end_usage"] = True
+                    if ev.get("usage"):
+                        st["has_response"] = True
 
     step_list = [steps[k] for k in sorted(steps)]
     for st in step_list:
@@ -312,6 +341,16 @@ def parse_wire(wire_path: Path) -> dict:
                 add_usage(total, u)
             st["usage_totals"] = total
         st["api_error"] = is_api_error_step(st)
+        # Silent no-response step: a request was issued but the step produced no
+        # tool call, no content, AND no usage/step.end-usage response. This is an
+        # upstream/connection "dud" (200-with-empty-body or dropped stream) that
+        # carries no error text for API_ERROR_RE to match. Treat as an error step
+        # and exclude from step statistics, same as a textual API error.
+        if (not st["api_error"] and not st["calls"]
+                and not (st.get("content") or "").strip()
+                and not st.get("has_response")):
+            st["api_error"] = True
+            st["no_response"] = True
 
     included = [st for st in step_list if not st.get("api_error")]
     totals = {k: 0 for k in USAGE_FIELDS}
@@ -359,8 +398,8 @@ def compute_critical_steps(main_wire: dict, sub_wires: list[dict]) -> dict:
         for call in deleg:
             tools_used.add(call["name"])
             if call["name"] == "AgentSwarm":
-                items = call["args"].get("items") or call["args"].get("tasks") or []
-                n_sub += len(items) if isinstance(items, list) and items else 1
+                items = _swarm_items(call.get("args"))
+                n_sub += len(items) if items else 1
             else:
                 n_sub += 1
         mode = "parallel" if n_sub > 1 else "sequential"
@@ -512,8 +551,10 @@ def parse_tools_inventory(inner: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def fmt_args(name: str, args: dict) -> str:
+def fmt_args(name: str, args) -> str:
     """Human-readable one-liner for a tool call."""
+    if not isinstance(args, dict):
+        return json.dumps(args, ensure_ascii=False)[:300]
     if name == "Bash":
         return args.get("command", "")[:400]
     if name == "Read":
@@ -775,11 +816,13 @@ def render_call(call: dict, api_error: bool = False) -> str:
                      f'<div class="md-pre prompt">{html.escape(prompt)}</div></div>')
     elif name == "AgentSwarm":
         a = call["args"]
-        items = a.get("items") or a.get("tasks") or []
+        items = _swarm_items(a)
         parts.append(f'<div class="deleg-box"><div class="deleg-meta"><b>AgentSwarm</b> — {len(items)} parallel item(s)</div>')
         for it in items[:30]:
             if isinstance(it, dict):
                 parts.append(f'<div class="md-pre prompt">{html.escape(str(it.get("prompt") or it.get("task") or it))}</div>')
+            else:
+                parts.append(f'<div class="md-pre prompt">{html.escape(str(it))}</div>')
         parts.append("</div>")
 
     if call["result"] is not None:
@@ -827,8 +870,16 @@ def render_timeline(main_wire: dict) -> str:
             parts.append(f'<div class="narrative md-pre">{html.escape(narrative)}</div>')
         for call in st["calls"]:
             parts.append(render_call(call, api_error=api_error))
+        # Only a truly empty step (no tool call AND no reasoning/narrative) is annotated.
+        # A step with reasoning but no tool call is legitimate and rendered normally above.
         if n_calls == 0 and not narrative and not think:
-            parts.append('<div class="muted small">(no tool call / no output this step)</div>')
+            if api_error:
+                note = ('empty/no response from model API (connection dud) — excluded from step stats'
+                        if st.get("no_response") else
+                        'step aborted by API/connection error — excluded from step stats')
+                parts.append(f'<div class="err-badge">Error</div> <span class="muted small">{note}</span>')
+            else:
+                parts.append('<div class="muted small">(no tool call / no output this step)</div>')
         parts.append("</div>")
     return "\n".join(parts)
 
@@ -849,7 +900,9 @@ def render_subagents(sub_wires: list[dict]) -> str:
             substep_cls = "substep api-error" if api_error else "substep"
             api_note = ' <span class="api-badge">API error step · excluded from metrics</span>' if api_error else ""
             parts.append(f'<div class="{substep_cls}"><div class="substep-h">step {st["step"]}{api_note}</div>')
-            content = (st.get("content") or "").strip()
+            raw_content = (st.get("content") or "").strip()
+            has_think = bool(re.search(r"<think>.*?</think>", raw_content, re.S))
+            content = raw_content
             if content:
                 content = re.sub(r"<think>.*?</think>", "", content, flags=re.S).strip()
             if content:
@@ -857,7 +910,14 @@ def render_subagents(sub_wires: list[dict]) -> str:
             for call in st["calls"]:
                 parts.append(render_call(call, api_error=api_error))
             if not st["calls"]:
-                parts.append('<div class="muted small">(no tool this step)</div>')
+                # A sub-agent step that only reasons (has content / <think>) is legitimate.
+                if api_error:
+                    parts.append('<div class="err-badge">Error</div> '
+                                 '<span class="muted small">sub-agent step aborted by API/connection error — excluded</span>')
+                elif content or has_think:
+                    parts.append('<div class="muted small">(reasoning only — no tool call this step)</div>')
+                else:
+                    parts.append('<div class="muted small">(no tool this step)</div>')
             parts.append("</div>")
         parts.append("</details>")
     return "\n".join(parts)
@@ -1073,6 +1133,7 @@ def build_case_html(case_dir: Path) -> dict | None:
 <div><b>Duration</b>{html.escape(dur_txt)}</div>
 <div><b>claim_done</b>{runlog.get('claim_done')}</div>
 <div><b>Main steps</b>{crit['main_steps']}</div>
+{f'<div><b>API-error steps</b><span class="api-text">{crit["api_error_steps"]}</span> <span class="muted">excluded from step stats</span></div>' if crit.get('api_error_steps') else ''}
 <div><b>Critical Steps</b><span style="color:var(--acc);font-weight:700;font-size:17px">{crit['critical_steps']}</span> <span class="muted">(serial {crit['serial_steps']})</span></div>
 <div><b>Sub-agents</b>{len(sub_wires)} — {crit['n_parallel_subs']} parallel / {crit['n_sequential_subs']} sequential</div>
 {f'<div><b>Plan-first</b>{pf_pill}</div>' if plan_first_arm else ''}

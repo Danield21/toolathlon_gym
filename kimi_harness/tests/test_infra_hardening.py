@@ -514,7 +514,21 @@ class KimiInfraHardeningTests(unittest.TestCase):
             self.assertNotIn("Sub-agents share the same task-approved tools", text)
             self.assertIn(inherit, text)
             self.assertIn(override, text)
+            self.assertIn(
+                "Do not assign write-related sub-tasks to read-only sub-agents.",
+                text,
+            )
         self.assertIn("read-only", kimi_main.ORCHESTRATION_RULES)
+        seven = kimi_main.ORCHESTRATION_RULES_SEVEN
+        self.assertNotIn("Sub-agents share the same task-approved tools", seven)
+        self.assertIn(inherit, seven)
+        self.assertIn(
+            "Do not assign write-related sub-tasks to read-only sub-agents.",
+            seven,
+        )
+        self.assertNotIn("EvidencePacket v1", seven)
+        self.assertNotIn("evidence-integrator", seven)
+        self.assertNotIn("deliverable-auditor", seven)
 
     def test_crosscut_profile_sources_are_complete_leaf_contracts(self):
         required = {
@@ -634,6 +648,7 @@ class KimiInfraHardeningTests(unittest.TestCase):
         )
 
         with mock.patch.dict(os.environ, {"KIMI_SUBAGENTS": "ten"}, clear=False):
+            os.environ.pop("KIMI_CODE_SUBAGENT", None)
             prompt = kimi_main.render_system_prompt(task_config)
 
         examples = prompt.split("<example>")[1:]
@@ -655,6 +670,7 @@ class KimiInfraHardeningTests(unittest.TestCase):
         env.pop("KIMI_PLAN_FIRST", None)
         with mock.patch.dict(os.environ, env, clear=False):
             os.environ.pop("KIMI_PLAN_FIRST", None)
+            os.environ.pop("KIMI_CODE_SUBAGENT", None)
             prompt = kimi_main.render_system_prompt(task_config)
 
         examples = prompt.split("<example>")[1:]
@@ -688,6 +704,80 @@ class KimiInfraHardeningTests(unittest.TestCase):
         self.assertIn("Never broaden a profile's tool ceiling", rules)
         self.assertIn("EvidencePacket v1", rules)
         self.assertIn("DeliverableReceipt v1", rules)
+
+    def test_kimi_code_subagent_seven_overrides_ten_and_uses_seven_assets(self):
+        expected = list(kimi_main.SEVEN_SUBAGENTS)
+        task_config = SimpleNamespace(
+            agent_workspace="/tmp/toolathlon-seven-roster",
+            system_prompts=SimpleNamespace(agent="Complete the task."),
+        )
+        env = {
+            "KIMI_CODE_SUBAGENT": "7",
+            "KIMI_SUBAGENTS": "ten",
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            os.environ.pop("KIMI_PLAN_FIRST", None)
+            self.assertEqual(expected, kimi_main._active_subagents())
+            self.assertTrue(kimi_main._is_seven_roster())
+            prompt = kimi_main.render_system_prompt(task_config)
+            academic = set(kimi_main.profile_tools_for_task(
+                "academic-literature-researcher",
+                ["arxiv_local", "arxiv-latex", "scholarly", "filesystem"],
+            ))
+            office = set(kimi_main.profile_tools_for_task(
+                "office-report-builder",
+                ["excel", "local", "pptx"],
+            ))
+
+        self.assertEqual(expected, kimi_main.SUBAGENT_PRESETS["7"])
+        self.assertEqual(expected, kimi_main.SUBAGENT_PRESETS["seven"])
+        self.assertIn("office-report-builder", prompt)
+        self.assertIn("external-workflow-operator", prompt)
+        self.assertNotIn("workspace-data-engineer", prompt)
+        self.assertNotIn("evidence-integrator", prompt)
+        self.assertNotIn("deliverable-auditor", prompt)
+        self.assertNotIn("EvidencePacket v1", prompt)
+        self.assertIn("Lumenport", prompt)
+        self.assertIn("Northhaven", prompt)
+        self.assertIn("Do not assign write-related sub-tasks to read-only sub-agents.", prompt)
+        self.assertIn(
+            "Trust sub-agent outputs that satisfy their return contract.",
+            prompt,
+        )
+        examples = prompt.split("<example>")[1:]
+        self.assertEqual(7, len(examples))
+        self.assertNotIn("mcp__arxiv_local__download_paper", academic)
+        self.assertIn("mcp__arxiv_local__read_paper", academic)
+        self.assertIn("mcp__arxiv_local__search_papers", academic)
+        self.assertNotIn("mcp__local__handle_overlong_tool_outputs", office)
+        self.assertIn("mcp__local__save_overlong_output", office)
+        self.assertIn("mcp__local__view_overlong_output", office)
+        self.assertIn("mcp__pptx__create_presentation", office)
+
+    def test_kimi_subagents_seven_alias_matches_code_subagent(self):
+        with mock.patch.dict(os.environ, {"KIMI_SUBAGENTS": "seven"}, clear=False):
+            os.environ.pop("KIMI_CODE_SUBAGENT", None)
+            self.assertEqual(
+                list(kimi_main.SEVEN_SUBAGENTS),
+                kimi_main._active_subagents(),
+            )
+            self.assertTrue(kimi_main._is_seven_roster())
+
+    def test_seven_plan_first_omits_intern_handoff_contracts(self):
+        task_config = SimpleNamespace(
+            agent_workspace="/tmp/toolathlon-seven-plan-first",
+            system_prompts=SimpleNamespace(agent="Complete the task."),
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"KIMI_CODE_SUBAGENT": "7", "KIMI_PLAN_FIRST": "1"},
+            clear=False,
+        ):
+            prompt = kimi_main.render_system_prompt(task_config)
+        self.assertIn("Plan-First Protocol", prompt)
+        self.assertNotIn("EvidencePacket v1", prompt)
+        self.assertNotIn("evidence-integrator", prompt)
+        self.assertIn("office-report-builder", prompt)
 
 
 if __name__ == "__main__":

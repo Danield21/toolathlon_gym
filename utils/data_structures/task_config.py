@@ -188,7 +188,15 @@ class TaskConfig:
         self.task_root = str(task_root_path)
 
         if self.task_str is None:
-            if self.cn_mode:
+            # Oracle override: when KIMI_TASK_MD_DIR is set, read the task brief
+            # from <dir>/<task_name>.task.md instead of the in-tree docs/task.md.
+            # Only the agent-facing brief changes; preprocess / evaluation /
+            # groundtruth still come from tasks/finalpool/<task>.
+            task_md_dir = os.environ.get("KIMI_TASK_MD_DIR", "").strip()
+            if task_md_dir:
+                task_name = Path(self.task_dir).name
+                task_str_path = Path(task_md_dir) / f"{task_name}.task.md"
+            elif self.cn_mode:
                 task_str_path = Path("tasks/finalpool") / self.task_dir / "docs" / "task_cn.md"
             else:
                 task_str_path = Path("tasks/finalpool") / self.task_dir / "docs" / "task.md"

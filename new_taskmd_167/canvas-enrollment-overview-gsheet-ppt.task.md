@@ -1,0 +1,21 @@
+I need an enrollment overview for all courses from the Fall 2013 semester to prepare for an upcoming academic review meeting.
+
+Please look up all courses that ran in the Fall of 2013, get their enrollment numbers broken down by student and teacher counts, and create a Google Sheet called Fall 2013 Enrollment Overview. The sheet should have columns Course_Name, Course_Code, Student_Count, and Teacher_Count, sorted by Student_Count descending. Student_Count is the number of students currently enrolled in the course, and Teacher_Count is the number of teachers enrolled. Every total enrollment figure in the presentation, Word document, and email (such as "total student enrollment" or "total students enrolled") must count student enrollments only — do not include teachers or teaching assistants in any total.
+
+Then create a PowerPoint presentation called Enrollment_Overview_F2013.pptx for the academic review meeting. The presentation should have a title slide called Fall 2013 Enrollment Overview, one content slide per course showing the course name, course code, and its enrollment breakdown, and a final summary slide showing the total student enrollment across all courses and which course had the largest enrollment.
+
+Create a Word document called Enrollment_Report_F2013.docx with a heading that reads Fall 2013 Enrollment Report, a paragraph summarizing the total student enrollment and the number of courses offered that semester, and a table listing each course with its course code, student count, and teacher count.
+
+Send an email to academic.office@university.edu with the subject Fall 2013 Semester Enrollment Summary. The email body should include the key enrollment statistics such as total students enrolled, number of courses, and which course had the most students.
+
+To solve this task efficiently, the main agent first gathers the compact counts and freezes one literal payload, then parallelizes the three independent report writers.
+
+Call canvas_list_courses(include_ended=true), retain exactly the courses whose full name contains Fall 2013 or whose code ends in 2013J, and freeze their literal IDs/codes/names. In one native-parallel response issue, for every retained course, canvas_get_course_grades(page=1, per_page=1, type=["StudentEnrollment"]) and canvas_get_course_grades(page=1, per_page=1, type=["TeacherEnrollment"]). Use pagination.total_count only; never fetch enrollment rows. Validate identity and exactly-once course coverage. Compute and freeze a canonical table {course_name, course_code, student_count, teacher_count}, sorted by student_count descending with course_code ascending for ties, plus total_students, course_count, and the deterministic largest-student course. All writers and the email must consume these literal values without recomputation.
+
+1. Wave 1 — dispatch exactly 3 coder sub-agents in parallel:
+
+   1. The first Coder is the sole owner of the Google spreadsheet titled Fall 2013 Enrollment Overview. Create or reuse one exact-title spreadsheet, write only the requested Course_Name, Course_Code, Student_Count, Teacher_Count table to a precisely bounded range beginning A1, and read that exact range back. Do not add diagnostic cells or write the local files.
+   2. The second Coder is the sole writer of Enrollment_Overview_F2013.pptx in the task's dynamically resolved workspace. From the canonical payload create one title slide, one slide per literal course, and one final summary slide with total student enrollment and the largest course; read back slide count, titles, and values.
+   3. The third Coder is the sole writer of Enrollment_Report_F2013.docx in the same resolved workspace. Create the exact heading, summary paragraph, and complete course table from the canonical payload, then read the document back.
+
+In the same response that launches Wave 1, the main agent independently searches Sent mail for academic.office@university.edu with subject Fall 2013 Semester Enrollment Summary. Read candidates to verify the recipient; send once only if absent, using the canonical student-only total, course count, and largest course. After Wave 1, read/reconcile the spreadsheet, presentation, document, and retained email against the same payload. Do not create a verification wave.

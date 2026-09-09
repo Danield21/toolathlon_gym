@@ -1,0 +1,32 @@
+You are helping a researcher prepare for a conference review committee. The workspace contains three files you need to consult before starting your analysis.
+
+First, open the PDF file review_guidelines.pdf in the workspace. It describes the evaluation criteria the committee uses to score papers, including five dimensions (novelty, methodology rigor, experimental completeness, clarity, and significance) each scored on a 1 to 5 scale. Read and understand the scoring rubric before proceeding.
+
+Next, read the file conference_papers.txt in the workspace. It lists four paper identifiers that have been assigned to you for review. These are the only papers you should evaluate. There may be other papers in the archive, but ignore any that are not on your list.
+
+For each of the four assigned papers, retrieve the full LaTeX source from the paper archive. Examine the section structure, abstract, and methodology content of each paper carefully.
+
+Write a Python script called extract_methods.py. First, save the LaTeX source you retrieved for each assigned paper to local files in the workspace (for example, one .tex file per paper), and have the script read those local files. The script should extract methodology-related keywords and techniques mentioned in each paper and output a file called methodology_analysis.json in the workspace. Each entry should have the paper identifier (use the field name 'paper_id'), title, a list of methodology keywords found, and the number of sections in the paper. Run this script using the terminal.
+
+Write a second Python script called score_papers.py that uses the methodology analysis and the scoring rubric from the PDF to produce a comparison matrix. For each paper, assign integer scores from 1 to 5 on each of the five criteria (novelty, methodology rigor, experimental completeness, clarity, significance). Use these scoring guidelines from the PDF: papers with more sections and detailed experiments score higher on completeness, papers introducing genuinely new architectures or techniques score higher on novelty, papers with clear mathematical formulations score higher on rigor, papers with well-structured sections and readable abstracts score higher on clarity, and papers addressing important problems with strong results score higher on significance. The script should output comparison_matrix.json containing the paper identifier (field name 'paper_id'), title, and a dictionary of scores for each criterion, plus a total score (field name 'total_score'). Run this script.
+
+Create a cloud spreadsheet called "Paper Review Matrix" with three sheets. The first sheet should be named "Review Scores" with columns Paper_ID, Title, Novelty, Methodology_Rigor, Experimental_Completeness, Clarity, Significance, and Total_Score. Populate it with the four assigned papers sorted by Total_Score descending. The second sheet should be named "Methodology Comparison" with columns Paper_ID, Title, Methods_Used, and Section_Count, listing the methodology keywords found for each paper. The third sheet should be named "Rankings" with columns Rank, Paper_ID, Title, Total_Score, and Recommendation. The Recommendation column should contain "Accept" for papers scoring 20 or above, "Revise" for papers scoring 15 to 19, and "Reject" for papers scoring below 15.
+
+Write a third Python script called generate_rankings.py that reads comparison_matrix.json and outputs final_rankings.json with papers ordered by total score descending. Each entry should include the rank, paper identifier, title, total score, and recommendation, using the field names 'rank', 'paper_id', 'title', 'total_score', and 'recommendation'. Run this script.
+
+Create a Word document called Conference_Review_Summary.docx. It should begin with an "Overview" section that briefly describes the review process and the four papers under evaluation. Then include a "Per-Paper Review" section with a subsection for each paper containing the paper title, a summary of its strengths, a summary of its weaknesses, the scores on each criterion, and the total score. Follow this with a "Comparative Analysis" section discussing how the papers relate to each other methodologically and which approaches are most promising. End with a "Recommendations" section listing each paper with its final recommendation of accept, revise, or reject, along with a brief justification.
+
+Also read the review_template.md file in the workspace for additional formatting guidance on the Word document structure.
+
+To solve this task efficiently, use exactly one paper-retrieval wave. The main agent first reads `review_guidelines.pdf`, `conference_papers.txt`, and `review_template.md`, verifies the four literal paper IDs in file order, and freezes the five scoring dimensions and recommendation thresholds.
+
+1. Wave 1 — dispatch exactly 4 coder sub-agents through one same-template AgentSwarm call:
+
+   1. Coder 1 owns only the literal paper ID at position 1 of `conference_papers.txt`.
+   2. Coder 2 owns only the literal paper ID at position 2.
+   3. Coder 3 owns only the literal paper ID at position 3.
+   4. Coder 4 owns only the literal paper ID at position 4.
+
+Each coder retrieves only its assigned arXiv-LaTeX paper, preserves complete ordered source/section content in one unique `<paper_id>.tex`, and returns path, hash, exact ID/title, section controls, and compact method, experiment, strength, weakness, and five-criterion evidence. It must not assign comparative ranks, create the final spreadsheet/document, or relay full source text in chat.
+
+After Wave 1, the main agent verifies the four paths and IDs once, then writes and runs `extract_methods.py`, `score_papers.py`, and `generate_rankings.py` in dependency order to create `methodology_analysis.json`, `comparison_matrix.json`, and `final_rankings.json`. Preserve literal paper IDs, make every total equal the five criterion scores, sort final rankings descending, and apply the task's recommendation thresholds. From those JSONs, create `Paper Review Matrix` and `Conference_Review_Summary.docx` as independent output branches. The spreadsheet must contain the exact three sheets and four-paper coverage. Build the Word document with one bulk structured body following `review_template.md`, covering all four exact titles/IDs, scores, rankings, and recommendations; save once and read back once. Verify the cloud sheet once and finish without another sub-agent or verification wave.

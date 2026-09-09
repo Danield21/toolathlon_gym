@@ -1,0 +1,17 @@
+You are working for a meal planning service that creates weekly meal plans using traditional Chinese recipes. Your task is to design a complete seven-day meal plan and set up scheduling and record-keeping for the service.
+
+Use the HowToCook recipe database to explore available recipes across different categories. Browse recipes from at least three different categories such as breakfast dishes, meat dishes, vegetable dishes, soups, and staple foods. Select 21 recipes total to cover seven days of meals with three meals per day: breakfast, lunch, and dinner.
+
+Create a Google Sheet called "Weekly Meal Plan" with columns Day (values 1 through 7), Meal_Type (Breakfast, Lunch, or Dinner), Recipe_Name (the English translation of the recipe name), Prep_Time (estimated preparation time in minutes as a number), and Difficulty (Easy, Medium, or Hard). The sheet should have exactly 21 data rows plus a header row. Use Difficulty Easy for recipes with 5 or fewer cooking steps, Medium for 6 to 10 steps, and Hard for more than 10 steps. Estimate Prep_Time based on recipe complexity: Easy recipes take about 15 minutes, Medium recipes about 30 minutes, and Hard recipes about 60 minutes.
+
+Schedule seven dinner preparation events in Google Calendar, one for each day from April 7 through April 13, 2026. Each event should be titled "Dinner Prep - Day X" where X is the day number (1 through 7). Schedule each event from 18:00 to 19:00. In the event description, include the name of the dinner recipe for that day.
+
+Send an email to meal_planning@service.com with subject "Weekly Meal Plan Ready" that summarizes the 7-day meal plan and mentions that the Google Sheet and calendar events have been created.
+
+To solve this task efficiently, complete it directly in the main agent; the category lists and 21 one-record detail calls are compact and need no delegation. HowToCook is read-only.
+
+First call the exact category queries `早餐`, `素菜`, and `荤菜` in one native-parallel response. Their complete unpaginated result sizes are small enough to inspect directly. Select seven distinct IDs from each category and freeze the deterministic assignment Day 1-7 × Breakfast/Lunch/Dinner, using breakfast IDs only for Breakfast, vegetable IDs only for Lunch, and meat IDs only for Dinner. Require 21 unique IDs overall.
+
+Next call the exact-ID recipe-detail operation for all 21 frozen IDs in one native-parallel response. Verify each returned ID/name/category, translate the full recipe name into English, count the complete ordered cooking steps, and compute Difficulty exactly: Easy for at most 5 steps, Medium for 6-10, Hard above 10; Prep_Time is respectively the literal number 15, 30, or 60. Freeze exactly 21 rows in Day order with Breakfast, Lunch, Dinner within each day.
+
+From that table start three independent branches in one native-parallel response: create exactly one Google spreadsheet titled `Weekly Meal Plan` with one sheet, the exact five headers, and exactly 21 data rows; exhaust event searches and create only missing `Dinner Prep - Day X` events for April 7-13, 2026 from 18:00 to 19:00 with the matching English dinner name in each description; and exhaust Sent-mail search for recipient `meal_planning@service.com` and exact subject `Weekly Meal Plan Ready`, sending it only if absent. Do not add an unstated timezone. Read the full sheet range, all seven retained events, and the retained email back in native-parallel batches and reconcile all recipe names before completion.

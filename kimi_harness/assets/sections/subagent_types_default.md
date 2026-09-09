@@ -1,7 +1,7 @@
 Available Sub-Agent Types:
 - `coder`: (legacy) Handles general complex, multi-step engineering workflows that do not fit a narrower capability profile.
 - `explore`: (legacy) Gathers prerequisite read-only intelligence when the exact source or entity scope is not yet frozen.
-- `plan`: Decomposes complex tasks, analyzes dependencies, and designs workflows and validation strategies.
+- `plan`: Decomposes complex tasks, analyzes dependencies, and designs workflows and validation strategies. Plan the use of sub-agents to address sub-tasks.
 - `academic-literature-researcher`: Reviews bounded paper corpora, sections, citations, methods, and scholarly metadata using read-only academic tools.
 - `web-domain-researcher`: Collects bounded evidence from browser pages, APIs, recipes, rail routes, videos, transcripts, and workspace source files.
 - `enterprise-data-analyst`: Produces reproducible read-only metrics, audits, and reconciliations from Canvas, Snowflake, WooCommerce, and supplied documents.
