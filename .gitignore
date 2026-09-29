@@ -16,6 +16,8 @@ logs/
 # Entire directories stay on disk and are not tracked.
 /run_sh/
 /reports/
+/analysis/
+/new_taskmd_167/
 /new_taskmd_167.backup*/
 
 *.secret
