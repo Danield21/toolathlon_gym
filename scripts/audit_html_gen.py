@@ -36,11 +36,16 @@ def _swarm_items(args: dict | None) -> list:
     if isinstance(raw, dict):
         return list(raw.values())
     return [raw]
-# Slot dir names are "<RUN_ID>_slot<N>" where RUN_ID may be a bare timestamp
-# (20260817-002742) or carry a prefix (rerun-fix6-20260817-102737,
-# subagent-20260817-120650). Accept an optional alphanumeric prefix before
-# the timestamp so prefixed runs still match.
-RUN_DIR_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9_.-]*[-_])?(?:\d{8}-\d{6}|\d{8})(?:[-_][A-Za-z0-9_.-]+)?_slot\d+$")
+# Slot dir names are "<RUN_ID>_slot<N>". RUN_IDs historically used a full
+# date/time (20260817-002742), but several detached launchers use a compact
+# month/day/time stamp (0912183504), optionally with a prefix
+# (c5l6-0912183504). Accept both forms so post-run audit generation does not
+# silently skip otherwise valid completed runs.
+RUN_DIR_RE = re.compile(
+    r"^(?:[A-Za-z0-9][A-Za-z0-9_.-]*[-_])?"
+    r"(?:\d{8}-\d{6}|\d{8}|\d{10})"
+    r"(?:[-_][A-Za-z0-9_.-]+)?_slot\d+$"
+)
 USAGE_FIELDS = ("inputOther", "inputCacheRead", "inputCacheCreation", "output")
 
 # Model/provider/relay failures only. Do not match generic HTTP status
