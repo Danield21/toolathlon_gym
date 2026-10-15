@@ -1,0 +1,10 @@
+{
+  "model": "gpt-5.6-sol",
+  "variant": "spec",
+  "temperature": "",
+  "top_p": "",
+  "reasoning_effort": "medium",
+  "enable_thinking": 0,
+  "break_schema_cycles": 1,
+  "max_output_tokens": 0
+}
