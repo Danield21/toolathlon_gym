@@ -1,0 +1,10 @@
+{
+  "model": "qwen3.8-max",
+  "variant": "spec",
+  "temperature": "1",
+  "top_p": "1",
+  "reasoning_effort": "",
+  "enable_thinking": 1,
+  "break_schema_cycles": 1,
+  "max_output_tokens": 0
+}
