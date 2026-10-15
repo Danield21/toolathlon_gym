@@ -29,3 +29,9 @@ local_servers/woocommerce-mcp/dist/index.js
 # OS
 .DS_Store
 ._*
+ground_truth_167.zip
+backups/new_taskmd_167_before_oracle72_rerun_20260827_222930.tar.gz
+backups/oracle_prompts/new_taskmd_167_before_remaining74_latest_20260827-202041.tar.gz
+scripts/audit_html_gen.py.bak_api_exclude_20260818-223308
+run_sh_eval/tests
+backups
