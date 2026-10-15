@@ -1,0 +1,10 @@
+{
+  "model": "deepseek-v4-flash",
+  "variant": "plan1st",
+  "temperature": "",
+  "top_p": "",
+  "reasoning_effort": "high",
+  "enable_thinking": 0,
+  "break_schema_cycles": 0,
+  "max_output_tokens": 0
+}
