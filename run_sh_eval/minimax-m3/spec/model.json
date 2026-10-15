@@ -1,0 +1,10 @@
+{
+  "model": "MiniMax-M3",
+  "variant": "spec",
+  "temperature": "1",
+  "top_p": "0.95",
+  "reasoning_effort": "adaptive",
+  "enable_thinking": 0,
+  "break_schema_cycles": 0,
+  "max_output_tokens": 0
+}
