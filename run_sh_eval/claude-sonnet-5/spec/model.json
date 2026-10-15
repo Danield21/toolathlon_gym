@@ -1,0 +1,11 @@
+{
+  "model": "claude-sonnet-5",
+  "variant": "spec",
+  "temperature": "1",
+  "top_p": "",
+  "reasoning_effort": "",
+  "enable_thinking": 0,
+  "break_schema_cycles": 0,
+  "max_output_tokens": 128000,
+  "api_format": "anthropic"
+}
