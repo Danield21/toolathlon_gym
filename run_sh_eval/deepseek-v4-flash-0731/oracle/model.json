@@ -1,0 +1,10 @@
+{
+  "model": "deepseek-v4-flash",
+  "variant": "oracle",
+  "temperature": "1",
+  "top_p": "0.95",
+  "reasoning_effort": "high",
+  "enable_thinking": 0,
+  "break_schema_cycles": 0,
+  "max_output_tokens": 128000
+}
