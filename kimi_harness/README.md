@@ -29,7 +29,7 @@ All four Python runtime modules are used by the evaluation path. The two `plan.m
 
 `gen` names the general-purpose roster (`coder`, `explore`, `plan`); `spec` names the specialized roster (`plan` plus six domain specialists). `oracle` and `plan1st` use gen with different task guidance or planning instructions.
 
-Each experiment's README under [run_sh_eval](../run_sh_eval/README.md) documents its fixed roster and prompt settings. The two controls for custom experiments are documented in [Custom harness experiments](../run_sh_eval/README.md#custom-harness-experiments).
+The standard launchers in [run_sh_eval](../run_sh_eval/README.md) set these variables for each variant. Custom experiments outside the launchers can set `KIMI_CODE_SUBAGENT` and `KIMI_PLAN_FIRST` directly.
 
 ## Custom prompt files
 

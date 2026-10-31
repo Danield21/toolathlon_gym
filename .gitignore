@@ -35,3 +35,6 @@ backups/oracle_prompts/new_taskmd_167_before_remaining74_latest_20260827-202041.
 scripts/audit_html_gen.py.bak_api_exclude_20260818-223308
 run_sh_eval/tests
 backups
+
+# Local agent tool state
+.omc/

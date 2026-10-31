@@ -215,7 +215,7 @@ def launch(env, tasks, plan):
             print(f"MS-Eval: 166 cases; results: {output}", flush=True)
             runner = subprocess.Popen(["bash", str(HERE / "runner.sh"), *tasks], env=env, start_new_session=True)
             try:
-                return runner.wait()
+                status = runner.wait()
             finally:
                 if runner.poll() is None:
                     runner.send_signal(signal.SIGTERM)
@@ -230,6 +230,12 @@ def launch(env, tasks, plan):
                 gateway.wait()
         for sig, handler in previous.items():
             signal.signal(sig, handler)
+    # Per-case audit pages are the input of the MS-Eval metric scripts (as in the Docker backend).
+    audit = Path(env["PROJECT_ROOT"]) / "scripts/audit_html_gen.py"
+    if subprocess.run([sys.executable, str(audit), str(output)], check=False).returncode:
+        print("Audit HTML generation failed; raw artifacts retained.", file=sys.stderr)
+    print(f"Results: {output}", flush=True)
+    return status
 
 
 def main():

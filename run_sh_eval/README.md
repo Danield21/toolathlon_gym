@@ -1,114 +1,79 @@
-# Evaluation launchers
+# Evaluation Launchers
 
-[中文说明](README.zh-CN.md)
+English | [简体中文](README.zh-CN.md)
 
-Choose a model/variant directory to run the fixed 166-task suite. Each launcher explicitly selects its roster and prompts.
+One launcher per model and variant. Each runs the fixed 166-task MS-Eval suite and writes results to `results/<model>/<variant>/` in the MS-Eval root.
 
-- **Docker:** build the MS-Eval images, then follow [Running evaluations](#running-evaluations). Use the model's `run.sh --backend docker` entrypoint.
-- **Cluster:** prepare the image and runtime files with the [Enroot build guide](../../enroot/README.md). `run.sh` keeps the existing cluster backend by default; `--backend enroot` selects it explicitly.
+## Quick Start
 
-Start evaluations with `<model_name>/<execution_mode>/run.sh`. It loads that preset's `config.env` (or `--config FILE`) and selects the requested backend. `_common/` and `docker/` contain internal support code.
-
-## Directory layout
-
-```text
-run_sh_eval/
-├── README.md
-├── README.zh-CN.md
-├── _common/
-│   └── launch.sh               # Internal configuration loading and backend selection
-├── docker/                    # Docker runner, API gateway and container entrypoint
-├── claude-sonnet-5/
-│   ├── sa/                    # Single-Agent baseline
-│   └── spec/                  # Specialist sub-Agents
-├── deepseek-v4-flash-0731/
-│   ├── sa/                    # Single-Agent baseline
-│   ├── spec/                  # Specialist sub-Agents
-│   ├── gen/                   # Generalist sub-Agents
-│   ├── oracle/                # Generalist sub-Agents + oracle task briefs
-│   └── plan1st/               # Generalist sub-Agents + plan-first
-├── glm-5.3/
-│   ├── sa/                    # Single-Agent baseline
-│   └── spec/                  # Specialist sub-Agents
-├── glm-5.3-flash/
-│   ├── sa/                    # Single-Agent baseline
-│   └── spec/                  # Specialist sub-Agents
-├── gpt-5.6-sol/
-│   ├── sa/                    # Single-Agent baseline
-│   └── spec/                  # Specialist sub-Agents
-├── kimi-k3/
-│   ├── sa/                    # Single-Agent baseline
-│   └── spec/                  # Specialist sub-Agents
-├── minimax-m3/
-│   ├── sa/                    # Single-Agent baseline
-│   └── spec/                  # Specialist sub-Agents
-└── qwen-3.8-max/
-    ├── sa/                    # Single-Agent baseline
-    └── spec/                  # Specialist sub-Agents
-```
-
-Each `<model_name>/<execution_mode>/` directory contains:
-
-| File | Purpose |
-| --- | --- |
-| `run.sh` | Evaluation entrypoint for this model and variant |
-| `config.env.example` | API and runtime configuration template; copy to `config.env` |
-| `model.json`, `eval_config.json` | Model defaults, experiment variant and evaluation settings |
-| `tasks.txt` | Fixed 166-task manifest |
-| `launch.py`, `runner.sh` | Preset preparation and cluster backend |
-| `api_gateway.py`, `schema.py` | Model API adaptation |
-| `report.py` | Check completion of a full evaluation run |
-| `README.md` | Instructions for this preset |
-
-Keep the full directory structure when running a preset. Local `config.env` files and run results are Git-ignored.
-
-## Evaluation modes
-
-| Variant | Roster | Prompt sections | Plan-first | Environment variables |
-| --- | --- | --- | --- | --- |
-| `sa` | `none`: single Agent | No delegation sections | Off | `KIMI_CODE_SUBAGENT=none` |
-| `spec` | `spec`: plan and six specialists | `subagent_types_spec.md`, `examples_spec.md` | Off | `KIMI_CODE_SUBAGENT=spec` |
-| `gen` | `gen`: coder, explore, plan | `subagent_types_gen.md`, `examples_gen.md` | Off | `KIMI_CODE_SUBAGENT=gen` |
-| `oracle` | `gen`, with oracle task briefs | Same as gen | Off | `KIMI_CODE_SUBAGENT=gen` |
-| `plan1st` | `gen` | Same as gen, plus `plan_first_gen.md` | On | `KIMI_CODE_SUBAGENT=gen`<br>`KIMI_PLAN_FIRST=1` |
-
-The launcher sets these variables automatically and unsets `KIMI_PLAN_FIRST` for every variant except `plan1st`.
-
-All model directories provide `sa` and `spec`, each with its own `config.env.example`, `model.json`, `tasks.txt`, and `run.sh`. SA uses the same model, sampling defaults and task set as that model's spec preset, with delegation and plan-first disabled. The [DeepSeek directory](deepseek-v4-flash-0731/) additionally provides `gen`, `oracle`, and `plan1st`. Profiles and prompt sections live under [kimi_harness/assets](../kimi_harness/assets/).
-
-`run.sh` loads the local `config.env`, then `launch.py` applies the selected experiment's fixed roster and prompt settings. Setting `KIMI_CODE_SUBAGENT` or `KIMI_PLAN_FIRST` in `config.env` does not override the published preset. Use `./run.sh --dry-run` inside an experiment directory to inspect the selected settings without calling an API. To run SA, enter the model's `sa/` directory and use `bash run.sh --backend docker` or `bash run.sh --backend enroot`. Configure SA and spec separately with matching model and sampling settings for comparison.
-
-For runtime module responsibilities and the asset layout, see the [harness README](../kimi_harness/README.md).
-
-## Running evaluations
-
-First build the image using the [Docker](../../docker/README.md) or [Enroot](../../enroot/README.md) guide. Replace `<model_name>` and `<execution_mode>` with the corresponding directory names, then run from the MS-Eval repository root:
+Build the images first ([Docker](../../docker/README.md) or [Enroot](../../enroot/README.md)). From the MS-Eval root:
 
 ```bash
-# execution_mode = sa, spec, gen, oracle, plan1st
-cd toolathlon_gym/run_sh_eval/<model_name>/<execution_mode>
-cp config.env.example config.env
-# Edit config.env: set API_BASE_URL and API_KEY; confirm MODEL_NAME and API_FORMAT.
-bash run.sh --backend docker --task canvas-course-comparison
-bash run.sh --backend docker
+cd toolathlon_gym/run_sh_eval/kimi-k3/spec
+cp config.env.example config.env && chmod 600 config.env     # set API_BASE_URL and API_KEY
+bash run.sh --backend docker --dry-run                         # print settings, no API calls
+bash run.sh --backend docker --task canvas-course-comparison   # one task
+bash run.sh --backend docker                                   # all 166 tasks
 ```
 
-For Enroot, first run `source .local/enroot/env.sh` from the repository root (adjust for a custom build directory), then use `bash run.sh --backend enroot` in place of the launch commands above. This backend runs all 166 tasks per invocation.
+Then run the single-agent baseline in `../sa` with the same settings (`cp config.env ../sa/`), and [compute the metrics](../../eval/README.md).
 
-Each preset has its own `config.env`; keep model and sampling settings identical when comparing SA and spec. Start with `MAX_CONCURRENT=1`. Set evaluation limits such as `MAX_STEPS` and `TASK_TIMEOUT_S` in the same file. Optional runtime path overrides may remain commented out for Docker.
+On a cluster, run `source .local/enroot/env.sh` in the MS-Eval root and use `--backend enroot`; each Enroot invocation runs all 166 tasks.
 
-Results are grouped by model preset directory name and evaluation variant under `results/<model_name>/<execution_mode>/<run-id>/` at the MS-Eval root, for example `results/deepseek-v4-flash-0731/spec/<run-id>/`. Each run gets a unique `<run-id>` to avoid overwriting earlier results. Per-task logs, trajectories and `eval_res.json` contain the evaluation results; the batch directory also contains a summary CSV. A successful runner exit means the evaluation completed; inspect `eval_res.json` for task scores.
+## Presets
 
-## run.sh Arguments
-
-Run `bash run.sh [arguments]` from the model's execution mode directory. Common arguments:
-
-| Argument | Purpose |
+| Model | Variants |
 | --- | --- |
-| `--backend docker` / `--backend enroot` | Select the backend; defaults to Enroot |
-| `--config FILE` | Select a configuration file; defaults to `run_sh_eval/<model_name>/<execution_mode>/config.env` |
-| `--task NAME` | Select a task; repeat for a subset, or omit to run all 166 tasks (Docker backend only) |
-| `--output DIR` | Set the results parent directory (Docker only); precedence: `--output` > `OUTPUT_ROOT` in `config.env` > default directory |
-| `--dry-run` | Show preset settings without starting evaluation or calling the model API |
-| `--check` | Check the runtime environment and configuration without calling the model API |
-| `--help` | Show all arguments supported by the selected backend |
+| `claude-sonnet-5`, `glm-5.3`, `glm-5.3-flash`, `gpt-5.6-sol`, `kimi-k3`, `minimax-m3`, `qwen-3.8-max` | `sa`, `spec` |
+| `deepseek-v4-flash-0731` | `sa`, `spec`, `gen`, `oracle`, `plan1st` |
+
+| Variant | Paradigm | Sub-agents | Difference |
+| --- | --- | --- | --- |
+| `sa` | SA | none | Single-agent baseline |
+| `spec` | MAD-SAE | `plan` + 6 domain specialists | |
+| `gen` | MAD-SAE | `coder`, `explore`, `plan` | |
+| `oracle` | MAD-SAE | same as `gen` | Task briefs include the Delegation Prior ([`data/oracle166`](../../data/oracle166/)) |
+| `plan1st` | MAD-SAE | same as `gen` | The main agent must get a plan from `plan` before acting |
+
+Each launcher fixes its variant's sub-agents and prompts; `config.env` cannot change them. Agent profiles and prompts are described in [kimi_harness](../kimi_harness/README.md).
+
+## Configuration
+
+Each preset reads its own `config.env` (Git-ignored), created from `config.env.example`.
+
+| Key | Description |
+| --- | --- |
+| `API_BASE_URL`, `API_KEY` | API base URL, without `/chat/completions` or `/messages`, and its key. Required. |
+| `API_FORMAT` | `openai` (OpenAI-compatible) or `anthropic` (Messages API) |
+| `MODEL_NAME` | API model ID; change it only if your endpoint uses another ID |
+| `TEMPERATURE`, `TOP_P`, `REASONING_EFFORT`, ... | Evaluation defaults; empty means the model default |
+| `MAX_STEPS`, `TASK_TIMEOUT_S`, `MAX_CONTEXT` | Limits per task: 100 steps, 7200 s, 262,144 tokens |
+| `MAX_CONCURRENT` | Tasks run in parallel; start with `1` |
+
+The commented path settings at the end of the file are Enroot overrides; leave them commented for Docker.
+
+## Options
+
+| Option | Description |
+| --- | --- |
+| `--backend docker` / `enroot` | Runtime; default `enroot` |
+| `--config FILE` | Use another config file |
+| `--task NAME` | Run one task; repeat for several (Docker only) |
+| `--output DIR` | Results parent directory (Docker only); `OUTPUT_ROOT` in `config.env` works for both backends |
+| `--dry-run` | Print the settings and exit |
+| `--check` | Check the runtime and configuration without calling the API |
+| `--smoke` | Offline check of the database, MCP servers and network; no API calls (Docker only) |
+
+`bash run.sh --backend docker --help` lists all options.
+
+## Output
+
+```text
+results/<model>/<variant>/<run-id>/
+├── run.json, tasks.txt                # settings and task list
+├── summary_parallel_<run-id>.csv      # execution status per task
+├── audit_index.html
+└── <task>/<run-id>_slotN/             # logs, agent session, audit.html
+```
+
+Every invocation creates a new `<run-id>`, so earlier runs are kept. To retry tasks, run them again with `--task`; the metric scripts use the latest run of each task. To check that a run covered all 166 tasks, run `python3 report.py <run-dir>` in the preset directory.
