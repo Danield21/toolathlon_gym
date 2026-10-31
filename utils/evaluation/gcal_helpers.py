@@ -19,9 +19,7 @@ Key contract (do not change without reading the design doc):
 
 Therefore: evaluators MUST go through one of the helpers in this module,
 NEVER use bare ``sd.hour`` / ``sd.minute`` / ``sd.date()`` /
-``strftime('%H:%M')`` on a row read from ``gcal.events``. The lint in
-``scripts/lint_gcal_evals.sh`` rejects any stray bare usage so future
-evaluators cannot re-introduce the bug.
+``strftime('%H:%M')`` on a row read from ``gcal.events``.
 
 Two helpers cover the two legitimate "which zone are we comparing against"
 semantics seen across the affected evaluators:

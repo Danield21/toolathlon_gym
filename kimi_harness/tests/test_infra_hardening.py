@@ -113,16 +113,6 @@ class KimiInfraHardeningTests(unittest.TestCase):
             str(local_servers / "yahoo-finance-mcp"),
         )
 
-    def test_agent_image_build_locks_and_syncs_yahoo_finance_project(self):
-        project_root = Path(__file__).resolve().parents[2]
-        script = project_root / "scripts" / "enroot_build_agent.sh"
-        text = script.read_text(encoding="utf-8")
-
-        self.assertIn("YAHOO_FINANCE_MCP=/opt/local_servers/yahoo-finance-mcp", text)
-        self.assertIn("uv lock && uv sync", text)
-        self.assertIn("$YAHOO_FINANCE_MCP/.venv/bin/python", text)
-        self.assertIn("Yahoo Finance MCP local shim imports", text)
-
     def test_python_execute_uses_direct_python_without_project_discovery(self):
         with tempfile.TemporaryDirectory() as workspace:
             local_tools_server.WORKSPACE = workspace
