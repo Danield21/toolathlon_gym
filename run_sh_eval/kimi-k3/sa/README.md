@@ -2,26 +2,28 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Single-agent (SA) baseline for `kimi-k3`: the same model and settings as [`spec`](../spec/README.md), without sub-agents. Keep this `config.env` identical to the one in `../spec`.
+Single-agent (SA) baseline: the same model and settings as [`../spec`](../spec/README.md), without sub-agents. Every MAD-SAE variant of this model is compared with it.
+
+## Run
 
 ```bash
-cp config.env.example config.env && chmod 600 config.env   # set API_BASE_URL and API_KEY
-bash run.sh --backend docker --dry-run                       # print settings, no API calls
-bash run.sh --backend docker                                 # all 166 tasks
+cp -p ../spec/config.env config.env      # same settings as spec, or fill in config.env.example
+bash run.sh --backend docker --dry-run   # check settings, no API calls
+bash run.sh --backend docker             # all 166 tasks
 ```
 
-Results go to `results/kimi-k3/sa/` in the MS-Eval root. Enroot, options and output files: [run guide](../../README.md).
+Results go to `results/kimi-k3/sa/` in the MS-Eval root. For Enroot, options and output files, see the [run guide](../../README.md).
 
 ## Defaults
 
-API model ID `kimi-k3` ([docs](https://platform.moonshot.ai/docs/guide/kimi-k3-quickstart)), `API_FORMAT=openai`.
+These are the settings used in the paper; keep them to reproduce the results. API model ID: `kimi-k3` ([docs](https://platform.moonshot.ai/docs/guide/kimi-k3-quickstart)); `API_FORMAT=openai`.
 
 | `config.env` | Default | Meaning |
 | --- | --- | --- |
 | `TEMPERATURE`, `TOP_P` | 1, 0.95 | Sampling |
 | `REASONING_EFFORT` | max | Reasoning effort |
-| `ENABLE_THINKING` | 0 | Add `enable_thinking: true` to requests |
-| `BREAK_SCHEMA_CYCLES` | 1 | Remove recursive references from tool schemas |
-| `MAX_OUTPUT_TOKENS` | 0 (none) | Output token cap per request |
-| `MAX_CONTEXT`, `MAX_STEPS`, `TASK_TIMEOUT_S` | 262144, 100, 7200 | Limits per task: tokens, steps, seconds |
+| `ENABLE_THINKING` | 0 | `1` adds `enable_thinking: true` to requests |
+| `BREAK_SCHEMA_CYCLES` | 1 | `1` removes recursive references from tool schemas |
+| `MAX_OUTPUT_TOKENS` | 0 (no cap) | Output token cap per request |
+| `MAX_CONTEXT`, `MAX_STEPS`, `TASK_TIMEOUT_S` | 262144, 100, 7200 | Per-task limits: tokens, steps, seconds |
 | `MAX_CONCURRENT` | 1 | Tasks run in parallel |
