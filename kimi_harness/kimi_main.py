@@ -74,46 +74,13 @@ Completion Protocol (Mandatory):
 - **Warning**: this call terminates the task instantly. You will have no further opportunity to act on this task afterward.\
 """
 
-# --- Pluggable prompt sections (ablation-ready) -----------------------------
-# Sub-agent type descriptions and examples are loaded from separate files so
-# different subagent combinations can be swapped via env vars without touching
-# code.  Set KIMI_SUBAGENTS="plan,academic-literature-researcher" to pin a
-# subset, KIMI_EXAMPLES_FILE to an empty file to remove examples entirely, etc.
-#
-# Roster selector (KIMI_CODE_SUBAGENT overrides KIMI_SUBAGENTS when non-empty):
-#   unset                         → legacy trio (coder/explore/plan)
-#   7 / seven                     → 7-agent roster (plan + 6 domain specialists)
-#   ten / 10 / all                → intern 10-agent roster (plan + 7 specialists
-#                                   + evidence-integrator + deliverable-auditor)
-#   three / 3                     → pin the legacy trio
-#   ""                            → disable all sub-agents
-#   comma list                    → exactly those agents
-#
-# The 7-agent profiles live in assets/subagents_seven/ and do not replace the
-# intern 10-agent YAML under assets/subagents/.
-
+# Prompt assets for the published evaluation variants.
+# KIMI_CODE_SUBAGENT selects gen (default), spec, or none (SA).
+# gen: coder, explore, plan (gen, oracle, plan1st).
+# spec: plan plus six specialists.
 SECTIONS_DIR = os.path.join(HARNESS_DIR, "assets", "sections")
-LEGACY_SUBAGENTS = ("coder", "explore", "plan")  # retired; kept for the "three" preset
-SPECIALIZED_SUBAGENTS = (
-    "academic-literature-researcher",
-    "web-domain-researcher",
-    "enterprise-data-analyst",
-    "financial-market-analyst",
-    "workspace-data-engineer",
-    "office-report-builder",
-    "external-workflow-operator",
-)
-# Cross-cutting function agents (not bound to one tool domain): merge parallel
-# evidence, and independently audit finished deliverables.
-CROSSCUT_SUBAGENTS = (
-    "evidence-integrator",
-    "deliverable-auditor",
-)
-PROFILE_SUBAGENTS = SPECIALIZED_SUBAGENTS + CROSSCUT_SUBAGENTS
-TEN_SUBAGENTS = ("plan",) + PROFILE_SUBAGENTS
-# 7-agent roster: intern 10 minus workspace-data-engineer / evidence-integrator
-# / deliverable-auditor. Office absorbs local workspace writes.
-SEVEN_SPECIALISTS = (
+GEN_SUBAGENTS = ("coder", "explore", "plan")
+SPEC_SPECIALISTS = (
     "academic-literature-researcher",
     "web-domain-researcher",
     "enterprise-data-analyst",
@@ -121,19 +88,11 @@ SEVEN_SPECIALISTS = (
     "office-report-builder",
     "external-workflow-operator",
 )
-SEVEN_SUBAGENTS = ("plan",) + SEVEN_SPECIALISTS
-# Default (unset) stays the legacy trio: existing launch scripts keep producing
-# pre-redesign prompts; opt in with KIMI_CODE_SUBAGENT=7 or KIMI_SUBAGENTS=ten.
-DEFAULT_SUBAGENTS = LEGACY_SUBAGENTS
-# Named presets accepted by _active_subagents() (case-insensitive).
+SPEC_SUBAGENTS = ("plan",) + SPEC_SPECIALISTS
 SUBAGENT_PRESETS = {
-    "seven": list(SEVEN_SUBAGENTS),
-    "7": list(SEVEN_SUBAGENTS),
-    "ten": list(TEN_SUBAGENTS),
-    "10": list(TEN_SUBAGENTS),
-    "all": list(TEN_SUBAGENTS),
-    "three": list(LEGACY_SUBAGENTS),
-    "3": list(LEGACY_SUBAGENTS),
+    "gen": list(GEN_SUBAGENTS),
+    "spec": list(SPEC_SUBAGENTS),
+    "none": [],
 }
 
 CORE_RESPONSIBILITIES_BASE = (
@@ -155,27 +114,15 @@ CORE_RESPONSIBILITIES_TRUST = (
     "contract. Preserve facts, artifact paths, resource IDs, digests, provenance, and "
     "verification results without silently reshaping them."
 )
-CORE_RESPONSIBILITIES_TRUST_SEVEN = (
+CORE_RESPONSIBILITIES_TRUST_SPEC = (
     "- Trust sub-agent outputs that satisfy their return contract. Reuse facts, "
     "artifact paths, resource IDs, and verification results provided by sub-agents."
 )
-CORE_RESPONSIBILITIES_SPECIALIST = (
-    "- When a domain specialist matches the sub-task (papers, web evidence, enterprise "
-    "data, market data, workspace engineering, office artifacts, external workflows), "
-    "delegate to the narrowest matching profile. When no specialist matches, do the "
-    "work yourself rather than inventing a generalist delegate."
-)
-CORE_RESPONSIBILITIES_SPECIALIST_SEVEN = (
+CORE_RESPONSIBILITIES_SPECIALIST_SPEC = (
     "- When a domain specialist matches the sub-task (papers, web evidence, enterprise "
     "data, market data, office artifacts, external workflows), delegate to the "
     "narrowest matching profile. When no specialist matches, do the work yourself "
     "rather than inventing a generalist delegate."
-)
-CORE_RESPONSIBILITIES_CROSSCUT = (
-    "- Route cross-cutting phases to their dedicated agents: merge parallel evidence "
-    "packets through `evidence-integrator` instead of reconciling them in your own "
-    "context, and, when the audit threshold applies, obtain an independent per-criterion "
-    "verdict from `deliverable-auditor` before signaling completion."
 )
 
 
@@ -199,16 +146,12 @@ def _boundary_section(workspace: str) -> str:
 def _core_responsibilities(subagents: list, workspace: str = "") -> str:
     lines = [CORE_RESPONSIBILITIES_BASE]
     if subagents:
-        trust = (CORE_RESPONSIBILITIES_TRUST_SEVEN if _is_seven_roster()
+        trust = (CORE_RESPONSIBILITIES_TRUST_SPEC if _is_spec_roster()
                  else CORE_RESPONSIBILITIES_TRUST)
         lines += [CORE_RESPONSIBILITIES_DELEGATION, CORE_RESPONSIBILITIES_PARALLEL,
                   trust]
-        if _is_seven_roster():
-            lines.append(CORE_RESPONSIBILITIES_SPECIALIST_SEVEN)
-        elif any(s in PROFILE_SUBAGENTS for s in subagents):
-            lines.append(CORE_RESPONSIBILITIES_SPECIALIST)
-        if any(s in CROSSCUT_SUBAGENTS for s in subagents):
-            lines.append(CORE_RESPONSIBILITIES_CROSSCUT)
+        if _is_spec_roster():
+            lines.append(CORE_RESPONSIBILITIES_SPECIALIST_SPEC)
     else:
         lines.append(CORE_RESPONSIBILITIES_PARALLEL)
     out = "\n".join(lines)
@@ -227,55 +170,9 @@ When assigning a sub-agent, provide a comprehensive and self-contained prompt th
 Keep the prompt concise and unambiguous — direct, not verbose.\
 """
 
-ORCHESTRATION_RULES = """\
-Sub-Agent Orchestration Rules:
 
-- General Delegation:
-  - Delegate focused subtasks to available sub-agents via the Agent tool. For parallel execution, use the AgentSwarm tool.
-  - If a **Specified Sub-Agent Coordination** section appears later in this prompt, follow that prescribed workflow strictly when assigning and coordinating sub-agents; it overrides your default delegation judgment.
-  - Do not assign write-related sub-tasks to read-only sub-agents.
-
-- Parallelism Guidelines:
-  - For parallel sub-agents with different roles, issue multiple Agent tool calls within the same response.
-  - For parallel sub-agents of one type, one prompt template, and distinct items, issue only the AgentSwarm tool call in that response (no other tool calls allowed).
-
-- Environment & Context:
-  - By default, sub-agents inherit the same task-scoped tools and workspace permissions as the parent agent, including terminal access, filesystem read/write operations, Python execution, database interactions, spreadsheet/document generation, calendar/email capabilities, and other tools enabled for the current task. However, if a sub-agent YAML configuration defines customized tool permissions or workspace directory access, the customized configuration overrides the inherited defaults.
-  - Current roster YAML customizations (the Agent tool description lists each type's Tools; do not assume any sub-agent has every tool you have):
-    - Write-capable specialists (`workspace-data-engineer`, `office-report-builder`, `external-workflow-operator`) receive a task-scoped write tool ceiling for their domain.
-    - Research specialists, `plan`, and `deliverable-auditor` operate **read-only** over their domains. They cannot create, update, delete, send, or otherwise mutate persistent state (Notion pages, email, calendar events, Canvas/WooCommerce writes, spreadsheet writes, etc.).
-    - `evidence-integrator` cannot query domain systems or mutate external state, but it may write one named canonical intermediate dataset inside the task workspace.
-    - Do not ask a read-only agent to call a write tool.
-  - Every sub-agent prompt must be **self-contained** — sub-agents operate in isolated contexts and cannot see the current user message or your previous reasoning steps.
-
-- Role Boundaries & Staged Handoffs:
-  - Select the narrowest profile whose semantic responsibility and task-scoped tool ceiling both fit the subtask; tool availability alone is not a reason to select a role.
-  - When one apparent subtask crosses profile boundaries, split it into **producer and consumer phases**: a domain researcher returns EvidencePacket v1, then `workspace-data-engineer`, `office-report-builder`, or `external-workflow-operator` consumes the frozen packet and returns its versioned artifact packet or **DeliverableReceipt v1**.
-  - **Never broaden a profile's tool ceiling** to keep a cross-domain subtask monolithic. If a step is genuinely atomic and no profile fits, execute that residual step in the main agent with the task-granted tools.
-
-- Evidence Integration:
-  - Research specialists return **EvidencePacket v1**. When two or more parallel packets must feed shared deliverables, delegate their merge to `evidence-integrator`; do not reconcile multi-packet joins ad hoc in your own context.
-  - Inline small packets verbatim. Packets larger than 32 KiB, packets already materialized by a sub-agent, or packets whose duplication would materially bloat context must be passed as **named workspace files** with path, size, and digest. If a required packet cannot be materialized or its size and digest cannot be computed, you must stop before integration and report the blocker. The integrator holds no domain tools and cannot re-fetch missing facts.
-  - Treat **CanonicalEvidence v1** from the integrator as the single source for downstream construction; resolve its `conflicts` and `unresolved` lists yourself before dispatching builders.
-  - Skip the integrator when a task has only one evidence branch or the packets need no joining — project directly.
-
-- Pre-Completion Audit:
-  - Before calling `mcp__local__claim_done`, delegate `deliverable-auditor` **whenever deliverables span two or more systems or the acceptance list has several independently checkable criteria**; hand it the per-criterion checklist plus the deliverable inventory (paths/IDs) and require **AuditReport v1**.
-  - Treat the audit as fail-closed: repair every FAIL and re-audit the affected criteria; investigate every UNKNOWN yourself with authoritative read-backs. You **must not call `mcp__local__claim_done`** while any applicable criterion remains FAIL or UNKNOWN. The gate opens only when every criterion is PASS.
-  - For a single trivial deliverable, verify it yourself with read-backs instead — the audit must earn its cost.
-
-- When & How to Delegate:
-  - Delegate when a subtask is independent and would otherwise bloat your own context (e.g. researching sources, drafting documents, verifying intermediate results).
-  - **Never delegate the final completion signal.** Only *you* may call `mcp__local__claim_done` after verifying that *every* requirement has been met (directly, or via the auditor's verdict).
-  - Default to **foreground** sub-agents (`run_in_background=false`). Use `run_in_background=true` **only** for long-running work where you can proceed without the result immediately. Do not poll background agents, and do not restate a single background result unless integration requires it.
-  - Prefer **resume** when an existing sub-agent already holds relevant context or the current task is a continuation of its prior work.\
-"""
-
-# Three-agent orchestration text. Environment & Context uses the same
-# inherit-then-YAML-override wording as the ten-agent rules; the rest of this
-# block stays on the pre-redesign structure so KIMI_SUBAGENTS=three still
-# selects the legacy catalog/examples rather than the specialist roster.
-ORCHESTRATION_RULES_LEGACY = """\
+# Preserve the published three-agent orchestration prompt.
+ORCHESTRATION_RULES_GEN = """\
 Sub-Agent Orchestration Rules:
 
 - General Delegation:
@@ -295,9 +192,8 @@ Sub-Agent Orchestration Rules:
   - Prefer **resume** when an existing sub-agent already holds relevant context or the current task is a continuation of its prior work.\
 """
 
-# 7-agent orchestration: three-agent wording plus the six domain specialists.
-# No EvidencePacket / integrator / auditor / workspace-data-engineer.
-ORCHESTRATION_RULES_SEVEN = """\
+# Seven-agent orchestration for the spec variant.
+ORCHESTRATION_RULES_SPEC = """\
 Sub-Agent Orchestration Rules:
 
 - General Delegation:
@@ -322,43 +218,22 @@ Sub-Agent Orchestration Rules:
   - Prefer **resume** when an existing sub-agent already holds relevant context or the current task is a continuation of its prior work.\
 """
 
-# Retired pre-redesign agents: their presence in the active roster switches the
-# whole prompt (orchestration rules + section files) back to the legacy variant.
-RETIRED_SUBAGENTS = ("coder", "explore")
-
-
-def _is_legacy_roster(subagents: list) -> bool:
-    return any(s in RETIRED_SUBAGENTS for s in subagents)
-
-
-def _roster_selector_raw() -> str | None:
-    """Return the raw roster selector.
-
-    ``KIMI_CODE_SUBAGENT`` overrides ``KIMI_SUBAGENTS`` when it is non-empty,
-    so ``KIMI_CODE_SUBAGENT=7`` selects the 7-agent roster even if an older
-    launch script also exported ``KIMI_SUBAGENTS``.
-    """
-    code = os.environ.get("KIMI_CODE_SUBAGENT", "").strip()
-    if code:
-        return code
+def _roster_selector() -> str:
+    """Resolve the single roster setting; fail on obsolete or invalid input."""
     if "KIMI_SUBAGENTS" in os.environ:
-        return os.environ["KIMI_SUBAGENTS"]
-    return None
+        raise ValueError("KIMI_SUBAGENTS is no longer supported; unset it and use KIMI_CODE_SUBAGENT=gen|spec|none")
+    code = os.environ.get("KIMI_CODE_SUBAGENT", "gen").strip().lower()
+    if code not in SUBAGENT_PRESETS:
+        raise ValueError(f"Unsupported KIMI_CODE_SUBAGENT {code!r}; use gen, spec, or none")
+    return code
 
 
-def _is_seven_roster() -> bool:
-    raw = _roster_selector_raw()
-    if raw is None:
-        return False
-    return raw.strip().lower() in ("7", "seven")
+def _is_spec_roster() -> bool:
+    return _roster_selector() == "spec"
 
 
 def _orchestration_rules(subagents: list) -> str:
-    if _is_legacy_roster(subagents):
-        return ORCHESTRATION_RULES_LEGACY
-    if _is_seven_roster():
-        return ORCHESTRATION_RULES_SEVEN
-    return ORCHESTRATION_RULES
+    return ORCHESTRATION_RULES_SPEC if _is_spec_roster() else ORCHESTRATION_RULES_GEN
 
 
 def _load_section(filename: str) -> str:
@@ -370,37 +245,13 @@ def _load_section(filename: str) -> str:
 
 
 def _active_subagents() -> list:
-    """Return the list of sub-agent types to enable for this run.
-
-    Unset → legacy trio (coder/explore/plan) — the default, matching all
-    pre-redesign runs.
-    ``KIMI_CODE_SUBAGENT`` overrides ``KIMI_SUBAGENTS`` when non-empty.
-    "7" / "seven" → 7-agent roster (plan + 6 domain specialists).
-    "ten" / "10" / "all" → intern 10-agent roster.
-    "three" / "3" → same legacy trio, pinned explicitly.
-    Explicit empty string → none (disable all sub-agents).
-    Comma list → exactly those agents (e.g. "plan,evidence-integrator").
-    """
-    raw = _roster_selector_raw()
-    if raw is None:
-        return list(DEFAULT_SUBAGENTS)
-    preset = SUBAGENT_PRESETS.get(raw.strip().lower())
-    if preset is not None:
-        return list(preset)
-    return [s.strip() for s in raw.split(",") if s.strip()]
+    """Select one complete roster, or disable sub-agents for SA."""
+    return list(SUBAGENT_PRESETS[_roster_selector()])
 
 
 def _subagent_types_section(subagents: list) -> str:
     """Load the subagent-types section file, filtered to active sub-agents."""
-    if _is_seven_roster():
-        fname = "subagent_types_seven.md"
-    elif _is_legacy_roster(subagents):
-        fname = "subagent_types_default.md"
-        legacy = _load_section("subagent_types_legacy.md")
-        if legacy:
-            fname = "subagent_types_legacy.md"
-    else:
-        fname = "subagent_types_default.md"
+    fname = "subagent_types_spec.md" if _is_spec_roster() else "subagent_types_gen.md"
     raw = _load_section(fname)
     if not raw:
         return ""
@@ -418,9 +269,8 @@ def _subagent_types_section(subagents: list) -> str:
     return "\n".join(kept)
 
 
-# Full roster for example-block filtering: current 10 plus the retired trio's
-# coder/explore so legacy example files filter correctly under KIMI_SUBAGENTS=three.
-_SUBAGENT_NAMES = TEN_SUBAGENTS + RETIRED_SUBAGENTS
+# Names used to filter examples to the active roster.
+_SUBAGENT_NAMES = tuple(dict.fromkeys(GEN_SUBAGENTS + SPEC_SUBAGENTS))
 _EXAMPLE_BLOCK_RE = re.compile(r"<example>.*?</example>", re.DOTALL)
 
 
@@ -452,13 +302,8 @@ def _examples_section(subagents: list | None = None) -> str:
     subagents = subagents if subagents is not None else _active_subagents()
     if "KIMI_EXAMPLES_FILE" in os.environ:
         fname = os.environ["KIMI_EXAMPLES_FILE"]
-    elif _is_seven_roster():
-        fname = "examples_seven.md"
     else:
-        fname = ("examples_legacy.md" if _is_legacy_roster(subagents)
-                 else "examples_default.md")
-        if _is_legacy_roster(subagents) and not _load_section(fname):
-            fname = "examples_default.md"
+        fname = "examples_spec.md" if _is_spec_roster() else "examples_gen.md"
     raw = _load_section(fname)
     if not raw:
         return ""
@@ -470,11 +315,13 @@ def _examples_section(subagents: list | None = None) -> str:
 def _coordination_section() -> str:
     """Load optional prescribed sub-agent coordination workflow (ablation-ready).
 
-    Default file is empty → section omitted. Set KIMI_COORDINATION_FILE to a
+    Omitted by default. Set KIMI_COORDINATION_FILE to a
     non-empty markdown file to inject hard-coded coordination instructions
     immediately before Completion Protocol.
     """
-    fname = os.environ.get("KIMI_COORDINATION_FILE", "subagent_coordination_default.md")
+    fname = os.environ.get("KIMI_COORDINATION_FILE", "")
+    if not fname:
+        return ""
     raw = _load_section(fname)
     if not raw:
         return ""
@@ -505,13 +352,8 @@ def _plan_first_section(subagents: list) -> str:
         return ""
     if "KIMI_PLAN_FIRST_FILE" in os.environ:
         fname = os.environ["KIMI_PLAN_FIRST_FILE"]
-    elif _is_seven_roster():
-        fname = "plan_first_seven.md"
     else:
-        fname = ("plan_first_legacy.md" if _is_legacy_roster(subagents)
-                 else "plan_first_default.md")
-        if _is_legacy_roster(subagents) and not _load_section(fname):
-            fname = "plan_first_default.md"
+        fname = "plan_first_spec.md" if _is_spec_roster() else "plan_first_gen.md"
     return _load_section(fname)
 
 # Read-only tool selection for `explore` / `plan` sub-agents.
@@ -608,18 +450,13 @@ _SUBAGENT_BOUNDARY = (
 
 
 def _profile_src_dir() -> str:
-    """Directory holding the YAML bodies for the active roster.
-
-    The 7-agent rewrite lives in ``assets/subagents_seven/`` so the intern
-    10-agent files under ``assets/subagents/`` stay intact for ``ten``.
-    """
-    if _is_seven_roster():
-        return os.path.join(HARNESS_DIR, "assets", "subagents_seven")
-    return os.path.join(HARNESS_DIR, "assets", "subagents")
+    """Use the distinct gen or spec profile bodies."""
+    directory = "subagents_spec" if _is_spec_roster() else "subagents_gen"
+    return os.path.join(HARNESS_DIR, "assets", directory)
 
 
 def render_subagent_profile(name, tools_list, disallowed=None):
-    """Read assets/subagents/<name>.md, keep its body, rewrite frontmatter
+    """Read the selected roster profile, keep its body, rewrite frontmatter
     with an explicit read-only tool allowlist."""
     src = os.path.join(_profile_src_dir(), f"{name}.md")
     with open(src, encoding="utf-8") as f:
@@ -932,13 +769,9 @@ def write_kimi_home(home: str, task_config, workspace: str, marker: str,
     with open(os.path.join(home, "mcp.json"), "w", encoding="utf-8") as f:
         json.dump({"mcpServers": servers}, f, indent=2, ensure_ascii=False)
 
-    # Sub-agent profiles. Legacy coder (retired, "three" preset only) keeps the
-    # full MCP set (minus claim_done); explore and plan get an explicit
-    # read-only allowlist computed from the task's MCP servers so
-    # write/create/delete tools are not even visible.  Specialist profiles
-    # (10-agent intern roster or 7-agent rewrite) keep their own declared tool
-    # ceiling intersected with this task's MCP servers — no match renders
-    # `tools: []` (fail closed), never the full MCP set.
+    # Coder keeps the MCP set except explicitly denied tools. Explore and
+    # plan use a read-only allowlist. The six spec specialists intersect their
+    # declared tool ceilings with the task's servers; no match grants no tools.
     active = _active_subagents()
     server_names = list(servers.keys())
     readonly_patterns = build_readonly_tool_patterns(server_names)
@@ -964,8 +797,7 @@ def write_kimi_home(home: str, task_config, workspace: str, marker: str,
         )
         with open(os.path.join(home, "agents", f"{name}.md"), "w", encoding="utf-8") as f:
             f.write(content)
-    specialist_names = SEVEN_SPECIALISTS if _is_seven_roster() else PROFILE_SUBAGENTS
-    for name in specialist_names:
+    for name in SPEC_SPECIALISTS:
         if name not in active:
             continue
         specialist_tools = profile_tools_for_task(name, server_names)

@@ -1,0 +1,4 @@
+{
+  "global_task_config": {"max_steps_under_single_turn_mode": 100},
+  "dump_path": "./dumps/"
+}

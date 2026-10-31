@@ -1,4 +1,5 @@
 import os
+import hashlib
 import subprocess
 import tempfile
 import unittest
@@ -10,8 +11,54 @@ import yaml
 
 from kimi_harness import kimi_main, local_tools_server, mcp_json_gen
 
-
 class KimiInfraHardeningTests(unittest.TestCase):
+    def test_roster_selection_and_profile_assets(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(kimi_main._active_subagents(), ["coder", "explore", "plan"])
+        for selector, expected in (("gen", kimi_main.GEN_SUBAGENTS),
+                                   ("spec", kimi_main.SPEC_SUBAGENTS), ("none", ())):
+            with self.subTest(selector=selector), mock.patch.dict(
+                os.environ, {"KIMI_CODE_SUBAGENT": selector}, clear=True
+            ):
+                self.assertEqual(kimi_main._active_subagents(), list(expected))
+                for name in expected:
+                    directory = Path(kimi_main._profile_src_dir())
+                    self.assertEqual(directory.name, f"subagents_{selector}")
+                    self.assertTrue((directory / f"{name}.md").is_file())
+
+    def test_published_prompts_match_before_cleanup(self):
+        # Captured before removing the unused ten-agent branch. These hashes
+        # protect the exact experimental prompts, including whitespace.
+        cases = [
+            ({"KIMI_CODE_SUBAGENT": "gen"}, "2af994f928ba5f17d747d6b16810220bc30769bf623a772fbb0db5e195520491"),
+            ({"KIMI_CODE_SUBAGENT": "spec"}, "d1bdbd5009ccc2c292f2b5741aaf516cec0c267b559c71b4577e2699b2ff30e0"),
+            ({"KIMI_PLAN_FIRST": "1"}, "1abb528e917f18ddb3235253c2a93d5508962cb394185dbb24bf0c9e6ad151a2"),
+            ({"KIMI_CODE_SUBAGENT": "none"}, "006561b72d0c4b470179ca896711088904405e4542002813a68f29d13e34168f"),
+            ({"KIMI_CODE_SUBAGENT": "spec", "KIMI_PLAN_FIRST": "1"}, "3df094662027aae7ce09687197ca83dbb916004b8738ef2d947fd65adaa426a2"),
+        ]
+        task = SimpleNamespace(agent_workspace="/workspace/test-task",
+                               system_prompts=SimpleNamespace(agent="Complete the task."))
+        for env, expected in cases:
+            with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=True):
+                prompt = kimi_main.render_system_prompt(task)
+                self.assertEqual(hashlib.sha256(prompt.encode()).hexdigest(), expected)
+
+    def test_aliases_subsets_and_invalid_rosters_fail_explicitly(self):
+        for selector in ("", "3", "three", "7", "seven", "10", "ten", "all", "plan",
+                         "workspace-data-engineer", "coder,plan", "plan,office-report-builder"):
+            with self.subTest(selector=selector), mock.patch.dict(
+                os.environ, {"KIMI_CODE_SUBAGENT": selector}, clear=True
+            ):
+                with self.assertRaisesRegex(ValueError, "Unsupported KIMI_CODE_SUBAGENT"):
+                    kimi_main._active_subagents()
+
+    def test_removed_selector_variable_requires_migration(self):
+        for env in ({"KIMI_SUBAGENTS": ""}, {"KIMI_SUBAGENTS": "spec"},
+                    {"KIMI_SUBAGENTS": "gen", "KIMI_CODE_SUBAGENT": "spec"}):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=True):
+                with self.assertRaisesRegex(ValueError, "unset it and use KIMI_CODE_SUBAGENT"):
+                    kimi_main._active_subagents()
+
     def test_provider_wire_and_base_url_normalization(self):
         with mock.patch.dict(
             os.environ,
@@ -198,7 +245,7 @@ class KimiInfraHardeningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "agent_main.md")
 
-            with mock.patch.dict(os.environ, {"KIMI_SUBAGENTS": ""}):
+            with mock.patch.dict(os.environ, {"KIMI_CODE_SUBAGENT": "none"}):
                 kimi_main.write_agentfile(path, "System prompt")
 
             text = Path(path).read_text(encoding="utf-8")
@@ -510,7 +557,7 @@ class KimiInfraHardeningTests(unittest.TestCase):
             "permissions or workspace directory access, the customized "
             "configuration overrides the inherited defaults"
         )
-        for text in (kimi_main.ORCHESTRATION_RULES, kimi_main.ORCHESTRATION_RULES_LEGACY):
+        for text in (kimi_main.ORCHESTRATION_RULES_GEN,):
             self.assertNotIn("Sub-agents share the same task-approved tools", text)
             self.assertIn(inherit, text)
             self.assertIn(override, text)
@@ -518,8 +565,7 @@ class KimiInfraHardeningTests(unittest.TestCase):
                 "Do not assign write-related sub-tasks to read-only sub-agents.",
                 text,
             )
-        self.assertIn("read-only", kimi_main.ORCHESTRATION_RULES)
-        seven = kimi_main.ORCHESTRATION_RULES_SEVEN
+        seven = kimi_main.ORCHESTRATION_RULES_SPEC
         self.assertNotIn("Sub-agents share the same task-approved tools", seven)
         self.assertIn(inherit, seven)
         self.assertIn(
@@ -530,23 +576,7 @@ class KimiInfraHardeningTests(unittest.TestCase):
         self.assertNotIn("evidence-integrator", seven)
         self.assertNotIn("deliverable-auditor", seven)
 
-    def test_crosscut_profile_sources_are_complete_leaf_contracts(self):
-        required = {
-            "name", "description", "whenToUse", "override", "tools",
-            "disallowedTools", "subagents",
-        }
-        for name in ("evidence-integrator", "deliverable-auditor"):
-            path = Path(kimi_main.HARNESS_DIR) / "assets" / "subagents" / f"{name}.md"
-            raw = path.read_text(encoding="utf-8")
-            metadata = yaml.safe_load(raw.split("---", 2)[1])
-            self.assertEqual(required, set(metadata), name)
-            self.assertEqual([], metadata["subagents"], name)
-            self.assertEqual(
-                {"Agent", "AgentSwarm", kimi_main.CLAIM_TOOL},
-                set(metadata["disallowedTools"]),
-                name,
-            )
-
+    @mock.patch.dict(os.environ, {"KIMI_CODE_SUBAGENT": "spec"})
     def test_fine_grained_tool_ceilings_follow_role_boundaries(self):
         all_servers = [
             "arxiv-latex", "arxiv_local", "canvas", "emails", "excel",
@@ -572,13 +602,6 @@ class KimiInfraHardeningTests(unittest.TestCase):
         web = granted("web-domain-researcher")
         self.assertIn("mcp__youtube__videos_getVideo", web)
 
-        workspace = granted("workspace-data-engineer")
-        workspace_servers = {tool.split("__", 2)[1] for tool in workspace}
-        self.assertLessEqual(
-            workspace_servers,
-            {"excel", "filesystem", "local", "pdf-tools", "terminal", "word"},
-        )
-
         office = granted("office-report-builder")
         self.assertIn("mcp__pptx__create_presentation", office)
         self.assertIn("mcp__pptx__extract_presentation_text", office)
@@ -594,83 +617,12 @@ class KimiInfraHardeningTests(unittest.TestCase):
             any("__excel__" in tool or "__snowflake__" in tool for tool in external)
         )
 
-        auditor = granted("deliverable-auditor")
-        self.assertIn("mcp__emails__read_email", auditor)
-        self.assertIn("mcp__pptx__extract_presentation_text", auditor)
-        self.assertNotIn("mcp__emails__send_email", auditor)
-        self.assertNotIn("mcp__pptx__save_presentation", auditor)
-
-    def test_fine_grained_profiles_share_versioned_handoff_contracts(self):
-        profile_dir = Path(kimi_main.HARNESS_DIR) / "assets" / "subagents"
-
-        for name in (
-            "academic-literature-researcher", "web-domain-researcher",
-            "enterprise-data-analyst", "financial-market-analyst",
-        ):
-            text = (profile_dir / f"{name}.md").read_text(encoding="utf-8")
-            self.assertIn("EvidencePacket v1", text, name)
-            for field in ("scope", "records", "coverage", "missing", "conflicts", "verification"):
-                self.assertIn(f"`{field}`", text, f"{name}: {field}")
-
-        contracts = {
-            "workspace-data-engineer": "WorkspaceArtifactPacket v1",
-            "office-report-builder": "DeliverableReceipt v1",
-            "external-workflow-operator": "DeliverableReceipt v1",
-            "evidence-integrator": "CanonicalEvidence v1",
-            "deliverable-auditor": "AuditReport v1",
-        }
-        for name, contract in contracts.items():
-            text = (profile_dir / f"{name}.md").read_text(encoding="utf-8")
-            self.assertIn(contract, text, name)
-
-        self.assertIn("EvidencePacket v1", kimi_main.ORCHESTRATION_RULES)
-        self.assertIn("named workspace files", kimi_main.ORCHESTRATION_RULES)
-        self.assertIn("path, size, and digest", kimi_main.ORCHESTRATION_RULES)
-        self.assertNotIn("digest when available", kimi_main.ORCHESTRATION_RULES)
-        self.assertIn("must stop before integration", kimi_main.ORCHESTRATION_RULES)
-
-    def test_ten_agent_prompt_has_one_dedicated_example_per_role(self):
-        task_config = SimpleNamespace(
-            agent_workspace="/tmp/toolathlon-example-contract",
-            system_prompts=SimpleNamespace(agent="Complete the task."),
-        )
-        expected_roles = (
-            "plan",
-            "academic-literature-researcher",
-            "web-domain-researcher",
-            "enterprise-data-analyst",
-            "financial-market-analyst",
-            "workspace-data-engineer",
-            "office-report-builder",
-            "external-workflow-operator",
-            "evidence-integrator",
-            "deliverable-auditor",
-        )
-
-        with mock.patch.dict(os.environ, {"KIMI_SUBAGENTS": "ten"}, clear=False):
-            os.environ.pop("KIMI_CODE_SUBAGENT", None)
-            prompt = kimi_main.render_system_prompt(task_config)
-
-        examples = prompt.split("<example>")[1:]
-        self.assertEqual(len(expected_roles), len(examples))
-        for role in expected_roles:
-            marker = f"**Primary sub-agent:** `{role}`"
-            self.assertEqual(
-                1,
-                sum(marker in example for example in examples),
-                f"expected one dedicated example for {role}",
-            )
-
-    def test_three_agent_prompt_includes_plan_example_without_plan_first(self):
+    def test_gen_prompt_includes_plan_example_without_plan_first(self):
         task_config = SimpleNamespace(
             agent_workspace="/tmp/toolathlon-three-example",
             system_prompts=SimpleNamespace(agent="Complete the task."),
         )
-        env = {"KIMI_SUBAGENTS": "three"}
-        env.pop("KIMI_PLAN_FIRST", None)
-        with mock.patch.dict(os.environ, env, clear=False):
-            os.environ.pop("KIMI_PLAN_FIRST", None)
-            os.environ.pop("KIMI_CODE_SUBAGENT", None)
+        with mock.patch.dict(os.environ, {"KIMI_CODE_SUBAGENT": "gen"}, clear=True):
             prompt = kimi_main.render_system_prompt(task_config)
 
         examples = prompt.split("<example>")[1:]
@@ -684,41 +636,18 @@ class KimiInfraHardeningTests(unittest.TestCase):
         self.assertNotIn("evidence-integrator", "".join(examples))
         self.assertNotIn("deliverable-auditor", "".join(examples))
 
-    def test_pre_completion_audit_is_a_fail_closed_gate(self):
-        rules = kimi_main.ORCHESTRATION_RULES
-        self.assertIn("AuditReport v1", rules)
-        self.assertIn("every criterion is PASS", rules)
-        self.assertIn("FAIL or UNKNOWN", rules)
-        self.assertIn("must not call `mcp__local__claim_done`", rules)
-
-        auditor = (
-            Path(kimi_main.HARNESS_DIR)
-            / "assets" / "subagents" / "deliverable-auditor.md"
-        ).read_text(encoding="utf-8")
-        self.assertIn("overall_verdict", auditor)
-        self.assertIn("only when every criterion is PASS", auditor)
-
-    def test_orchestration_splits_cross_profile_work_instead_of_broadening_roles(self):
-        rules = kimi_main.ORCHESTRATION_RULES
-        self.assertIn("producer and consumer phases", rules)
-        self.assertIn("Never broaden a profile's tool ceiling", rules)
-        self.assertIn("EvidencePacket v1", rules)
-        self.assertIn("DeliverableReceipt v1", rules)
-
-    def test_kimi_code_subagent_seven_overrides_ten_and_uses_seven_assets(self):
-        expected = list(kimi_main.SEVEN_SUBAGENTS)
+    def test_kimi_code_subagent_spec_uses_spec_assets(self):
+        expected = list(kimi_main.SPEC_SUBAGENTS)
         task_config = SimpleNamespace(
             agent_workspace="/tmp/toolathlon-seven-roster",
             system_prompts=SimpleNamespace(agent="Complete the task."),
         )
         env = {
-            "KIMI_CODE_SUBAGENT": "7",
-            "KIMI_SUBAGENTS": "ten",
+            "KIMI_CODE_SUBAGENT": "spec",
         }
-        with mock.patch.dict(os.environ, env, clear=False):
-            os.environ.pop("KIMI_PLAN_FIRST", None)
+        with mock.patch.dict(os.environ, env, clear=True):
             self.assertEqual(expected, kimi_main._active_subagents())
-            self.assertTrue(kimi_main._is_seven_roster())
+            self.assertTrue(kimi_main._is_spec_roster())
             prompt = kimi_main.render_system_prompt(task_config)
             academic = set(kimi_main.profile_tools_for_task(
                 "academic-literature-researcher",
@@ -729,8 +658,7 @@ class KimiInfraHardeningTests(unittest.TestCase):
                 ["excel", "local", "pptx"],
             ))
 
-        self.assertEqual(expected, kimi_main.SUBAGENT_PRESETS["7"])
-        self.assertEqual(expected, kimi_main.SUBAGENT_PRESETS["seven"])
+        self.assertEqual(expected, kimi_main.SUBAGENT_PRESETS["spec"])
         self.assertIn("office-report-builder", prompt)
         self.assertIn("external-workflow-operator", prompt)
         self.assertNotIn("workspace-data-engineer", prompt)
@@ -754,23 +682,29 @@ class KimiInfraHardeningTests(unittest.TestCase):
         self.assertIn("mcp__local__view_overlong_output", office)
         self.assertIn("mcp__pptx__create_presentation", office)
 
-    def test_kimi_subagents_seven_alias_matches_code_subagent(self):
-        with mock.patch.dict(os.environ, {"KIMI_SUBAGENTS": "seven"}, clear=False):
-            os.environ.pop("KIMI_CODE_SUBAGENT", None)
-            self.assertEqual(
-                list(kimi_main.SEVEN_SUBAGENTS),
-                kimi_main._active_subagents(),
-            )
-            self.assertTrue(kimi_main._is_seven_roster())
+    def test_none_disables_delegation_and_plan_first(self):
+        task = SimpleNamespace(agent_workspace="/workspace/test-task",
+                               system_prompts=SimpleNamespace(agent="Complete the task."))
+        with mock.patch.dict(os.environ, {"KIMI_CODE_SUBAGENT": "none", "KIMI_PLAN_FIRST": "1"}, clear=True):
+            prompt = kimi_main.render_system_prompt(task)
+            self.assertEqual(kimi_main._active_subagents(), [])
+            self.assertNotIn("Plan-First Protocol", prompt)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'main.md'
+                kimi_main.write_agentfile(str(path), prompt)
+                frontmatter = yaml.safe_load(path.read_text().split('---')[1])
+                self.assertEqual(frontmatter['subagents'], [])
+                self.assertNotIn('Task', frontmatter['tools'])
+                self.assertNotIn('AgentSwarm', frontmatter['tools'])
 
-    def test_seven_plan_first_omits_intern_handoff_contracts(self):
+    def test_spec_plan_first_omits_intern_handoff_contracts(self):
         task_config = SimpleNamespace(
             agent_workspace="/tmp/toolathlon-seven-plan-first",
             system_prompts=SimpleNamespace(agent="Complete the task."),
         )
         with mock.patch.dict(
             os.environ,
-            {"KIMI_CODE_SUBAGENT": "7", "KIMI_PLAN_FIRST": "1"},
+            {"KIMI_CODE_SUBAGENT": "spec", "KIMI_PLAN_FIRST": "1"},
             clear=False,
         ):
             prompt = kimi_main.render_system_prompt(task_config)
@@ -778,7 +712,6 @@ class KimiInfraHardeningTests(unittest.TestCase):
         self.assertNotIn("EvidencePacket v1", prompt)
         self.assertNotIn("evidence-integrator", prompt)
         self.assertIn("office-report-builder", prompt)
-
 
 if __name__ == "__main__":
     unittest.main()

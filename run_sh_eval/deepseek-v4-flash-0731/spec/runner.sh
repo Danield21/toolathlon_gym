@@ -16,6 +16,12 @@ PORT_LEASES=()
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
+overlay_path() {
+  local generated="$RUNTIME_ROOT/overlays/$1"
+  if [[ -f "$generated" ]]; then printf '%s\n' "$generated";
+  else printf '%s\n' "$PROJECT_ROOT/$1"; fi
+}
+
 need_bins() {
   for b in initdb pg_ctl pg_isready psql createdb enroot rsync setsid ss; do
     command -v "$b" >/dev/null 2>&1 || { echo "[error] missing: $b (conda activate toolathlon_gym?)" >&2; exit 1; }
@@ -45,12 +51,12 @@ need_bins() {
     exit 1
   }
   grep -q "Results are paginated and include summary totals" \
-    "${PROJECT_ROOT}/local_servers/mcp-canvas-lms/build/index.js" || {
+    "$(overlay_path local_servers/mcp-canvas-lms/build/index.js)" || {
       echo "[error] Canvas MCP build is stale; rebuild local_servers/mcp-canvas-lms before running." >&2
       exit 1
     }
   grep -q "Using PgCanvasRouter" \
-    "${PROJECT_ROOT}/local_servers/mcp-canvas-lms/build/client.js" || {
+    "$(overlay_path local_servers/mcp-canvas-lms/build/client.js)" || {
       echo "[error] Canvas MCP client build is stale; rebuild local_servers/mcp-canvas-lms before running." >&2
       exit 1
     }
@@ -466,7 +472,7 @@ run_one_task() {
     mkdir -p "$rootfs/run/toolathlon_pg" "$rootfs/workspace/utils/evaluation" "$rootfs/workspace/tasks/finalpool"
     while read -r src dst; do
       mkdir -p "$(dirname "$rootfs/$dst")"
-      cp -f "$PROJECT_ROOT/$src" "$rootfs/$dst" || return 1
+      cp -f "$(overlay_path "$src")" "$rootfs/$dst" || return 1
     done <<'OVERLAYS'
 utils/mcp/tool_servers.py workspace/utils/mcp/tool_servers.py
 utils/roles/task_agent.py workspace/utils/roles/task_agent.py
@@ -569,9 +575,6 @@ OVERLAYS
       -e "MCP_STDIO_TIMEOUT_MIN=${MCP_STDIO_TIMEOUT_MIN:-90}"
       -e "WC_REST_PORT=${WCPORT}"
     )
-    if [[ -v KIMI_SUBAGENTS ]]; then
-      ENV_ARGS+=(-e "KIMI_SUBAGENTS=${KIMI_SUBAGENTS}")
-    fi
     if [[ -v KIMI_CODE_SUBAGENT ]]; then
       ENV_ARGS+=(-e "KIMI_CODE_SUBAGENT=${KIMI_CODE_SUBAGENT}")
     fi

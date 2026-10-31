@@ -34,13 +34,13 @@ def integer(name, default, low=1, high=1_000_000):
 def prepare():
     preset = json.loads((HERE / "model.json").read_text())
     project = Path(os.environ.get("PROJECT_ROOT", HERE.parents[2])).resolve()
-    runtime = Path(os.environ.get("RUNTIME_ROOT", project.parent / "toolathlon_gym_eval_dockers")).resolve()
+    runtime = Path(os.environ.get("RUNTIME_ROOT", project.parent / ".local/enroot")).resolve()
     manifest = (HERE / "tasks.txt").read_bytes()
     require(hashlib.sha256(manifest).hexdigest() == _TASKS_SHA256, "MS-Eval tasks.txt was changed")
     tasks = manifest.decode().splitlines()
     require(len(tasks) == len(set(tasks)) == 166, "MS-Eval requires exactly 166 unique cases")
     require(all(re.fullmatch(r"[A-Za-z0-9_-]+", t) for t in tasks), "Invalid task ID")
-    oracle = Path(os.environ.get("ORACLE_TASK_DIR", project.parent / "metrics_eval_bw/oracle166")).resolve()
+    oracle = Path(os.environ.get("ORACLE_TASK_DIR", project.parent / "data/oracle166")).resolve()
     for task in tasks:
         case = project / "tasks/finalpool" / task
         require((case / "task_config.json").is_file(), f"Missing task_config.json: {task}")
@@ -99,10 +99,9 @@ def prepare():
             require(0 <= value <= (1 if name.endswith("TOP_P") else 2), f"Invalid {name}")
     require(env["KIMI_MODEL_THINKING_EFFORT"] in ("", "low", "medium", "high", "xhigh", "max", "adaptive"),
             "Invalid REASONING_EFFORT")
+    env["KIMI_CODE_SUBAGENT"] = {"sa": "none", "spec": "spec"}.get(preset["variant"], "gen")
     if preset["variant"] == "plan1st":
         env["KIMI_PLAN_FIRST"] = "1"
-    else:
-        env["KIMI_CODE_SUBAGENT"] = "7" if preset["variant"] == "spec" else "3"
     if preset["variant"] == "oracle":
         env["KIMI_TASK_MD_DIR"] = str(oracle)
     env["GATEWAY_MAX_OUTPUT_TOKENS"] = str(integer("MAX_OUTPUT_TOKENS", preset["max_output_tokens"], low=0))
@@ -113,8 +112,11 @@ def prepare():
     plan = {
         "suite": "MS-Eval", "cases": len(tasks),
         "model": env["MODEL_NAME"], "variant": preset["variant"],
+        "output_root": str(Path(os.environ.get("OUTPUT_ROOT",
+            HERE.parents[3] / "results" / HERE.parent.name / HERE.name)).resolve()),
         "api_format": env["KIMI_PROVIDER_TYPE"],
-        "subagent_roster": env.get("KIMI_CODE_SUBAGENT", "3 (default)"),
+        "subagent_roster": env["KIMI_CODE_SUBAGENT"],
+        "paradigm": "SA" if preset["variant"] == "sa" else "MAD-SAE",
         "plan_first": env.get("KIMI_PLAN_FIRST") == "1",
         "briefs": str(oracle if preset["variant"] == "oracle" else project / "tasks/finalpool"),
         "max_steps": int(env["MAX_STEPS"]), "timeout_s": int(env["KIMI_TASK_TIMEOUT_S"]),
@@ -146,13 +148,26 @@ def preflight(env):
             "Set AGENT_SQSH to a prepared Toolathlon image or AGENT_TEMPLATE to its unpacked rootfs")
     require((Path(env["PROJECT_ROOT"]) / "db/init.sql.gz").is_file(), "Missing db/init.sql.gz")
     require((Path(env["PROJECT_ROOT"]) / "kimi_harness/kimi_main.py").is_file(), "Missing benchmark harness")
+    overlays = Path(env["RUNTIME_ROOT"]) / "overlays"
+    def overlay_path(source):
+        generated = overlays / source
+        return generated if generated.is_file() else Path(env["PROJECT_ROOT"]) / source
     for line in (HERE / "runner.sh").read_text().split("<<'OVERLAYS'\n", 1)[1].split("\nOVERLAYS", 1)[0].splitlines():
         source = line.split()[0]
-        require((Path(env["PROJECT_ROOT"]) / source).is_file(), f"Missing benchmark runtime overlay: {source}")
+        require(overlay_path(source).is_file(), f"Missing benchmark runtime overlay: {source}; build with enroot/build.sh")
     for name, marker in [("index.js", "Results are paginated and include summary totals"),
                          ("client.js", "Using PgCanvasRouter")]:
-        content = (Path(env["PROJECT_ROOT"]) / "local_servers/mcp-canvas-lms/build" / name).read_text()
+        content = overlay_path("local_servers/mcp-canvas-lms/build/" + name).read_text()
         require(marker in content, "Rebuild the current Canvas MCP server before evaluation")
+    metadata = Path(env["RUNTIME_ROOT"]) / "runtime.json"
+    if metadata.is_file():
+        commits = json.loads(metadata.read_text())
+        for key, directory in [("gym", Path(env["PROJECT_ROOT"])),
+                               ("kimi", Path(env["PROJECT_ROOT"]).parent / "kimi-code")]:
+            actual = subprocess.check_output(["git", "-C", str(directory), "rev-parse", "HEAD"], text=True).strip()
+            require(commits[key] == actual, f"{key} source differs from the Enroot bundle; rebuild with enroot/build.sh")
+            dirty = subprocess.check_output(["git", "-C", str(directory), "diff", "HEAD", "--name-only"], text=True)
+            require(not dirty.strip(), f"{key} has tracked local edits; commit and rebuild before evaluation")
     require(bool(os.environ.get("API_KEY")), "Set API_KEY in config.env or the environment")
     url = urlsplit(os.environ.get("API_BASE_URL", ""))
     require(url.scheme in ("http", "https") and bool(url.hostname) and not url.username
@@ -162,7 +177,7 @@ def preflight(env):
 
 def launch(env, tasks, plan):
     run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + secrets.token_hex(3)
-    output = Path(os.environ.get("OUTPUT_ROOT", HERE / "results")).resolve() / run_id
+    output = Path(plan["output_root"]) / run_id
     output.mkdir(parents=True, exist_ok=False)
     (output / "run.json").write_text(json.dumps(plan, indent=2) + "\n")
     (output / "tasks.txt").write_text("\n".join(tasks) + "\n")
